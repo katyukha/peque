@@ -85,11 +85,11 @@ private import peque.exception: PequeException;
         return this;
     }
 
-    /// Return number of rows fetched.
-    auto nrows() @trusted { return PQntuples(_result._pg_result); }
+    /// Return number of rows (tuples) fetched.
+    auto ntuples() @trusted { return PQntuples(_result._pg_result); }
 
-    /// Return number of columns fetched.
-    auto ncols() @trusted { return PQnfields(_result._pg_result); }
+    /// Return number of columns (fields) fetched.
+    auto nfields() @trusted { return PQnfields(_result._pg_result); }
 
     /// Return status of last executed command;
     string cmdStatus() @trusted {
@@ -104,4 +104,17 @@ private import peque.exception: PequeException;
         return 0;
     }
 
+    /// Return name of column associated with provided colum index in result
+    Nullable!string fieldName(in int index) @trusted {
+        auto res = PQfname(_result._pg_result, index);
+        if (res)
+            return res.fromStringz.idup.nullable;
+        return Nullable!string.init;
+    }
+
+    /// Return number of column associated with provided column name in result
+    Nullable!int fieldNumber(in string name) @trusted {
+        auto res = PQfnumber(_result._pg_result, name.toStringz);
+        return res >=0 ? res.nullable : Nullable!int.init;
+    }
 }
