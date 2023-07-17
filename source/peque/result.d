@@ -118,7 +118,7 @@ package(peque) alias SafeRefCounted!(
         _result = ResultInternal(result);
     }
 
-    package(peque) void opAssign(Result res) {
+    void opAssign(Result res) {
         _result = res._result;
     }
 
