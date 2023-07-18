@@ -62,6 +62,7 @@ private import peque.result;
 
     /// Check status of connection
     auto status() @trusted { return PQstatus(_connection._pg_conn); }
+    //auto status() { return _connection.borrow!((auto ref conn) @trusted => PQstatus(conn._pg_conn)); }
 
     /// Return most recent error message
     auto errorMessage() @trusted {
