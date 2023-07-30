@@ -14,16 +14,33 @@ private import peque.pg_type;
  *
  */
 
-/// Convert postgresql's text type value to D string representation
-T convertTextTypeToD(T)(scope const char* data, in int length, in PGType pg_type) @trusted
-if (isSomeString!T) {
+/** Convert postgresql's text type value to D type T
+  *
+  * Params:
+  *     data = pointer to data received from libpq result.
+  *     length = length of data received from libpq result.
+  *     pg_type = postgresql type of received data
+  *
+  * Returns:
+  *     Data converted to type T
+  **/
+T convertTextTypeToD(T)(
+        scope const char* data,
+        in int length,
+        in PGType pg_type)
+@trusted if (isSomeString!T) {
+    // It seems that it is safe to convert any string postgres string types
+    // to string this way.
     return data ? cast(T)data[0 .. length].idup : "";
 }
 
-/// Convert postgresql's text type value to some scalar representation representation
-T convertTextTypeToD(T)(scope const char* data, in int length, in PGType pg_type) @trusted
-if (isScalarType!T || is(T == Date) || is(T == DateTime)) {
-    // Caset data to stirng to make conversions work
+/// ditto
+T convertTextTypeToD(T)(
+        scope const char* data,
+        in int length,
+        in PGType pg_type)
+@trusted if (isScalarType!T) {
+    // Cast data to stirng to make conversions work
     scope string sdata = data ? cast(string)data[0 .. length] : "";
 
     // We have to take into account postgres types here
@@ -38,7 +55,20 @@ if (isScalarType!T || is(T == Date) || is(T == DateTime)) {
             default:
                 assert(0, "Cannot parse boolean value from postgres: " ~ sdata);
         }
-    else static if (is(T == Date))
+    else
+        static assert(0, "Unsupported type " ~ T.stringof ~ "X: " ~ isIntegral!T);
+}
+
+/// ditto
+T convertTextTypeToD(T)(
+        scope const char* data,
+        in int length,
+        in PGType pg_type)
+@trusted if (is(T == Date) || is(T == DateTime)) {
+    // Cast data to stirng to make conversions work
+    scope string sdata = data ? cast(string)data[0 .. length] : "";
+
+    static if (is(T == Date))
         switch(pg_type) {
             case PGType.DATE:
                 return Date.fromISOExtString(sdata);
@@ -55,5 +85,5 @@ if (isScalarType!T || is(T == Date) || is(T == DateTime)) {
                 assert(0, "Cannot parse datetime value");
         }
     else
-        static assert(0, "Unsupported type " ~ T.stringof ~ "X: " ~ isIntegral!T);
+        static assert(0, "Unsupported type " ~ T.stringof ~ " X: " ~ isIntegral!T);
 }
