@@ -6,10 +6,6 @@ private import std.format: format;
 private import std.string: toStringz, fromStringz;
 private import std.algorithm: canFind;
 private import std.conv;
-private import std.datetime;
-
-private import std.traits:
-    isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint;
 
 private import peque.c;
 private import peque.pg_type;
@@ -160,7 +156,7 @@ package(peque) alias SafeRefCounted!(
             PGRES_EMPTY_QUERY,
         ];
         if (bad_states.canFind(status.statusType))
-            throw new PequeException(errorMessage);
+            throw new QueryError(errorMessage);
 
         return this;
     }

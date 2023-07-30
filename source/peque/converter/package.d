@@ -3,6 +3,7 @@ module peque.converter;
 
 private import std.traits:
     isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint;
+private import std.format;
 private import std.conv;
 private import std.datetime;
 
@@ -40,20 +41,17 @@ T convertTextTypeToD(T)(
         in int length,
         in PGType pg_type)
 @trusted if (isScalarType!T) {
-    // Cast data to stirng to make conversions work
-    scope string sdata = data ? cast(string)data[0 .. length] : "";
-
     // We have to take into account postgres types here
     static if (isIntegral!T || isFloatingPoint!T)
-        return sdata.to!T;
+        return data[0 .. length].to!T;
     else static if (isBoolean!T)
-        switch (sdata) {
+        switch (data[0 .. length]) {
             case "t":
                 return true;
             case "f":
                 return false;
             default:
-                assert(0, "Cannot parse boolean value from postgres: " ~ sdata);
+                assert(0, "Cannot parse boolean value from postgres: " ~ data[0 .. length].idup);
         }
     else
         static assert(0, "Unsupported type " ~ T.stringof ~ "X: " ~ isIntegral!T);
@@ -65,24 +63,21 @@ T convertTextTypeToD(T)(
         in int length,
         in PGType pg_type)
 @trusted if (is(T == Date) || is(T == DateTime)) {
-    // Cast data to stirng to make conversions work
-    scope string sdata = data ? cast(string)data[0 .. length] : "";
-
     static if (is(T == Date))
         switch(pg_type) {
             case PGType.DATE:
-                return Date.fromISOExtString(sdata);
+                return Date.fromISOExtString(data[0 .. length]);
             case PGType.TIMESTAMP:
-                return DateTime.fromISOExtString(sdata[0 .. 10] ~ "T" ~ sdata[11 .. $]).date;
+                return DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]).date;
             default:
-                assert(0, "Cannot parse date value");
+                assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
         }
     else static if (is(T == DateTime))
         switch(pg_type) {
             case PGType.TIMESTAMP:
-                return DateTime.fromISOExtString(sdata[0 .. 10] ~ "T" ~ sdata[11 .. $]);
+                return DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
             default:
-                assert(0, "Cannot parse datetime value");
+                assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
         }
     else
         static assert(0, "Unsupported type " ~ T.stringof ~ " X: " ~ isIntegral!T);

@@ -17,3 +17,7 @@ class ColNotExistsError : PequeException {
 class ConversionError : PequeException {
     mixin basicExceptionCtors;
 }
+
+class QueryError : PequeException {
+    mixin basicExceptionCtors;
+}

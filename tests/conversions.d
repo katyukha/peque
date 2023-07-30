@@ -1,5 +1,8 @@
+private import std.exception;
+
 private import peque.connection: Connection;
 private import peque.result: Result;
+private import peque.exception;
 
 
 @safe unittest {
@@ -48,6 +51,7 @@ private import peque.result: Result;
     assert(res.getValue(0, 0).get!float == 0.17827f);
     assert(res.getValue(0, 0).get!double == 0.17827);
 
+    // Conversions to date/time
     res = c.exec("SELECT '2023-07-17'::timestamp;");
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!string == "2023-07-17 00:00:00");
@@ -64,6 +68,20 @@ private import peque.result: Result;
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!string == "2023-07-17");
     assert(res.getValue(0, 0).get!Date == Date(2023, 7, 17));
+
+    /// Incorrect query
+    res = c.exec("SELECT '2023-07'::date;");
+    res.ensureQueryOk.assertThrown!QueryError;
 }
 
 
+// Separate case to test things that are not allowed in safe code
+@system unittest {
+    import std.datetime;
+    import core.exception: AssertError;
+
+    auto c = Connection("peque-test", "peque", "peque", "localhost", "5432");
+
+    auto res = c.exec("SELECT 42;");
+    res.getValue(0, 0).get!Date.assertThrown!AssertError;
+}
