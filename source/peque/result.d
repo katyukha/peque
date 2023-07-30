@@ -14,6 +14,7 @@ private import std.traits:
 private import peque.c;
 private import peque.pg_type;
 private import peque.exception;
+private import peque.converter;
 
 
 package(peque) enum ColFormat: int {
@@ -93,70 +94,24 @@ package(peque) alias SafeRefCounted!(
     }
 
     /// Convert value to string representation
-    T get(T)() @trusted if (isSomeString!T) {
-        // TODO: handle different string encondings (utf8, utf16, windows encondings).
+    T get(T)() {
         enforce!ConversionError(
             !isNull,
             "Cannot read null value as string.");
         enforce!ConversionError(
             getFormat == ColFormat.text,
-            "The postgres value is not text.");
-        const char* val = PQgetvalue(
-            _result._pg_result,
-            _row_number,
-            _col_number);
-        return val ? cast(T)val[0 .. getLength].idup : "";
-    }
+            "At the moment, peque supports only deserialization of postgres text types.");
 
-    T get(T)() if (isScalarType!T || is(T == Date) || is(T == DateTime)) {
-        // TODO: handle different string encondings (utf8, utf16, windows encondings).
-        enforce!ConversionError(
-            !isNull,
-            "Cannot read null value as string.");
-        enforce!ConversionError(
-            getFormat == ColFormat.text,
-            "The postgres value is not text.");
-        scope string sval = _result.borrow!((auto ref res) @trusted {
-            const char* val = PQgetvalue(
+        // get original postgresql value
+        scope const char* val = _result.borrow!((auto ref res) @trusted {
+            return PQgetvalue(
                 res._pg_result,
                 _row_number,
                 _col_number);
-            return val ? cast(string)val[0 .. getLength] : "";
         });
-
-        // We have to take into account postgres types here
-
-        static if (isIntegral!T || isFloatingPoint!T)
-            return sval.to!T;
-        else static if (isBoolean!T)
-            switch (sval) {
-                case "t":
-                    return true;
-                case "f":
-                    return false;
-                default:
-                    assert(0, "Cannot parse boolean value from postgres: " ~ sval);
-            }
-        else static if (is(T == Date))
-            switch(getType) {
-                case PGType.DATE:
-                    return Date.fromISOExtString(sval);
-                case PGType.TIMESTAMP:
-                    return DateTime.fromISOExtString(sval[0 .. 10] ~ "T" ~ sval[11 .. $]).date;
-                default:
-                    assert(0, "Cannot parse date value");
-            }
-        else static if (is(T == DateTime))
-            switch(getType) {
-                case PGType.TIMESTAMP:
-                    return DateTime.fromISOExtString(sval[0 .. 10] ~ "T" ~ sval[11 .. $]);
-                default:
-                    assert(0, "Cannot parse datetime value");
-            }
-        else
-            static assert(0, "Unsupported type " ~ T.stringof ~ "X: " ~ isIntegral!T);
+        // Return converted value
+        return convertTextTypeToD!T(val, getLength, getType);
     }
-
 }
 
 /** This struct represents result of query and allows to fetch data received
