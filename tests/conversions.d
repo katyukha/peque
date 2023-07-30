@@ -1,4 +1,5 @@
 private import std.exception;
+private import std.conv;
 
 private import peque.connection: Connection;
 private import peque.result: Result;
@@ -15,11 +16,23 @@ private import peque.exception;
     // Test get value
     auto res = c.exec("SELECT NULL");
     assert(res.getValue(0, 0).isNull);
+    res.getValue(0, 0).get!int.assertThrown!ConversionError;
+    assert(res.getValue(0, 0).get!int(42) == 42);
+    assert(res.getValue(0, 0).get!string("42") == "42");
+
     res = c.exec("SELECT 42");
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!string == "42");
     assert(res.getValue(0, 0).get!int == 42);
     assert(res.getValue(0, 0).get!byte == cast(byte)42);
+
+    res = c.exec("SELECT 7842");
+    assert(!res.getValue(0, 0).isNull);
+    assert(res.getValue(0, 0).get!string == "7842");
+    assert(res.getValue(0, 0).get!int == 7842);
+
+    // 7842 is too big for type byt, thus ensure that error is thrown
+    res.getValue(0, 0).get!byte.assertThrown!ConvOverflowException;
 
     res = c.exec("SELECT 'hello world!'");
     assert(!res.getValue(0, 0).isNull);

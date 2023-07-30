@@ -89,11 +89,8 @@ package(peque) alias SafeRefCounted!(
         return cast(ColFormat)PQfformat(_result._pg_result, _col_number);
     }
 
-    /// Convert value to string representation
-    T get(T)() {
-        enforce!ConversionError(
-            !isNull,
-            "Cannot read null value as string.");
+    /// Implementation of get value
+    private T getImpl(T)() {
         enforce!ConversionError(
             getFormat == ColFormat.text,
             "At the moment, peque supports only deserialization of postgres text types.");
@@ -108,6 +105,23 @@ package(peque) alias SafeRefCounted!(
         // Return converted value
         return convertTextTypeToD!T(val, getLength, getType);
     }
+
+    /// Convert value to string representation
+    T get(T)() {
+        enforce!ConversionError(
+            !isNull,
+            "Attempt to call 'get' on NULL value. " ~
+            "Check value via .isNull method befor calling get.");
+        return getImpl!T;
+    }
+
+    /// ditto
+    T get(T)(in return T defaultValue) {
+        if (isNull)
+            return defaultValue;
+        return get!T;
+    }
+
 }
 
 /** This struct represents result of query and allows to fetch data received
