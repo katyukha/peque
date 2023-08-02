@@ -7,8 +7,8 @@ private import std.string: toStringz, fromStringz;
 private import std.algorithm: canFind;
 
 private import peque.c;
-private import peque.exception: PequeException;
-
+private import peque.exception;
+private import peque.pg_type;
 private import peque.result;
 
 /// Connection to PostgreSQL database.
@@ -47,7 +47,7 @@ private import peque.result;
 
     this(in string conn_info) {
         _connection = ConnectionInternal(conn_info);
-        enforce!PequeException(
+        enforce!ConnectionError(
             status == CONNECTION_OK,
             "Cannot connect to db: %s!".format(errorMessage));
     }
@@ -61,19 +61,101 @@ private import peque.result;
     }
 
     /// Check status of connection
-    auto status() @trusted { return PQstatus(_connection._pg_conn); }
-    //auto status() { return _connection.borrow!((auto ref conn) @trusted => PQstatus(conn._pg_conn)); }
+    //auto status() @trusted { return PQstatus(_connection._pg_conn); }
+    auto status() { return _connection.borrow!((auto ref conn) @trusted => PQstatus(conn._pg_conn)); }
 
     /// Return most recent error message
     auto errorMessage() @trusted {
         return PQerrorMessage(_connection._pg_conn).fromStringz.idup;
     }
 
-    auto exec(in string command) @trusted {
+    /** Escape value as postgresql string
+      *
+      * Params:
+      *     value = string value to escape
+      * Returns:
+      *     Escaped string value, but without surrounding single quotes.
+      **/
+    string escapeString(in string value) @trusted {
+        return _connection.borrow!((auto ref conn) @trusted {
+            int error;
+            char[] buf = new char[value.length * 2];
+            auto size = PQescapeStringConn(
+                conn._pg_conn,
+                &buf[0],      // to
+                &value[0],   // from
+                value.length,
+                &error);
+            enforce!QueryEscapingError(
+                error == 0,
+                "Cannot escape string %s: %s".format(
+                    value, errorMessage));
+            return buf[0 .. size].idup;
+        });
+    }
+
+    /** Execute query
+      *
+      * Params:
+      *     query = SQL query to execute
+      *
+      * Returns: PequeResult
+      **/
+    auto exec(in string query) {
         return Result(
-            PQexec(_connection._pg_conn, command.toStringz)
+            _connection.borrow!((auto ref conn) @trusted {
+                return PQexec(_connection._pg_conn, query.toStringz);
+            })
         );
+    }
+
+    auto execParams(T...)(in string query, T params) {
+        import std.meta;
+        import std.range: iota;
+        import std.conv;
+        import std.string: representation;
+        import std.traits:
+            isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint;
+        import peque.converter;
+
+        uint[T.length] param_types;
+        const(char)*[T.length] param_values;
+        int[T.length] param_lengths;
+        int[T.length] param_formats;
+
+        // Need it here to keep reference for value
+        string[T.length] values;
+
+        static foreach(i; T.length.iota) {
+            values[i] = params[i].to!(string);
+            param_values[i] = cast(const(char)*)values[i].toStringz;
+            param_types[i] = PGType.TEXT;
+            param_lengths[i] = values[i].length.to!int;
+            param_formats[i] = 0;
+        }
+
+        //auto pg_result = _connection.borrow!((auto ref conn) @trusted {
+        auto pg_result = (auto ref conn) @trusted {
+             return PQexecParams(
+                     conn._pg_conn,
+                     query.toStringz,
+                     T.length,  // param length
+                     param_types.ptr,
+                     param_values.ptr,
+                     param_lengths.ptr,
+                     param_formats.ptr,
+                     0,  // text result format
+            );
+        }(_connection);
+        //});
+        return Result(pg_result);
     }
 }
 
+
+@safe unittest {
+    import std.exception;
+
+    Connection("some bad connection string").assertThrown!ConnectionError;
+}
 

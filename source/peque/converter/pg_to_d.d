@@ -24,7 +24,7 @@ T convertTextTypeToD(T)(
         scope const char* data,
         in int length,
         in PGType pg_type)
-@trusted if (isSomeString!T) {
+pure @trusted if (isSomeString!T) {
     // It seems that it is safe to convert any string postgres string types
     // to string this way.
     return data ? cast(T)data[0 .. length].idup : "";
@@ -35,7 +35,7 @@ T convertTextTypeToD(T)(
         scope const char* data,
         in int length,
         in PGType pg_type)
-@trusted if (isScalarType!T) {
+pure @trusted if (isScalarType!T) {
     // We have to take into account postgres types here
     static if (isIntegral!T || isFloatingPoint!T)
         return data[0 .. length].to!T;
@@ -49,7 +49,7 @@ T convertTextTypeToD(T)(
                 assert(0, "Cannot parse boolean value from postgres: " ~ data[0 .. length].idup);
         }
     else
-        static assert(0, "Unsupported type " ~ T.stringof ~ "X: " ~ isIntegral!T);
+        static assert(0, "Unsupported scalar type " ~ T.stringof);
 }
 
 /// ditto
@@ -57,24 +57,48 @@ T convertTextTypeToD(T)(
         scope const char* data,
         in int length,
         in PGType pg_type)
-@trusted if (is(T == Date) || is(T == DateTime)) {
-    static if (is(T == Date))
-        switch(pg_type) {
-            case PGType.DATE:
-                return Date.fromISOExtString(data[0 .. length]);
-            case PGType.TIMESTAMP:
-                return DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]).date;
-            default:
-                assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
-        }
-    else static if (is(T == DateTime))
-        switch(pg_type) {
-            case PGType.TIMESTAMP:
-                return DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
-            default:
-                assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
-        }
-    else
-        static assert(0, "Unsupported type " ~ T.stringof ~ " X: " ~ isIntegral!T);
+pure @trusted if (is(T == Date)) {
+    switch(pg_type) {
+        case PGType.DATE:
+            return Date.fromISOExtString(data[0 .. length]);
+        case PGType.TIMESTAMP:
+        case PGType.TIMESTAMPTZ:
+            return Date.fromISOExtString(data[0 .. 10]);
+        default:
+            assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+    }
 }
 
+/// ditto
+T convertTextTypeToD(T)(
+        scope const char* data,
+        in int length,
+        in PGType pg_type)
+pure @trusted if (is(T == DateTime)) {
+        import std.datetime.timezone;
+    switch(pg_type) {
+        case PGType.TIMESTAMP:
+        case PGType.TIMESTAMPTZ:
+            return DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]);
+        default:
+            assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+    }
+}
+
+/// ditto
+T convertTextTypeToD(T)(
+        scope const char* data,
+        in int length,
+        in PGType pg_type)
+//pure
+@trusted if (is(T == SysTime)) {
+    import std.datetime.timezone;
+    switch(pg_type) {
+        case PGType.TIMESTAMP:
+            return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
+        case PGType.TIMESTAMPTZ:
+            return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
+        default:
+            assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+    }
+}

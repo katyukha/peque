@@ -6,6 +6,10 @@ class PequeException : Exception {
     mixin basicExceptionCtors;
 }
 
+class ConnectionError : PequeException {
+    mixin basicExceptionCtors;
+}
+
 class RowNotExistsError : PequeException {
     mixin basicExceptionCtors;
 }
@@ -19,5 +23,9 @@ class ConversionError : PequeException {
 }
 
 class QueryError : PequeException {
+    mixin basicExceptionCtors;
+}
+
+class QueryEscapingError : PequeException {
     mixin basicExceptionCtors;
 }

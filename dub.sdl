@@ -6,7 +6,7 @@ license "MPL-2"
 target "library"
 libs "pq"
 
-dflags "-preview=dip1000"
+dflags "-preview=dip1000" "-preview=in"
 
 configuration "library" {
     targetType "library"

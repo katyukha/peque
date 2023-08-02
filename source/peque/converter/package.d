@@ -1,4 +1,4 @@
-/// This module defines functions used to convert libpq values to d types
+/// This module defines functions used to convert libpq values to and from d types
 module peque.converter;
 
 
