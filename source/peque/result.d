@@ -124,6 +124,34 @@ package(peque) alias SafeRefCounted!(
 
 }
 
+/** Struct that represents single row from result
+  **/
+@safe struct ResultRow {
+    private ResultInternal _result;
+    private int _row_number;
+
+    @disable this(this);
+
+    private this(ResultInternal result, in int row_number) {
+        _result = result;
+        _row_number = row_number;
+    }
+
+    auto opIndex(in int col_number) {
+        return ResultValue(_result, _row_number, col_number);
+    }
+
+    auto opIndex(in string col_name) {
+        int col_number = _result.borrow!((auto ref res) @trusted {
+            return PQfnumber(res._pg_result, col_name.toStringz);
+        });
+        enforce!ColNotExistsError(
+            col_number >= 0,
+            "Column %s does not exists in result!".format(col_name));
+        return ResultValue(_result, _row_number, col_number);
+    }
+}
+
 /** This struct represents result of query and allows to fetch data received
   * from postgresql
   **/
@@ -224,5 +252,25 @@ package(peque) alias SafeRefCounted!(
             col_number >= 0 && col_number < ntuples,
             "Row %s does not exists in result!".format(row_number));
         return ResultValue(_result, row_number, col_number);
+    }
+
+    /** Get single row from result by index
+      *
+      * Params:
+      *     row_number = number of row to get
+      **/
+    auto getRow(in int row_number) {
+        enforce!RowNotExistsError(
+            row_number >= 0 && row_number < ntuples,
+            "Row %s does not exists in result!".format(row_number));
+        return ResultRow(_result, row_number);
+    }
+
+    auto opIndex(in int row_number) {
+        return getRow(row_number);
+    }
+
+    auto opIndex(in int row_number, in int col_number) {
+        return getValue(row_number, col_number);
     }
 }

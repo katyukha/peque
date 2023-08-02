@@ -136,3 +136,74 @@ private import peque.exception;
     auto res = c.exec("SELECT 42;");
     res.getValue(0, 0).get!Date.assertThrown!AssertError;
 }
+
+
+/// Example of read / write different field types from / to table
+@safe unittest {
+    import std.datetime;
+    auto c = Connection("peque-test", "peque", "peque", "localhost", "5432");
+
+    // Set timezone for this session
+    c.exec("SET TIME ZONE '+4'");
+
+    c.exec("
+        DROP TABLE IF EXISTS peque_test_conv;
+        CREATE TABLE peque_test_conv (
+            id               serial,
+            code             char(20),
+            title            varchar(40),
+            description      text,
+            data_int2        int2,
+            data_int4        int4,
+            data_int8        int8,
+            data_float       real,
+            data_double      double precision,
+            data_date        date,
+            data_dt          timestamp,
+            data_dt_tz       timestamp with time zone,
+            data_bool        boolean
+        );
+        INSERT INTO peque_test_conv(
+            code, title, description,
+            data_int2, data_int4, data_int8,
+            data_float, data_double,
+            data_date, data_dt, data_dt_tz,
+            data_bool)
+        VALUES (
+            'test-code-1',
+            'Test 1',
+            'Some test data should be here',
+            31000,
+            2111222333,
+            9223372036854775800,
+            6.123456,
+            15.12345678901234,
+            '2023-08-02',
+            '2023-08-02 23:13:42.1234560',
+            '2023-08-02 23:13:42.123456+05',
+            true
+        );
+    ").ensureQueryOk;
+
+    auto res = c.execParams("
+        SELECT * FROM peque_test_conv WHERE code = $1
+    ", "test-code-1").ensureQueryOk;
+    assert(res.ntuples == 1);
+    assert(res[0]["code"].getLength == 20);
+    assert(res[0]["code"].get!string == "test-code-1         ");
+    assert(res[0]["title"].get!string == "Test 1");
+    assert(res[0]["description"].get!string == "Some test data should be here");
+    assert(res[0]["data_int2"].get!short == 31000);
+    assert(res[0]["data_int4"].get!int == 2111222333);
+    assert(res[0]["data_int8"].get!long == 9223372036854775800);
+    assert(res[0]["data_float"].get!string == "6.123456");
+    assert(res[0]["data_float"].get!float == 6.123456f);
+    assert(res[0]["data_double"].get!string == "15.12345678901234");
+    assert(res[0]["data_double"].get!double == 15.12345678901234);
+    assert(res[0]["data_date"].get!Date == Date(2023, 8, 2));
+    assert(res[0]["data_dt"].get!DateTime == DateTime(2023, 8, 2, 23, 13, 42));
+    assert(res[0]["data_dt_tz"].get!SysTime == SysTime(DateTime(2023, 8, 2, 22, 13, 42), hnsecs(1_234_560), new immutable(SimpleTimeZone)(4.hours)));
+    assert(res[0]["data_dt_tz"].get!SysTime.utcOffset == 4.hours);
+    assert(res[0]["data_bool"].get!bool == true);
+
+}
