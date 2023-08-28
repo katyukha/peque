@@ -3,3 +3,4 @@ module peque.converter;
 
 
 public import peque.converter.pg_to_d;
+public import peque.converter.d_to_pg;

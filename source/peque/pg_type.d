@@ -9,8 +9,11 @@ import peque.c: Oid;
   **/
 enum PGType : Oid {
     // TODO: rename to avoid possible conflicts with libpq
-    // Generate for postgres 14.
+    // Generated for postgres 14.
     // See: tools/fetch_type_oids.sql script
+
+    GUESS = 0,  // Special peque value to indicate that type is not provided
+
     BOOL = 16,
     BYTEA = 17,
     CHAR = 18,

@@ -110,12 +110,8 @@ private import peque.result;
     }
 
     auto execParams(T...)(in string query, T params) {
-        import std.meta;
         import std.range: iota;
         import std.conv;
-        import std.string: representation;
-        import std.traits:
-            isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint;
         import peque.converter;
 
         uint[T.length] param_types;
@@ -123,19 +119,32 @@ private import peque.result;
         int[T.length] param_lengths;
         int[T.length] param_formats;
 
-        // Need it here to keep reference for value
-        string[T.length] values;
+        /* We have to convert all params to PGValue and keep references for them
+         * while PQexecParams completed.
+         *
+         * This is done via string mixin to avoid copying elements of
+         * array of PGValues.
+         */
+        PGValue[T.length] values = mixin(() {
+            static if (T.length == 0)
+                return "[]";
 
+            auto r = "[convertToPG!(T[0])(params[0])";
+            static if (T.length > 1)
+                static foreach(i; iota(1, T.length))
+                    r ~= ", convertToPG!(T[" ~ i.to!string ~ "])(params[" ~ i.to!string ~ "]) ";
+            r ~= "]";
+            return r;
+        }());
         static foreach(i; T.length.iota) {
-            values[i] = params[i].to!(string);
-            param_values[i] = cast(const(char)*)values[i].toStringz;
-            param_types[i] = PGType.TEXT;
-            param_lengths[i] = values[i].length.to!int;
-            param_formats[i] = 0;
+            param_values[i] = &values[i].value[0];
+            param_types[i] = values[i].type;
+            param_lengths[i] = values[i].length;
+            param_formats[i] = values[i].format;
         }
 
-        //auto pg_result = _connection.borrow!((auto ref conn) @trusted {
-        auto pg_result = (auto ref conn) @trusted {
+        auto pg_result = _connection.borrow!((auto ref conn) @trusted {
+        //auto pg_result = (auto ref conn) @trusted {
              return PQexecParams(
                      conn._pg_conn,
                      query.toStringz,
@@ -146,8 +155,8 @@ private import peque.result;
                      param_formats.ptr,
                      0,  // text result format
             );
-        }(_connection);
-        //});
+        //}(_connection);
+        });
         return Result(pg_result);
     }
 }

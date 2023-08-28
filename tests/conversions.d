@@ -95,6 +95,27 @@ private import peque.exception;
     assert(res.getValue(0, 0).get!SysTime == SysTime(DateTime(2023, 7, 17, 12, 42, 18), new immutable(SimpleTimeZone)(4.hours)));
     assert(res.getValue(0, 0).get!SysTime.utcOffset == 4.hours);
 
+    /// Conversions to array types
+    res = c.exec("SELECT ARRAY[1,2,3,4]").ensureQueryOk;
+    assert(res[0][0].get!(int[]) == [1, 2, 3, 4]);
+    assert(res[0][0].get!string == "{1,2,3,4}");
+
+    res = c.exec("SELECT ARRAY[1.1,2.2,3.3,4.4]").ensureQueryOk;
+    assert(res[0][0].get!(float[]) == [1.1f, 2.2f, 3.3f, 4.4f]);
+    assert(res[0][0].get!string == "{1.1,2.2,3.3,4.4}");
+
+    res = c.exec("SELECT ARRAY['str1', 'str2']").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == ["str1", "str2"]);
+    assert(res[0][0].get!string == "{str1,str2}");
+
+    res = c.exec("SELECT ARRAY['str1,24', 'str2 \"78\"', 'back\\slashed', 'simple']").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == ["str1,24", "str2 \"78\"", "back\\slashed", "simple"]);
+    assert(res[0][0].get!string == "{\"str1,24\",\"str2 \\\"78\\\"\",\"back\\\\slashed\",simple}");
+
+    res = c.exec("SELECT ARRAY['2023-08-17'::date, '2023-09-12'::date]").ensureQueryOk;
+    assert(res[0][0].get!(Date[]) == [Date(2023, 8, 17), Date(2023, 9, 12)]);
+    assert(res[0][0].get!string == "{2023-08-17,2023-09-12}");
+
     /// Incorrect query
     res = c.exec("SELECT '2023-07'::date;");
     res.ensureQueryOk.assertThrown!QueryError;
@@ -206,4 +227,53 @@ private import peque.exception;
     assert(res[0]["data_dt_tz"].get!SysTime.utcOffset == 4.hours);
     assert(res[0]["data_bool"].get!bool == true);
 
+    auto test_1_id = res[0]["id"].get!int;
+
+    res = c.execParams("
+            INSERT INTO peque_test_conv(
+                code, title, description,
+                data_int2, data_int4, data_int8,
+                data_float, data_double,
+                data_date, data_dt, data_dt_tz,
+                data_bool)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING id;
+        ",
+        /* --- Parameters --- */
+        "test-code-2",
+        "Test 2",
+        "Some new test data",
+        21130,
+        1222333444,
+        8113322445522445566,
+        7.54321f,
+        13.84277582775485,
+        Date(2023, 8, 3),
+        DateTime(2023, 8, 3, 23, 10, 42),
+        SysTime(DateTime(2023, 8, 3, 22, 10, 42), hnsecs(1_234_560), new immutable(SimpleTimeZone)(4.hours)),
+        false,
+    ).ensureQueryOk;
+    auto test_2_id = res[0]["id"].get!int;
+
+    assert(test_2_id >= test_1_id);
+
+    // Try to read inserted data
+    res = c.execParams("SELECT * FROM peque_test_conv WHERE id = $1", test_2_id);
+    assert(res.ntuples == 1);
+    assert(res[0]["code"].getLength == 20);
+    assert(res[0]["code"].get!string == "test-code-2         ");
+    assert(res[0]["title"].get!string == "Test 2");
+    assert(res[0]["description"].get!string == "Some new test data");
+    assert(res[0]["data_int2"].get!short == 21130);
+    assert(res[0]["data_int4"].get!int == 1222333444);
+    assert(res[0]["data_int8"].get!long == 8113322445522445566);
+    assert(res[0]["data_float"].get!string == "7.54321");
+    assert(res[0]["data_float"].get!float == 7.54321f);
+    assert(res[0]["data_double"].get!string == "13.84277582775485");
+    assert(res[0]["data_double"].get!double == 13.84277582775485);
+    assert(res[0]["data_date"].get!Date == Date(2023, 8, 3));
+    assert(res[0]["data_dt"].get!DateTime == DateTime(2023, 8, 3, 23, 10, 42));
+    assert(res[0]["data_dt_tz"].get!SysTime == SysTime(DateTime(2023, 8, 3, 22, 10, 42), hnsecs(1_234_560), new immutable(SimpleTimeZone)(4.hours)));
+    assert(res[0]["data_dt_tz"].get!SysTime.utcOffset == 4.hours);
+    assert(res[0]["data_bool"].get!bool == false);
 }
