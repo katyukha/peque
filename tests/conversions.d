@@ -112,9 +112,27 @@ private import peque.exception;
     assert(res[0][0].get!(string[]) == ["str1,24", "str2 \"78\"", "back\\slashed", "simple"]);
     assert(res[0][0].get!string == "{\"str1,24\",\"str2 \\\"78\\\"\",\"back\\\\slashed\",simple}");
 
+    res = c.execParams("SELECT ARRAY[True, False]").ensureQueryOk;
+    assert(res.getValue(0, 0).get!string == "{t,f}");
+    assert(res.getValue(0, 0).get!(bool[]) == [true, false]);
+
     res = c.exec("SELECT ARRAY['2023-08-17'::date, '2023-09-12'::date]").ensureQueryOk;
     assert(res[0][0].get!(Date[]) == [Date(2023, 8, 17), Date(2023, 9, 12)]);
     assert(res[0][0].get!string == "{2023-08-17,2023-09-12}");
+
+    res = c.exec("SELECT ARRAY['2023-08-17 08:09:10'::timestamp, '2023-09-12 11:12:13'::timestamp]").ensureQueryOk;
+    assert(res[0][0].get!(Date[]) == [Date(2023, 8, 17), Date(2023, 9, 12)]);
+    assert(res[0][0].get!(DateTime[]) == [DateTime(2023, 8, 17, 8, 9, 10), DateTime(2023, 9, 12, 11, 12, 13)]);
+    assert(res[0][0].get!string == "{\"2023-08-17 08:09:10\",\"2023-09-12 11:12:13\"}");
+
+    res = c.exec("SELECT ARRAY['2023-08-17 08:09:10+05'::timestamptz, '2023-09-12 11:12:13+05'::timestamptz]").ensureQueryOk;
+    assert(res[0][0].get!(Date[]) == [Date(2023, 8, 17), Date(2023, 9, 12)]);
+    assert(res[0][0].get!(DateTime[]) == [DateTime(2023, 8, 17, 7, 9, 10), DateTime(2023, 9, 12, 10, 12, 13)]);
+    assert(res[0][0].get!(SysTime[]) == [
+        SysTime(DateTime(2023, 8, 17, 7, 9, 10), new immutable(SimpleTimeZone)(4.hours)),
+        SysTime(DateTime(2023, 9, 12, 10, 12, 13), new immutable(SimpleTimeZone)(4.hours)),
+    ]);
+    assert(res[0][0].get!string == "{\"2023-08-17 07:09:10+04\",\"2023-09-12 10:12:13+04\"}");
 
     /// Incorrect query
     res = c.exec("SELECT '2023-07'::date;");
@@ -140,10 +158,68 @@ private import peque.exception;
     assert(res.getValue(0, 0).get!string == "9223372036854775899");
     assert(res.getValue(0, 0).get!ulong == 9223372036854775899);
 
+    res = c.execParams("SELECT $1", 0.1782788489);
+    assert(!res.getValue(0, 0).isNull);
+    assert(res.getValue(0, 0).get!float == 0.1782788489f);
+    assert(res.getValue(0, 0).get!double == 0.1782788489);
+    //assert(res.getValue(0, 0).get!string == "0.1782788489");
+
+    //res = c.execParams("SELECT $1", 0.17827f);
+    //assert(!res.getValue(0, 0).isNull);
+    //assert(res.getValue(0, 0).get!string == "0.17827");
+    //assert(res.getValue(0, 0).get!float == 0.1782700000f);
+    //assert(res.getValue(0, 0).get!double == 0.1782700000);
+
     res = c.execParams("SELECT $1::timestamp", Date(2023, 7, 17)).ensureQueryOk;
     assert(res.getValue(0, 0).get!string == "2023-07-17 00:00:00");
     assert(res.getValue(0, 0).get!Date == Date(2023, 7, 17));
     assert(res.getValue(0, 0).get!DateTime == DateTime(2023, 7, 17, 0, 0, 0));
+
+    /// Test array conversions
+    res = c.execParams("SELECT $1", [1, 2, 3, 4, 5]).ensureQueryOk;
+    assert(res.getValue(0, 0).get!string == "{1,2,3,4,5}");
+    assert(res.getValue(0, 0).get!(int[]) == [1, 2, 3, 4, 5]);
+
+    res = c.execParams("SELECT $1", [true, false]).ensureQueryOk;
+    assert(res.getValue(0, 0).get!string == "{t,f}");
+    assert(res.getValue(0, 0).get!(bool[]) == [true, false]);
+
+    res = c.execParams("SELECT $1", [1, 2, 3, 4]).ensureQueryOk;
+    assert(res[0][0].get!(int[]) == [1, 2, 3, 4]);
+    assert(res[0][0].get!string == "{1,2,3,4}");
+
+    res = c.execParams("SELECT $1", [1.1f, 2.2f, 3.3f, 4.4f]).ensureQueryOk;
+    assert(res[0][0].get!(float[]) == [1.1f, 2.2f, 3.3f, 4.4f]);
+    //assert(res[0][0].get!string == "{1.1,2.2,3.3,4.4}");
+
+    res = c.execParams("SELECT $1", ["str1", "str2"]).ensureQueryOk;
+    assert(res[0][0].get!(string[]) == ["str1", "str2"]);
+    assert(res[0][0].get!string == "{str1,str2}");
+
+    res = c.execParams("SELECT $1", ["str1,24", "str2 \"78\"", "back\\slashed", "simple"]).ensureQueryOk;
+    assert(res[0][0].get!(string[]) == ["str1,24", "str2 \"78\"", "back\\slashed", "simple"]);
+    assert(res[0][0].get!string == "{\"str1,24\",\"str2 \\\"78\\\"\",\"back\\\\slashed\",simple}");
+
+    res = c.execParams("SELECT $1", [Date(2023, 8, 17), Date(2023, 9, 12)]).ensureQueryOk;
+    assert(res[0][0].get!(Date[]) == [Date(2023, 8, 17), Date(2023, 9, 12)]);
+    assert(res[0][0].get!string == "{2023-08-17,2023-09-12}");
+
+    res = c.execParams("SELECT $1", [DateTime(2023, 8, 17, 8, 9, 10), DateTime(2023, 9, 12, 11, 12, 13)]).ensureQueryOk;
+    assert(res[0][0].get!(Date[]) == [Date(2023, 8, 17), Date(2023, 9, 12)]);
+    assert(res[0][0].get!(DateTime[]) == [DateTime(2023, 8, 17, 8, 9, 10), DateTime(2023, 9, 12, 11, 12, 13)]);
+    assert(res[0][0].get!string == "{\"2023-08-17 08:09:10\",\"2023-09-12 11:12:13\"}");
+
+    res = c.execParams("SELECT $1", [
+        SysTime(DateTime(2023, 8, 17, 7, 9, 10), new immutable(SimpleTimeZone)(4.hours)),
+        SysTime(DateTime(2023, 9, 12, 10, 12, 13), new immutable(SimpleTimeZone)(4.hours)),
+    ]).ensureQueryOk;
+    assert(res[0][0].get!(Date[]) == [Date(2023, 8, 17), Date(2023, 9, 12)]);
+    assert(res[0][0].get!(DateTime[]) == [DateTime(2023, 8, 17, 7, 9, 10), DateTime(2023, 9, 12, 10, 12, 13)]);
+    assert(res[0][0].get!(SysTime[]) == [
+        SysTime(DateTime(2023, 8, 17, 7, 9, 10), new immutable(SimpleTimeZone)(4.hours)),
+        SysTime(DateTime(2023, 9, 12, 10, 12, 13), new immutable(SimpleTimeZone)(4.hours)),
+    ]);
+    assert(res[0][0].get!string == "{\"2023-08-17 07:09:10+04\",\"2023-09-12 10:12:13+04\"}");
 }
 
 

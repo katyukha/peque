@@ -84,6 +84,7 @@ T convertTextTypeToD(T)(
 pure @trusted if (is(T == DateTime)) {
         import std.datetime.timezone;
     switch(pg_type) {
+        case PGType.GUESS:
         case PGType.TIMESTAMP:
         case PGType.TIMESTAMPTZ:
             return DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]);
@@ -101,6 +102,16 @@ T convertTextTypeToD(T)(
 @trusted if (is(T == SysTime)) {
     import std.datetime.timezone;
     switch(pg_type) {
+        case PGType.GUESS:
+            enforce!ConversionError(
+                length >= 19,
+                "Cannot parse value '%s'. It is not valid timestamp");
+            if (length == 19)
+                // it seems that it is timestamp with timezone
+                return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
+            else
+                // it seems that it is timestamp with timezone
+                return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
         case PGType.TIMESTAMP:
             return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
         case PGType.TIMESTAMPTZ:
@@ -153,9 +164,9 @@ T convertTextTypeToD(T)(
             case ',', '}':
                 if (!backslash && !quoted) {
                     if (quoted_value ) {
-                        import std.array;
-                        //auto app = appender!(char[])();
-                        //app.reserve(pos - start);
+
+                        // TODO: determine if backslashes were found in base loop
+                        //       and if there is no backslashes in array, then there is no need to unescape them
                         char[] tmp_value;
                         tmp_value.reserve(pos - start);
                         uint ts = start + 1; // start iteration just after first quote

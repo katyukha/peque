@@ -9,7 +9,9 @@ private import std.algorithm: canFind;
 private import peque.c;
 private import peque.exception;
 private import peque.pg_type;
+private import peque.pg_format;
 private import peque.result;
+
 
 /// Connection to PostgreSQL database.
 @safe struct Connection {
@@ -109,6 +111,31 @@ private import peque.result;
         );
     }
 
+    /** Execute query with parameters
+      *
+      * Params:
+      *     query = SQL query to exexecute
+      *     params = variadic parameters for query.
+      *
+      * Returns: PequeResult
+      **/
+    auto execParams(in string query) {
+        auto pg_result = _connection.borrow!((auto ref conn) @trusted {
+             return PQexecParams(
+                     conn._pg_conn,
+                     query.toStringz,
+                     0,  // param length
+                     null,  // param types
+                     null,  // param_values.ptr,
+                     null,  // param_lengths.ptr,
+                     null,  // param_formats.ptr,
+                     PGFormat.TEXT,  // text result format
+            );
+        });
+        return Result(pg_result);
+    }
+
+    /// ditto
     auto execParams(T...)(in string query, T params) {
         import std.range: iota;
         import std.conv;
@@ -126,9 +153,7 @@ private import peque.result;
          * array of PGValues.
          */
         PGValue[T.length] values = mixin(() {
-            static if (T.length == 0)
-                return "[]";
-
+            static assert(T.length >= 0, "execParams called with no args!");
             auto r = "[convertToPG!(T[0])(params[0])";
             static if (T.length > 1)
                 static foreach(i; iota(1, T.length))
@@ -153,7 +178,7 @@ private import peque.result;
                      param_values.ptr,
                      param_lengths.ptr,
                      param_formats.ptr,
-                     0,  // text result format
+                     PGFormat.TEXT,  // text result format
             );
         //}(_connection);
         });
