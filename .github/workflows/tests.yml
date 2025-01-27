@@ -8,6 +8,8 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
+          - ubuntu-20.04
+          - ubuntu-22.04
           - ubuntu-24.04
           #- windows-latest
         dc:
@@ -15,13 +17,20 @@ jobs:
           - dmd-2.109.1
           - ldc-latest
           - ldc-1.40.0
+        buildConf:
+          - Static
+          - Dynamic
         include:
           - os: macOS-latest
             dc: ldc-1.40.0
+            buildConf: Dynamic
+          - os: macOS-latest
+            dc: ldc-1.40.0
+            buildConf: Static
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Install D compiler
         uses: dlang-community/setup-dlang@v1
@@ -34,5 +43,8 @@ jobs:
           linux: libpq-dev
           macos: libpq
 
+      - name: Try to build the lib
+        run: dub build -c "library${{ matrix.buildConf }}"
+
       - name: Run tests
-        run: dub test -b unittest-cov
+        run: dub test -b unittest-cov -c "unittest${{ matrix.buildConf }}"
