@@ -6,7 +6,7 @@
   **/
 module peque.pg_type;
 
-private import peque.c: Oid;
+private import peque.lib.libpq: Oid;
 
 
 /**

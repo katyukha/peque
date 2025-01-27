@@ -8,15 +8,30 @@ libs "pq"
 
 /*dflags "-preview=dip1000" "-preview=in"*/
 
-configuration "library" {
-    targetType "library"
+dependency "bindbc-common" version=">=1.0.5"
+
+
+configuration "libraryStatic" {
+    libs "pq"
+    versions "PequeStatic"
 }
 
-configuration "sourceLibrary" {
-    targetType "sourceLibrary"
+configuration "libraryDynamic" {
+    dependency "bindbc-loader" version=">=1.1.5"
+    versions "PequeDynamic"
 }
 
-configuration "tests" {
+configuration "unittestStatic" {
     dflags "-checkaction=context"
     sourcePaths "tests"
+    libs "pq"
+    versions "PequeStatic"
+}
+
+configuration "unittestDynamic" {
+    dependency "bindbc-loader" version=">=1.1.5"
+    dflags "-checkaction=context"
+    sourcePaths "tests"
+    libs "pq"
+    versions "PequeDynamic"
 }

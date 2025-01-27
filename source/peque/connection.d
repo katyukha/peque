@@ -8,7 +8,7 @@ private import std.algorithm: canFind;
 private import std.array: array;
 private import std.algorithm: map;
 
-private import peque.c;
+private import peque.lib;
 private import peque.exception;
 private import peque.pg_type;
 private import peque.pg_format;

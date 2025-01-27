@@ -7,7 +7,7 @@ private import std.string: toStringz, fromStringz;
 private import std.algorithm: canFind;
 private import std.conv;
 
-private import peque.c;
+private import peque.lib.libpq;
 private import peque.pg_type;
 private import peque.exception;
 private import peque.converter;
