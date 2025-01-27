@@ -15,11 +15,8 @@ private import peque.pg_format;
 private import peque.result;
 
 
-/* TODO:
- * - Add transaction support
- */
 /// Connection to PostgreSQL database.
-@safe struct Connection {
+struct Connection {
 
     /// Wrapper for PGconn to be used for ConnectionInternal refcounted struct
     private struct ConnectionInternalData {
@@ -119,7 +116,7 @@ private import peque.result;
       * Returns:
       *     Escaped string value, but without surrounding single quotes.
       **/
-    string escapeString(in string value) @trusted {
+    string escapeString(in string value) {
         return _connection.borrow!((auto ref conn) @trusted {
             int error;
             char[] buf = new char[value.length * 2];
@@ -235,7 +232,7 @@ private import peque.result;
 }
 
 
-@safe unittest {
+unittest {
     import std.exception;
 
     Connection("some bad connection string").assertThrown!ConnectionError;

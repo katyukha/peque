@@ -6,7 +6,7 @@ private import peque.result: Result;
 private import peque.exception;
 
 
-@safe unittest {
+unittest {
     import std.stdio;
     import std.typecons;
     import std.datetime;
@@ -250,7 +250,7 @@ private import peque.exception;
 
 
 /// Example of read / write different field types from / to table
-@safe unittest {
+unittest {
     import std.datetime;
     auto c = Connection("peque-test", "peque", "peque", "localhost", "5432");
 

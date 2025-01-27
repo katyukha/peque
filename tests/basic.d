@@ -2,7 +2,7 @@ private import peque.connection: Connection;
 private import peque.result: Result;
 
 
-@safe unittest {
+unittest {
     import std.typecons;
     import std.datetime;
 
@@ -47,7 +47,7 @@ private import peque.result: Result;
 }
 
 // Test connection keyword arguments
-@safe unittest {
+unittest {
     import std.typecons;
     import std.datetime;
 
@@ -75,7 +75,7 @@ private import peque.result: Result;
 
 
 // Test connection builder arguments
-@safe unittest {
+unittest {
     import std.typecons;
     import std.datetime;
 

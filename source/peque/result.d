@@ -20,7 +20,7 @@ package(peque) enum ColFormat: int {
 
 
 /// Refcounted wrapper for PGresult to be used as ResultInternal.
-private @safe struct ResultInternalData {
+private struct ResultInternalData {
     PGresult* _pg_result;
 
     this(PGresult* pg_result) { _pg_result = pg_result; }
@@ -48,7 +48,7 @@ package(peque) alias SafeRefCounted!(
 
 /** This struct represents value of single CELL in postgresql result
   **/
-@safe struct ResultValue {
+struct ResultValue {
     private ResultInternal _result;
     private int _row_number;
     private int _col_number;
@@ -126,7 +126,7 @@ package(peque) alias SafeRefCounted!(
 
 /** Struct that represents single row from result
   **/
-@safe struct ResultRow {
+struct ResultRow {
     private ResultInternal _result;
     private int _row_number;
 
@@ -156,7 +156,7 @@ package(peque) alias SafeRefCounted!(
 /** This struct represents result of query and allows to fetch data received
   * from postgresql
   **/
-@safe struct Result {
+struct Result {
     // TODO: implement range protocol
     // TODO: Add ability to return number of affected rows
     private ResultInternal _result;

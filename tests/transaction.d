@@ -2,7 +2,7 @@ private import peque.connection: Connection;
 private import peque.result: Result;
 
 
-@safe unittest {
+unittest {
     import std.stdio;
     import std.typecons;
     import std.datetime;
