@@ -118,7 +118,9 @@ PGValue convertToPG(T) (in T value)
     static if (isIntegral!TI || isFloatingPoint!TI || isBoolean!TI || is(TI == Date) || is(TI == DateTime) || is(TI == SysTime)) {
         // We do not need escaping for these simple types
         result ~= value.map!((v) => convertToPG(v).value[0 .. $-1]).join(",");
-    } else {
+    } else static if (isArray!TI && !isSomeString!TI) {
+        result ~= value.map!((v) => convertToPG(v).value[0 .. $-1]).join(",");
+    }else {
         result ~= value.map!((v) {
             // We skip ending \0 symbol in value
             auto rv = convertToPG(v).value[0 .. $-1];

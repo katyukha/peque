@@ -142,6 +142,7 @@ package(peque) alias SafeRefCounted!(
     }
 
     auto opIndex(in string col_name) {
+        // TODO: Maybe move to ResultInternal and dynamically create mapping to avoid frequent calls to PQfnumber?
         int col_number = _result.borrow!((auto ref res) @trusted {
             return PQfnumber(res._pg_result, col_name.toStringz);
         });
@@ -156,6 +157,8 @@ package(peque) alias SafeRefCounted!(
   * from postgresql
   **/
 @safe struct Result {
+    // TODO: implement range protocol
+    // TODO: Add ability to return number of affected rows
     private ResultInternal _result;
 
     package(peque) this(PGresult* result) {

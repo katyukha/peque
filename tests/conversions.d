@@ -158,17 +158,17 @@ private import peque.exception;
     assert(res.getValue(0, 0).get!string == "9223372036854775899");
     assert(res.getValue(0, 0).get!ulong == 9223372036854775899);
 
-    res = c.execParams("SELECT $1", 0.1782788489);
+    res = c.execParams("SELECT round($1,10)", 0.1782788489);
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!float == 0.1782788489f);
     assert(res.getValue(0, 0).get!double == 0.1782788489);
-    //assert(res.getValue(0, 0).get!string == "0.1782788489");
+    assert(res.getValue(0, 0).get!string == "0.1782788489");
 
-    //res = c.execParams("SELECT $1", 0.17827f);
-    //assert(!res.getValue(0, 0).isNull);
-    //assert(res.getValue(0, 0).get!string == "0.17827");
-    //assert(res.getValue(0, 0).get!float == 0.1782700000f);
-    //assert(res.getValue(0, 0).get!double == 0.1782700000);
+    res = c.execParams("SELECT round($1, 5)", 0.17827f);
+    assert(!res.getValue(0, 0).isNull);
+    assert(res.getValue(0, 0).get!float == 0.1782700000f);
+    assert(res.getValue(0, 0).get!double == 0.1782700000);
+    assert(res.getValue(0, 0).get!string == "0.17827");
 
     res = c.execParams("SELECT $1::timestamp", Date(2023, 7, 17)).ensureQueryOk;
     assert(res.getValue(0, 0).get!string == "2023-07-17 00:00:00");
@@ -176,27 +176,27 @@ private import peque.exception;
     assert(res.getValue(0, 0).get!DateTime == DateTime(2023, 7, 17, 0, 0, 0));
 
     /// Test array conversions
-    res = c.execParams("SELECT $1", [1, 2, 3, 4, 5]).ensureQueryOk;
+    res = c.execParams("SELECT $1::int[]", [1, 2, 3, 4, 5]).ensureQueryOk;
     assert(res.getValue(0, 0).get!string == "{1,2,3,4,5}");
     assert(res.getValue(0, 0).get!(int[]) == [1, 2, 3, 4, 5]);
 
-    res = c.execParams("SELECT $1", [true, false]).ensureQueryOk;
+    res = c.execParams("SELECT $1::boolean[]", [true, false]).ensureQueryOk;
     assert(res.getValue(0, 0).get!string == "{t,f}");
     assert(res.getValue(0, 0).get!(bool[]) == [true, false]);
 
-    res = c.execParams("SELECT $1", [1, 2, 3, 4]).ensureQueryOk;
+    res = c.execParams("SELECT $1::int[]", [1, 2, 3, 4]).ensureQueryOk;
     assert(res[0][0].get!(int[]) == [1, 2, 3, 4]);
     assert(res[0][0].get!string == "{1,2,3,4}");
 
-    res = c.execParams("SELECT $1", [1.1f, 2.2f, 3.3f, 4.4f]).ensureQueryOk;
+    res = c.execParams("SELECT $1::float[]", [1.1f, 2.2f, 3.3f, 4.4f]).ensureQueryOk;
     assert(res[0][0].get!(float[]) == [1.1f, 2.2f, 3.3f, 4.4f]);
     //assert(res[0][0].get!string == "{1.1,2.2,3.3,4.4}");
 
-    res = c.execParams("SELECT $1", ["str1", "str2"]).ensureQueryOk;
+    res = c.execParams("SELECT $1::text[]", ["str1", "str2"]).ensureQueryOk;
     assert(res[0][0].get!(string[]) == ["str1", "str2"]);
     assert(res[0][0].get!string == "{str1,str2}");
 
-    res = c.execParams("SELECT $1", ["str1,24", "str2 \"78\"", "back\\slashed", "simple"]).ensureQueryOk;
+    res = c.execParams("SELECT $1::text[]", ["str1,24", "str2 \"78\"", "back\\slashed", "simple"]).ensureQueryOk;
     assert(res[0][0].get!(string[]) == ["str1,24", "str2 \"78\"", "back\\slashed", "simple"]);
     assert(res[0][0].get!string == "{\"str1,24\",\"str2 \\\"78\\\"\",\"back\\\\slashed\",simple}");
 
@@ -220,6 +220,20 @@ private import peque.exception;
         SysTime(DateTime(2023, 9, 12, 10, 12, 13), new immutable(SimpleTimeZone)(4.hours)),
     ]);
     assert(res[0][0].get!string == "{\"2023-08-17 07:09:10+04\",\"2023-09-12 10:12:13+04\"}");
+
+    /// Test multi-dimentional array conversions
+    res = c.execParams("SELECT $1::int[][]", [[1, 2], [3, 4]]).ensureQueryOk;
+    assert(res.getValue(0, 0).get!string == "{{1,2},{3,4}}");
+    //assert(res.getValue(0, 0).get!(int[][]) == [[1, 2], [3, 4]]);
+
+    res = c.execParams("SELECT $1::int[][][]", [[[1, 2], [3, 4]], [[6, 7], [8, 9]]]).ensureQueryOk;
+    assert(res.getValue(0, 0).get!string == "{{{1,2},{3,4}},{{6,7},{8,9}}}");
+    //assert(res.getValue(0, 0).get!(int[][][]) == [[[1, 2], [3, 4]], [[6, 7], [8, 9]]]);
+
+    /// Test multi-dimentional array conversions
+    res = c.execParams("SELECT $1::text[][]", [["t1", "t2"], ["t3", "t,4"]]).ensureQueryOk;
+    assert(res.getValue(0, 0).get!string == "{{t1,t2},{t3,\"t,4\"}}");
+    //assert(res.getValue(0, 0).get!(int[][]) == [[1, 2], [3, 4]]);
 }
 
 
