@@ -5,12 +5,15 @@ private import std.exception: enforce;
 private import std.format: format;
 private import std.string: toStringz, fromStringz;
 private import std.algorithm: canFind;
+private import std.array: array;
+private import std.algorithm: map;
 
 private import peque.c;
 private import peque.exception;
 private import peque.pg_type;
 private import peque.pg_format;
 private import peque.result;
+
 
 /* TODO:
  * - Add transaction support
@@ -24,6 +27,22 @@ private import peque.result;
 
         this(in string conn_info) @trusted {
             _pg_conn = PQconnectdb(conn_info.toStringz);
+        }
+
+        this(in string[] keywords, in string[] values) @trusted {
+            auto _res_keywords = keywords.map!(i => i.toStringz).array ~ [cast(immutable(char)*)null];
+            auto _res_values = values.map!(i => i.toStringz).array ~ [cast(immutable(char)*)null];
+            _pg_conn = PQconnectdbParams(_res_keywords.ptr, _res_values.ptr, 0);
+        }
+
+        this(in string[string] params) {
+            string[] keywords;
+            string[] values;
+            foreach(kv; params.byKeyValue) {
+                keywords ~= kv.key;
+                values ~= kv.value;
+            }
+            this(keywords, values);
         }
 
         ~this() @trusted {
@@ -52,16 +71,37 @@ private import peque.result;
     this(in string conn_info) {
         _connection = ConnectionInternal(conn_info);
         enforce!ConnectionError(
+            _connection.borrow!((auto ref conn) @trusted => conn._pg_conn !is null),
+            "Cannot connect to db: PQconnectdb() FAILED");
+        enforce!ConnectionError(
+            status == CONNECTION_OK,
+            "Cannot connect to db: %s!".format(errorMessage));
+    }
+
+    this(in string[string] params) {
+        _connection = ConnectionInternal(params);
+        enforce!ConnectionError(
+            _connection.borrow!((auto ref conn) @trusted => conn._pg_conn !is null),
+            "Cannot connect to db: PQconnectdb() FAILED");
+        enforce!ConnectionError(
             status == CONNECTION_OK,
             "Cannot connect to db: %s!".format(errorMessage));
     }
 
     this(in string dbname, in string user, in string password,
             in string host, in string port) {
-        // TODO: Use PQescapeStringConn to escape connection params
-        this(
-            "dbname='%s' user='%s' password='%s' host='%s' port='%s'".format(
-                dbname, user, password, host, port));
+        string[string] params;
+        if (dbname && dbname.length > 0)
+            params["dbname"] = dbname.dup;
+        if (user && user.length > 0)
+            params["user"] = user.dup;
+        if (password && password.length > 0)
+            params["password"] = password.dup;
+        if (host && host.length > 0)
+            params["host"] = host.dup;
+        if (port && port.length > 0)
+            params["port"] = port.dup;
+        this(params);
     }
 
     /// Check status of connection
@@ -185,6 +225,13 @@ private import peque.result;
         });
         return Result(pg_result);
     }
+
+
+    auto begin() { return execParams("BEGIN"); }
+
+    auto commit() { return execParams("COMMIT"); }
+
+    auto rollback() { return execParams("ROLLBACK"); }
 }
 
 
