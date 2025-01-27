@@ -27,7 +27,8 @@ jobs:
           - os: macOS-latest
             dc: ldc-1.40.0
             buildConf: Static
-
+    env:                               
+      DEBIAN_FRONTEND: 'noninteractive'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
@@ -37,11 +38,22 @@ jobs:
         with:
           compiler: ${{ matrix.dc }}
 
-      - name: Install system dependencies                                           
-        uses: lyricwulf/abc@v1                                                      
-        with:                                                                                  
-          linux: libpq-dev
-          macos: libpq
+      - name: Update apt registry
+        run: apt-get update
+
+      - name: Install system dependencies (postgresql)
+        run: apt-get install --no-install-recommends -yq postgresql sudo
+
+      - name: Start postgresql
+        run: /etc/init.d/postgresql start
+
+      - name: Create postgresql user
+        run: |
+          sudo -u postgres -H createuser "peque"
+          sudo -u postgres -H psql -c "ALTER USER peque WITH PASSWORD 'peque'"
+      
+      - name: Try to build the lib
+        run: dub build -c "library${{ matrix.buildConf }}"
 
       - name: Try to build the lib
         run: dub build -c "library${{ matrix.buildConf }}"
