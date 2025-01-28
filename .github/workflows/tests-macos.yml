@@ -35,26 +35,23 @@ jobs:
       - name: Start PostgreSQL on MacOS
         run: |
           brew install postgresql
+          brew link postgresql
+          brew info postgresql
+          ls -l /opt/homebrew/lib/postgresql@14
           brew services start postgresql
           echo 'Check PostgreSQL service is running'
           i=10
-          COMMAND='pg_isready'
           while [ $i -gt 0 ]; do
               echo 'Check PostgreSQL service status'
-              eval $COMMAND && break
+              pg_isready && break
               ((i--))
               if [ $i == 0 ]; then
                   echo 'PostgreSQL service not ready, all attempts exhausted'
                   exit 1
               fi
-              echo 'PostgreSQL service not ready, wait 10 more sec, attempts left: $i'
+              echo 'PostgreSQL service not ready, wait 5 more sec, attempts left: $i'
               sleep 5
           done
-
-      - name: Check postgresql status
-        run: |
-          brew services info postgresql
-          postgres -V
 
       # Homebrew creates an account with the same name as the installing user, but no password
       - name: Create postgresql user
