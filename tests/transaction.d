@@ -1,3 +1,5 @@
+private import std.process: environment;
+
 private import peque.connection: Connection;
 private import peque.result: Result;
 
@@ -7,7 +9,13 @@ unittest {
     import std.typecons;
     import std.datetime;
 
-    auto c = Connection("peque-test", "peque", "peque", "localhost", "5432");
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
 
     auto res = c.exec("
         DROP TABLE IF EXISTS peque_transaction;

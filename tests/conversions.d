@@ -1,5 +1,6 @@
 private import std.exception;
 private import std.conv;
+private import std.process: environment;
 
 private import peque.connection: Connection;
 private import peque.result: Result;
@@ -11,7 +12,13 @@ unittest {
     import std.typecons;
     import std.datetime;
 
-    auto c = Connection("peque-test", "peque", "peque", "localhost", "5432");
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
 
     // Set timezone for this session
     c.exec("SET TIME ZONE '+4'");
@@ -242,7 +249,13 @@ unittest {
     import std.datetime;
     import core.exception: AssertError;
 
-    auto c = Connection("peque-test", "peque", "peque", "localhost", "5432");
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
 
     auto res = c.exec("SELECT 42;");
     res.getValue(0, 0).get!Date.assertThrown!AssertError;
@@ -252,7 +265,13 @@ unittest {
 /// Example of read / write different field types from / to table
 unittest {
     import std.datetime;
-    auto c = Connection("peque-test", "peque", "peque", "localhost", "5432");
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
 
     // Set timezone for this session
     c.exec("SET TIME ZONE '+4'");

@@ -27,31 +27,36 @@ jobs:
           - os: macOS-latest
             dc: ldc-1.40.0
             buildConf: Static
-    env:                               
-      DEBIAN_FRONTEND: 'noninteractive'
+
+    # Provide the password for postgres
+    env:
+      POSTGRES_USER: peque
+      POSTGRES_PASSWORD: peque
+      POSTGRES_DB: peque-test
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+
+    # Service containers to run with `container-job`
+    services:
+      # Label used to access the service container
+      postgres:
+        # Docker Hub image
+        image: postgres
+        # Set health checks to wait until postgres has started
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install D compiler
-        uses: dlang-community/setup-dlang@v1
+        uses: dlang-community/setup-dlang@v2
         with:
           compiler: ${{ matrix.dc }}
 
-      - name: Update apt registry
-        run: apt-get update
-
-      - name: Install system dependencies (postgresql)
-        run: apt-get install --no-install-recommends -yq postgresql sudo
-
-      - name: Start postgresql
-        run: /etc/init.d/postgresql start
-
-      - name: Create postgresql user
-        run: |
-          sudo -u postgres -H createuser "peque"
-          sudo -u postgres -H psql -c "ALTER USER peque WITH PASSWORD 'peque'"
-      
       - name: Try to build the lib
         run: dub build -c "library${{ matrix.buildConf }}"
 

@@ -1,3 +1,5 @@
+private import std.process: environment;
+
 private import peque.connection: Connection;
 private import peque.result: Result;
 
@@ -6,7 +8,13 @@ unittest {
     import std.typecons;
     import std.datetime;
 
-    auto c = Connection("peque-test", "peque", "peque", "localhost", "5432");
+    auto c = Connection(
+            environment.get("POSTGRES_DB", "peque-test"),
+            environment.get("POSTGRES_USER", "peque"),
+            environment.get("POSTGRES_PASSWORD", "peque"),
+            environment.get("POSTGRES_HOST", "localhost"),
+            environment.get("POSTGRES_PORT", "5432"),
+    );
 
     auto res = c.exec("
         DROP TABLE IF EXISTS peque_test;
@@ -51,7 +59,13 @@ unittest {
     import std.typecons;
     import std.datetime;
 
-    auto c = Connection(dbname: "peque-test", user: "peque", password: "peque", host: "localhost", port: "5432");
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
 
     auto res = c.exec("
         DROP TABLE IF EXISTS peque_test;
@@ -78,8 +92,9 @@ unittest {
 unittest {
     import std.typecons;
     import std.datetime;
+    import peque.utils: connectViaEnvParams;
 
-    auto c = Connection([
+    auto c = connectViaEnvParams([
         "dbname": "peque-test",
         "user": "peque",
         "password": "peque",
