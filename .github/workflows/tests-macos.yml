@@ -1,0 +1,81 @@
+name: Tests (MacOS)
+on: [push]
+
+jobs:
+  test:
+    name: Tests
+    strategy:
+      matrix:
+        os:
+          - macOS-latest
+        dc:
+          - ldc-latest
+          #- ldc-1.40.0
+        buildConf:
+          #- Static
+          - Dynamic
+
+    # Provide the password for postgres
+    env:
+      POSTGRES_USER: peque
+      POSTGRES_PASSWORD: peque
+      POSTGRES_DB: peque-test
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install D compiler
+        uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ${{ matrix.dc }}
+
+      - name: Start PostgreSQL on MacOS
+        run: |
+          brew install postgresql
+          brew services start postgresql
+          echo 'Check PostgreSQL service is running'
+          i=10
+          COMMAND='pg_isready'
+          while [ $i -gt 0 ]; do
+              echo 'Check PostgreSQL service status'
+              eval $COMMAND && break
+              ((i--))
+              if [ $i == 0 ]; then
+                  echo 'PostgreSQL service not ready, all attempts exhausted'
+                  exit 1
+              fi
+              echo 'PostgreSQL service not ready, wait 10 more sec, attempts left: $i'
+              sleep 5
+          done
+
+      - name: Check postgresql status
+        run: |
+          brew services info postgresql
+          postgres -V
+
+      # Homebrew creates an account with the same name as the installing user, but no password
+      - name: Create postgresql user
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+        run: |
+          psql postgres -c "CREATE USER $POSTGRES_USER WITH PASSWORD '$POSTGRES_PASSWORD'"
+
+      - name: Create postgresql database
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+        run: |
+          psql postgres -c "CREATE DATABASE \"$POSTGRES_DB\" ENCODING 'unicode'"
+
+      - name: Try to build the lib
+        run: dub build -c "library${{ matrix.buildConf }}"
+
+      - name: Try to build the lib
+        run: dub build -c "library${{ matrix.buildConf }}"
+
+      - name: Run tests
+        run: dub test -b unittest-cov -c "unittest${{ matrix.buildConf }}"

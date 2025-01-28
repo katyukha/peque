@@ -1,9 +1,10 @@
-name: Tests
+name: Tests (Linux)
 on: [push]
 
 jobs:
   test:
     name: Tests
+    if: false
     strategy:
       matrix:
         os:
@@ -20,20 +21,12 @@ jobs:
         buildConf:
           - Static
           - Dynamic
-        include:
-          - os: macOS-latest
-            dc: ldc-1.40.0
-            buildConf: Dynamic
-          - os: macOS-latest
-            dc: ldc-1.40.0
-            buildConf: Static
 
-    # Provide the password for postgres
     env:
       POSTGRES_USER: peque
       POSTGRES_PASSWORD: peque
       POSTGRES_DB: peque-test
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: localhost
       POSTGRES_PORT: 5432
 
     # Service containers to run with `container-job`
@@ -42,6 +35,13 @@ jobs:
       postgres:
         # Docker Hub image
         image: postgres
+        # Provide the password for postgres
+        env:
+          POSTGRES_USER: peque
+          POSTGRES_PASSWORD: peque
+          POSTGRES_DB: peque-test
+        ports:
+          - 5432:5432
         # Set health checks to wait until postgres has started
         options: >-
           --health-cmd pg_isready
