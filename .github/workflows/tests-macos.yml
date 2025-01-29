@@ -12,7 +12,8 @@ jobs:
           - ldc-latest
           - ldc-1.40.0
         buildConf:
-          - Static
+          # Currently, static build does not work on macos, because it does not know where to find libpq
+          #- Static
           - Dynamic
 
     # Provide the password for postgres
