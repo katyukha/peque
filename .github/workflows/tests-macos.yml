@@ -10,9 +10,9 @@ jobs:
           - macOS-latest
         dc:
           - ldc-latest
-          #- ldc-1.40.0
+          - ldc-1.40.0
         buildConf:
-          #- Static
+          - Static
           - Dynamic
 
     # Provide the password for postgres
