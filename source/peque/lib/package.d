@@ -16,7 +16,7 @@ version(PequeDynamic) {
     private enum supportedLibNames = mixin(
         makeLibPaths(
             names: ["pq"],
-            platformPaths: ["OSX": ["/opt/homebrew/lib/postgresql@14/"]],
+            //platformPaths: ["OSX": ["/opt/homebrew/lib/postgresql@14/"]],
         )
     );
 

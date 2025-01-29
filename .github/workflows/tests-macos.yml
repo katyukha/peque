@@ -34,10 +34,7 @@ jobs:
 
       - name: Start PostgreSQL on MacOS
         run: |
-          brew install postgresql
-          brew link postgresql
-          brew info postgresql
-          ls -l /opt/homebrew/lib/postgresql@14
+          brew install postgresql@14
           brew services start postgresql
           echo 'Check PostgreSQL service is running'
           i=10
@@ -68,8 +65,9 @@ jobs:
         run: |
           psql postgres -c "CREATE DATABASE \"$POSTGRES_DB\" ENCODING 'unicode'"
 
-      - name: Try to build the lib
-        run: dub build -c "library${{ matrix.buildConf }}"
+      - name: Create symlink for libpq in current dir, to avoid linking issues
+        run: |
+          ln -s /opt/homebrew/lib/postgresql@14/libpq.dylib ./
 
       - name: Try to build the lib
         run: dub build -c "library${{ matrix.buildConf }}"
