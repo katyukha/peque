@@ -1,6 +1,7 @@
 private import std.exception;
 private import std.conv;
 private import std.process: environment;
+private import std.math: isClose;
 
 private import peque.connection: Connection;
 private import peque.result: Result;
@@ -65,14 +66,14 @@ unittest {
     res = c.exec("SELECT 0.1782788489");
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!string == "0.1782788489");
-    assert(res.getValue(0, 0).get!float == 0.1782788489f);
-    assert(res.getValue(0, 0).get!double == 0.1782788489);
+    assert(res.getValue(0, 0).get!float.isClose(0.1782788489f));
+    assert(res.getValue(0, 0).get!double.isClose(0.1782788489));
 
     res = c.exec("SELECT 0.17827");
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!string == "0.17827");
-    assert(res.getValue(0, 0).get!float == 0.17827f);
-    assert(res.getValue(0, 0).get!double == 0.17827);
+    assert(res.getValue(0, 0).get!float.isClose(0.17827f));
+    assert(res.getValue(0, 0).get!double.isClose(0.17827));
 
     // Conversions to date/time
     res = c.exec("SELECT '2023-07-17'::timestamp;");
@@ -167,14 +168,14 @@ unittest {
 
     res = c.execParams("SELECT round($1,10)", 0.1782788489);
     assert(!res.getValue(0, 0).isNull);
-    assert(res.getValue(0, 0).get!float == 0.1782788489f);
-    assert(res.getValue(0, 0).get!double == 0.1782788489);
+    assert(res.getValue(0, 0).get!float.isClose(0.1782788489f));
+    assert(res.getValue(0, 0).get!double.isClose(0.1782788489));
     assert(res.getValue(0, 0).get!string == "0.1782788489");
 
     res = c.execParams("SELECT round($1, 5)", 0.17827f);
     assert(!res.getValue(0, 0).isNull);
-    assert(res.getValue(0, 0).get!float == 0.1782700000f);
-    assert(res.getValue(0, 0).get!double == 0.1782700000);
+    assert(res.getValue(0, 0).get!float.isClose(0.1782700000f));
+    assert(res.getValue(0, 0).get!double.isClose(0.1782700000));
     assert(res.getValue(0, 0).get!string == "0.17827");
 
     res = c.execParams("SELECT $1::timestamp", Date(2023, 7, 17)).ensureQueryOk;
