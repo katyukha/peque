@@ -143,8 +143,7 @@ unittest {
     assert(res[0][0].get!string == "{\"2023-08-17 07:09:10+04\",\"2023-09-12 10:12:13+04\"}");
 
     /// Incorrect query
-    res = c.exec("SELECT '2023-07'::date;");
-    res.ensureQueryOk.assertThrown!QueryError;
+    c.exec("SELECT '2023-07'::date;").assertThrown!QueryError;
 
     /// Test parameter passing
     res = c.execParams("SELECT $1", 42).ensureQueryOk;

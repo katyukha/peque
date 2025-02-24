@@ -146,7 +146,7 @@ struct Connection {
             _connection.borrow!((auto ref conn) @trusted {
                 return PQexec(_connection._pg_conn, query.toStringz);
             })
-        );
+        ).ensureQueryOk();
     }
 
     /** Execute query with parameters
@@ -170,7 +170,7 @@ struct Connection {
                      PGFormat.TEXT,  // text result format
             );
         });
-        return Result(pg_result);
+        return Result(pg_result).ensureQueryOk();
     }
 
     /// ditto
