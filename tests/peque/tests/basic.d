@@ -1,3 +1,5 @@
+module peque.tests.basic;
+
 private import std.process: environment;
 
 private import peque.connection: Connection;

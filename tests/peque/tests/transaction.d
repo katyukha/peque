@@ -1,3 +1,5 @@
+module peque.tests.transaction;
+
 private import std.process: environment;
 
 private import peque.connection: Connection;

@@ -13,6 +13,7 @@ private import std.exception;
 private import peque.pg_type;
 private import peque.exception;
 
+//TODO: Handle nullable types here
 
 /** Convert postgresql's text type value to D type T
   *

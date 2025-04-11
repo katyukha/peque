@@ -2,6 +2,8 @@ module peque.exception;
 
 import std.exception;
 
+@safe:
+
 class PequeException : Exception {
     mixin basicExceptionCtors;
 }

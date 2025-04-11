@@ -12,6 +12,7 @@ private import std.range: ElementType;
 private import peque.pg_type;
 private import peque.pg_format;
 
+//TODO: Handle nullable types here
 
 /** Struct that represents value to be passed to PQexecParams.
   **/

@@ -1,3 +1,5 @@
+module peque.tests.conversations;
+
 private import std.exception;
 private import std.conv;
 private import std.process: environment;
