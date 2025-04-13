@@ -8,13 +8,12 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - ubuntu-20.04
           - ubuntu-22.04
           - ubuntu-24.04
           #- windows-latest
         dc:
           - dmd-latest
-          - dmd-2.109.1
+          - dmd-2.110.0
           - ldc-latest
           - ldc-1.40.0
         buildConf:
