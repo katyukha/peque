@@ -22,7 +22,7 @@ configuration "libraryDynamic" {
 }
 
 configuration "unittestStatic" {
-    dflags "-checkaction=context"
+    dflags "-checkaction=context" "-allinst"
     sourcePaths "tests"
     libs "pq"
     versions "PequeStatic"
@@ -30,7 +30,7 @@ configuration "unittestStatic" {
 
 configuration "unittestDynamic" {
     dependency "bindbc-loader" version=">=1.1.5"
-    dflags "-checkaction=context"
+    dflags "-checkaction=context" "-allinst"
     sourcePaths "tests"
     versions "PequeDynamic"
 }
