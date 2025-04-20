@@ -2,6 +2,8 @@ module peque.tests.basic;
 
 private import std.process: environment;
 
+private import versioned: Version;
+
 private import peque.connection: Connection;
 private import peque.result: Result;
 
@@ -90,7 +92,7 @@ unittest {
 }
 
 
-// Test connection builder arguments
+// Test connection env params
 unittest {
     import std.typecons;
     import std.datetime;
@@ -122,4 +124,25 @@ unittest {
     assert(res.cmdTuples == 4);
     assert(res.ntuples == 0);
     assert(res.nfields == 0);
+}
+
+// Test connection.serverVersion
+unittest {
+    import std.typecons;
+    import std.datetime;
+    import std.process: environment;
+    import peque.utils: connectViaEnvParams;
+
+
+    auto c = connectViaEnvParams(defaults: [
+        "dbname": "peque-test",
+        "user": "peque",
+        "password": "peque",
+        "host": "localhost",
+        "port": "5432",
+    ]);
+
+    if (environment.get("PEQUE_EXPECT_PG_VERSION"))
+        assert(c.serverVersion == Version(environment.get("PEQUE_EXPECT_PG_VERSION")));
+
 }

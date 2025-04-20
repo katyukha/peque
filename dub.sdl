@@ -8,6 +8,7 @@ target "library"
 
 /*dflags "-preview=dip1000" "-preview=in"*/
 
+dependency "versioned" version=">=0.1.0"
 dependency "bindbc-common" version=">=1.0.5"
 
 

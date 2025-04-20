@@ -65,6 +65,7 @@ mixin(joinFnBinds!staticBinding((){
         {q{void}, q{PQfinish}, q{PGconn* conn}},
 
         {q{ConnStatusType}, q{PQstatus}, q{const(PGconn)* conn}},
+        {q{int}, q{PQserverVersion}, q{const(PGconn)* conn}},
 
         {q{PGresult*}, q{PQexec}, q{PGconn* conn, const(char)* query}},
         {q{PGresult*}, q{PQexecParams}, q{PGconn* conn, const(char)* command, int nParams, const(Oid)* paramTypes, const(char*)* paramValues, const(int)* paramLengths, const(int)* paramFormats, int resultFormat}},

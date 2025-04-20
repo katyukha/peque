@@ -8,6 +8,8 @@ private import std.algorithm: canFind;
 private import std.array: array;
 private import std.algorithm: map;
 
+private import versioned: Version;
+
 private import peque.lib;
 private import peque.exception;
 private import peque.pg_type;
@@ -99,6 +101,17 @@ struct Connection {
         if (port && port.length > 0)
             params["port"] = port.dup;
         this(params);
+    }
+
+    auto serverVersion() {
+        // See docs here: https://www.postgresql.org/docs/current/libpq-status.html#LIBPQ-PQSERVERVERSION
+        int v = _connection.borrow!((auto ref conn) @trusted => PQserverVersion(conn._pg_conn));
+        uint major_version = v / 10000;
+        uint minor_version = (v - major_version * 10000) / 100;
+        uint patch_version = v - major_version * 10000 - minor_version * 100;
+        if (major_version > 10 && minor_version == 0)
+            return Version(major_version, patch_version);
+        return Version(major_version, minor_version, patch_version);
     }
 
     /// Check status of connection
