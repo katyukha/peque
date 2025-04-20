@@ -36,7 +36,7 @@ private struct ResultInternalData {
     @disable this(this);
 
     // Must not be assignable
-    // @disable void opAssign(typeof(this));
+    @disable void opAssign(typeof(this));
 }
 
 /// Ref-counted connection to postgres
@@ -163,10 +163,6 @@ struct Result {
 
     package(peque) this(PGresult* result) {
         _result = ResultInternal(result);
-    }
-
-    void opAssign(Result res) {
-        _result = res._result;
     }
 
     /// Return status of result as libpq enumeration

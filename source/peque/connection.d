@@ -53,7 +53,7 @@ struct Connection {
         @disable this(this);
 
         // Must not be assignable
-        //@disable void opAssign(typeof(this));
+        @disable void opAssign(typeof(this));
     }
 
     /// Ref-counted connection to postgres
