@@ -133,7 +133,7 @@ struct ResultRow {
     private ResultInternal _result;
     private int _row_number;
 
-    //@disable this(this);
+    @disable this(this);
 
     private this(ResultInternal result, in int row_number) {
         _result = result;
@@ -195,7 +195,7 @@ struct Result {
     }
 
     /// Ensure that result is Ok
-    ref Result ensureQueryOk() {
+    auto ensureQueryOk() {
         static immutable bad_states = [
             PGRES_FATAL_ERROR,
             PGRES_BAD_RESPONSE,

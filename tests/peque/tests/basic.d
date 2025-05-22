@@ -183,12 +183,28 @@ unittest {
     assert(res.ntuples == 0);
     assert(res.nfields == 0);
 
-    res = c.execParams("SELECT code FROM peque_test;");
+    // Test via exec
+    res = c.exec("SELECT code FROM peque_test;");
     res.ensureQueryOk;
     string[] res_arr_1;
     foreach(row; res) res_arr_1 ~= row["code"].as!string;
     assert(res_arr_1 == ["t1", "t2", "t3", "r4"]);
-
     assert(res.map!((row) => row["code"].as!string).array == ["t1", "t2", "t3", "r4"]);
+
+    // Test via execParams
+    res = c.execParams("SELECT code FROM peque_test;");
+    res.ensureQueryOk;
+    string[] res_arr_2;
+    foreach(row; res) res_arr_2 ~= row["code"].as!string;
+    assert(res_arr_2 == ["t1", "t2", "t3", "r4"]);
+    assert(res.map!((row) => row["code"].as!string).array == ["t1", "t2", "t3", "r4"]);
+
+    // Test via execParams
+    res = c.execParams("SELECT code FROM peque_test WHERE code in ($1, $2);", "t1", "t2");
+    res.ensureQueryOk;
+    string[] res_arr_3;
+    foreach(row; res) res_arr_3 ~= row["code"].as!string;
+    assert(res_arr_3 == ["t1", "t2"]);
+    assert(res.map!((row) => row["code"].as!string).array == ["t1", "t2"]);
 }
 

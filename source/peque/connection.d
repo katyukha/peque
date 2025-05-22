@@ -155,11 +155,12 @@ struct Connection {
       * Returns: PequeResult
       **/
     auto exec(in string query) {
-        return Result(
+        auto res = Result(
             _connection.borrow!((auto ref conn) @trusted {
                 return PQexec(_connection._pg_conn, query.toStringz);
             })
-        ).ensureQueryOk();
+        );
+        return res.ensureQueryOk();
     }
 
     /** Execute query with parameters
@@ -183,7 +184,8 @@ struct Connection {
                      PGFormat.TEXT,  // text result format
             );
         });
-        return Result(pg_result).ensureQueryOk();
+        auto res = Result(pg_result);
+        return res.ensureQueryOk();
     }
 
     /// ditto
@@ -233,7 +235,8 @@ struct Connection {
             );
         //}(_connection);
         });
-        return Result(pg_result).ensureQueryOk();
+        auto res = Result(pg_result);
+        return res.ensureQueryOk();
     }
 
 
