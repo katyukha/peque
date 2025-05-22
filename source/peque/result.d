@@ -122,6 +122,9 @@ struct ResultValue {
         return get!T;
     }
 
+    /// Alias for get
+    alias as = get;
+
 }
 
 /** Struct that represents single row from result
@@ -157,9 +160,11 @@ struct ResultRow {
   * from postgresql
   **/
 struct Result {
-    // TODO: implement range protocol
     // TODO: Add ability to return number of affected rows
     private ResultInternal _result;
+
+    // Current row index. Used for Range api.
+    private int _current_range_index = 0;
 
     package(peque) this(PGresult* result) {
         _result = ResultInternal(result);
@@ -253,6 +258,11 @@ struct Result {
         return ResultValue(_result, row_number, col_number);
     }
 
+    /// ditto
+    auto getValue(T)(in int row_number, in int col_number) {
+        return getValue(row_number, col_number).as!T;
+    }
+
     /** Get single row from result by index
       *
       * Params:
@@ -265,11 +275,41 @@ struct Result {
         return ResultRow(_result, row_number);
     }
 
+    /** Get single row from result via index
+      **/
     auto opIndex(in int row_number) {
         return getRow(row_number);
     }
 
+    /** Get single value from result via index
+      */
     auto opIndex(in int row_number, in int col_number) {
         return getValue(row_number, col_number);
     }
+
+    /** Check if result is empty (or consumed by foreach loop)
+      *
+      * Returns True for both cases: if result was originally empty
+      * or if result was consumed via range API
+      **/
+   @property bool empty() {
+      import std.stdio;
+      return _current_range_index >= ntuples;
+   }
+
+   /** Pop row from result.
+     *
+     * (used for range API)
+     **/
+   void popFront() {
+      _current_range_index += 1;
+   }
+
+   /** Get current row in result
+     *
+     * (used for range API)
+     **/
+   @property auto front() {
+      return getRow(_current_range_index);
+   }
 }
