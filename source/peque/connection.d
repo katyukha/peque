@@ -233,7 +233,7 @@ struct Connection {
             );
         //}(_connection);
         });
-        return Result(pg_result);
+        return Result(pg_result).ensureQueryOk();
     }
 
 
