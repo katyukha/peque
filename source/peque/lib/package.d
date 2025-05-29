@@ -16,6 +16,12 @@ version(PequeDynamic) {
     private enum supportedLibNames = mixin(
         makeLibPaths(
             names: ["pq"],
+            platformPaths: [
+                "OSX": [
+                    "/opt/homebrew/opt/libpq/lib/",
+                    "/usr/local/opt/libpq/lib/",
+                ],
+            ]
         )
     );
 
