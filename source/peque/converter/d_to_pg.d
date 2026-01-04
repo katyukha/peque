@@ -34,8 +34,9 @@ package(peque) @safe pure const struct PGValue {
 /** Convert provided D value to PGValue
   **/
 PGValue convertToPG(T) (in T value)
-@safe pure if (isSomeString!T) {
-    return PGValue(PGType.TEXT, PGFormat.TEXT, (value.to!(char[]) ~ '\0'));
+@safe pure if (isSomeString!T)
+in (!value.canFind('\0'), "String value cannot contain null (\\0) characters!") {
+    return PGValue(PGType.TEXT, PGFormat.TEXT, value.to!(char[]) ~ "\0");
 }
 
 /// ditto
@@ -113,7 +114,7 @@ PGValue convertToPG(T) (in T value)
      * Here, we have to build array literal in text format.
      *
      * We have to wrap in quotes (possibly) and we have to remove last \0 sign,
-     * this we take slice `value[0 ... $-1]`
+     * thus we take slice `value[0 ... $-1]`
      */
     char[] result = ['{'];
     static if (isIntegral!TI || isFloatingPoint!TI || isBoolean!TI || is(TI == Date) || is(TI == DateTime) || is(TI == SysTime)) {
@@ -127,12 +128,12 @@ PGValue convertToPG(T) (in T value)
             auto rv = convertToPG(v).value[0 .. $-1];
 
             // Create buffer that will contain escaped value.;
-            char[] r = ['\"'];
+            char[] r = ['"'];
             r.reserve(rv.length * 2);  // reserve double capacity for possible escaping.
             int start = 0;
             for(int pos=0; pos < rv.length; pos++) {
                 // We escape only quote and backslashes in array.
-                if (rv[pos] == '\"' || rv[pos] == '\\') {
+                if (rv[pos] == '"' || rv[pos] == '\\') {
                     r ~= rv[start .. pos ] ~ '\\' ~ rv[pos];
                     pos += 1;
                     start = pos;
@@ -151,4 +152,12 @@ PGValue convertToPG(T) (in T value)
     }
     result ~= "}";
     return PGValue(PGArrayType, PGFormat.TEXT, result ~ "\0");
+}
+
+
+// Test that convertion of string with null is not allowed
+unittest {
+    import std.exception: assertThrown;
+    import core.exception: AssertError;
+    convertToPG("t1\0; H").assertThrown!AssertError;
 }

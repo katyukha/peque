@@ -13,9 +13,9 @@ jobs:
           #- windows-latest
         dc:
           - dmd-latest
-          - dmd-2.110.0
+          - dmd-2.111.0
           - ldc-latest
-          - ldc-1.40.0
+          - ldc-1.41.0
         buildConf:
           - Static
           - Dynamic
