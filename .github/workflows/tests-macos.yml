@@ -8,20 +8,15 @@ jobs:
       matrix:
         os:
           - macOS-latest
-          - macOs-13
           - macOs-14
-          #- macOs-15
+          - macOs-15
         dc:
           - ldc-latest
-          - ldc-1.40.1
+          - ldc-1.41.0
         buildConf:
           # Currently, static build does not work on macos, because it does not know where to find libpq
           # - Static
           - Dynamic
-        include:
-          - os: macOs-15
-            dc: ldc-1.41.0-beta1
-            buildConf: Dynamic
 
     # Provide the password for postgres
     env:
