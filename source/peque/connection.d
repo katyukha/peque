@@ -132,7 +132,8 @@ struct Connection {
     string escapeString(in string value) {
         return _connection.borrow!((auto ref conn) @trusted {
             int error;
-            char[] buf = new char[value.length * 2];
+            // allocate space for terminating NUL: 2*len + 1
+            char[] buf = new char[value.length * 2 + 1];
             auto size = PQescapeStringConn(
                 conn._pg_conn,
                 &buf[0],      // to
@@ -143,6 +144,7 @@ struct Connection {
                 error == 0,
                 "Cannot escape string %s: %s".format(
                     value, errorMessage));
+            // size bytes were written (not counting terminating NUL)
             return buf[0 .. size].idup;
         });
     }

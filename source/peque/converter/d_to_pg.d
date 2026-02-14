@@ -139,7 +139,7 @@ PGValue convertToPG(T) (in T value)
                     start = pos;
                 }
             }
-            if (start < rv.length - 1)
+            if (start < rv.length)
                 // Is we have some part of value not added to result,
                 // that we have to do it now.
                 r ~= rv[start .. $];
@@ -160,4 +160,11 @@ unittest {
     import std.exception: assertThrown;
     import core.exception: AssertError;
     convertToPG("t1\0; H").assertThrown!AssertError;
+}
+
+// Test that array element quoting/escaping in convertToPG works correctly
+unittest {
+    auto v = convertToPG!(string[])(["a\"b", "c\\d"]);
+    auto s = v.value[0 .. $ - 1].idup; // skip terminating NUL
+    assert(s == "{\"a\\\"b\",\"c\\\\d\"}");
 }
