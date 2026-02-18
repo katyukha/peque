@@ -117,6 +117,7 @@ PGValue convertToPG(T) (in T value)
     } else static if (isArray!TI && !isSomeString!TI) {
         result ~= value.map!((v) => convertToPG(v).value[0 .. $-1]).join(",");
     }else {
+        // Case when array is array of strings. Special handling. here to escape resulting array correctly
         result ~= value.map!((v) {
             // We skip ending \0 symbol in value
             auto rv = convertToPG(v).value[0 .. $-1];
@@ -161,4 +162,16 @@ unittest {
     auto v = convertToPG!(string[])(["a\"b", "c\\d"]);
     auto s = v.value[0 .. $ - 1].idup; // skip terminating NUL
     assert(s == "{\"a\\\"b\",\"c\\\\d\"}");
+
+    // Test if last symbol in element of array string escaped
+    assert(convertToPG!(string[])(["a\"b", "c\\"]).value[0 .. $ - 1] == "{\"a\\\"b\",\"c\\\\\"}");
+
+    assert(
+        convertToPG!(string[][])(
+            [
+                ["a\"b", "c\\"],
+                ["ag\"42", "mix\""],
+            ]
+        ).value[0 .. $ - 1] == "{{\"a\\\"b\",\"c\\\\\"},{\"ag\\\"42\",\"mix\\\"\"}}"
+    );
 }
