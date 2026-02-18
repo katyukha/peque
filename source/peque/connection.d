@@ -149,7 +149,9 @@ struct Connection {
         });
     }
 
-    /** Execute query
+    /** Execute query as raw SQL.
+      * This is not recommended for queries with parameters,
+      * as it may lead to SQL injection. Perefer usage of execParams instead.
       *
       * Params:
       *     query = SQL query to execute

@@ -21,6 +21,18 @@ package(peque) @safe pure const struct PGValue {
     PGFormat format = PGFormat.TEXT;
     char[] value;
 
+    this(PGType type, PGFormat format, in char[] value) @safe pure {
+        assert(
+            value.length > 0 && value[$ - 1] == '\0',
+             "PGValue value must be null-terminated!");
+        assert(
+            value.length < int.max,
+             "Too large value length for PGValue!");
+        this.type = type;
+        this.format = format;
+        this.value = value;
+    }
+
     /// Compute length of value
     int length() @trusted { return cast(int)value.length; }
 
