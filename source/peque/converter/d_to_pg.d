@@ -73,21 +73,15 @@ PGValue convertToPG(T) (in T value)
 /// ditto
 PGValue convertToPG(T) (in T value)
 @safe pure if (is(T == Date)) {
-    return PGValue(
-        PGType.DATE,
-        PGFormat.TEXT,
-        (value.to!(char[]) ~ '\0'),
-    );
+    auto s = value.toISOExtString;
+    return PGValue(PGType.DATE, PGFormat.TEXT, (s.to!(char[]) ~ '\0'));
 }
 
 /// ditto
 PGValue convertToPG(T) (in T value)
 @safe pure if (is(T == DateTime)) {
-    return PGValue(
-        PGType.TIMESTAMP,
-        PGFormat.TEXT,
-        (value.to!(char[]) ~ '\0'),
-    );
+    auto s = value.toISOExtString;
+    return PGValue(PGType.TIMESTAMP, PGFormat.TEXT, (s.to!(char[]) ~ '\0'));
 }
 
 /// ditto
