@@ -5,6 +5,7 @@ private import std.conv;
 private import std.format;
 private import std.datetime;
 private import std.algorithm;
+private import std.json: JSONValue;
 private import std.traits:
     isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray;
 private import std.range: ElementType;
@@ -107,6 +108,17 @@ PGValue convertToPG(T) (in T value)
 }
 
 /// ditto
+PGValue convertToPG(T)(in T value)
+@safe if (is(T == JSONValue)) {
+    auto s = value.toString();
+    return PGValue(
+        PGType.JSON,
+        PGFormat.TEXT,
+        (s.to!(char[]) ~ '\0'),
+    );
+}
+
+/// ditto
 PGValue convertToPG(T) (in T value)
 @safe if (isArray!T && !isSomeString!T) {
     alias TI = ElementType!T;
@@ -142,8 +154,7 @@ PGValue convertToPG(T) (in T value)
                 // We escape only quote and backslashes in array.
                 if (rv[pos] == '"' || rv[pos] == '\\') {
                     r ~= rv[start .. pos ] ~ '\\' ~ rv[pos];
-                    pos += 1;
-                    start = pos;
+                    start = pos + 1;
                 }
             }
             if (start < rv.length)
