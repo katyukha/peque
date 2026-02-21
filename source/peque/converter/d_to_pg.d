@@ -5,6 +5,7 @@ private import std.conv;
 private import std.format;
 private import std.datetime;
 private import std.algorithm;
+private import std.json: JSONValue;
 private import std.traits:
     isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray;
 private import std.range: ElementType;
@@ -20,6 +21,18 @@ package(peque) @safe pure const struct PGValue {
     PGType type;
     PGFormat format = PGFormat.TEXT;
     char[] value;
+
+    this(PGType type, PGFormat format, in char[] value) @safe pure {
+        assert(
+            value.length > 0 && value[$ - 1] == '\0',
+             "PGValue value must be null-terminated!");
+        assert(
+            value.length < int.max,
+             "Too large value length for PGValue!");
+        this.type = type;
+        this.format = format;
+        this.value = value;
+    }
 
     /// Compute length of value
     int length() @trusted { return cast(int)value.length; }
@@ -73,21 +86,15 @@ PGValue convertToPG(T) (in T value)
 /// ditto
 PGValue convertToPG(T) (in T value)
 @safe pure if (is(T == Date)) {
-    return PGValue(
-        PGType.DATE,
-        PGFormat.TEXT,
-        (value.to!(char[]) ~ '\0'),
-    );
+    auto s = value.toISOExtString;
+    return PGValue(PGType.DATE, PGFormat.TEXT, (s.to!(char[]) ~ '\0'));
 }
 
 /// ditto
 PGValue convertToPG(T) (in T value)
 @safe pure if (is(T == DateTime)) {
-    return PGValue(
-        PGType.TIMESTAMP,
-        PGFormat.TEXT,
-        (value.to!(char[]) ~ '\0'),
-    );
+    auto s = value.toISOExtString;
+    return PGValue(PGType.TIMESTAMP, PGFormat.TEXT, (s.to!(char[]) ~ '\0'));
 }
 
 /// ditto
@@ -97,6 +104,17 @@ PGValue convertToPG(T) (in T value)
         PGType.TIMESTAMPTZ,
         PGFormat.TEXT,
         (value.to!(char[]) ~ '\0'),
+    );
+}
+
+/// ditto
+PGValue convertToPG(T)(in T value)
+@safe if (is(T == JSONValue)) {
+    auto s = value.toString();
+    return PGValue(
+        PGType.JSON,
+        PGFormat.TEXT,
+        (s.to!(char[]) ~ '\0'),
     );
 }
 
@@ -123,6 +141,7 @@ PGValue convertToPG(T) (in T value)
     } else static if (isArray!TI && !isSomeString!TI) {
         result ~= value.map!((v) => convertToPG(v).value[0 .. $-1]).join(",");
     }else {
+        // Case when array is array of strings. Special handling. here to escape resulting array correctly
         result ~= value.map!((v) {
             // We skip ending \0 symbol in value
             auto rv = convertToPG(v).value[0 .. $-1];
@@ -135,11 +154,10 @@ PGValue convertToPG(T) (in T value)
                 // We escape only quote and backslashes in array.
                 if (rv[pos] == '"' || rv[pos] == '\\') {
                     r ~= rv[start .. pos ] ~ '\\' ~ rv[pos];
-                    pos += 1;
-                    start = pos;
+                    start = pos + 1;
                 }
             }
-            if (start < rv.length - 1)
+            if (start < rv.length)
                 // Is we have some part of value not added to result,
                 // that we have to do it now.
                 r ~= rv[start .. $];
@@ -160,4 +178,23 @@ unittest {
     import std.exception: assertThrown;
     import core.exception: AssertError;
     convertToPG("t1\0; H").assertThrown!AssertError;
+}
+
+// Test that array element quoting/escaping in convertToPG works correctly
+unittest {
+    auto v = convertToPG!(string[])(["a\"b", "c\\d"]);
+    auto s = v.value[0 .. $ - 1].idup; // skip terminating NUL
+    assert(s == "{\"a\\\"b\",\"c\\\\d\"}");
+
+    // Test if last symbol in element of array string escaped
+    assert(convertToPG!(string[])(["a\"b", "c\\"]).value[0 .. $ - 1] == "{\"a\\\"b\",\"c\\\\\"}");
+
+    assert(
+        convertToPG!(string[][])(
+            [
+                ["a\"b", "c\\"],
+                ["ag\"42", "mix\""],
+            ]
+        ).value[0 .. $ - 1] == "{{\"a\\\"b\",\"c\\\\\"},{\"ag\\\"42\",\"mix\\\"\"}}"
+    );
 }

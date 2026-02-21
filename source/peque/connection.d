@@ -132,7 +132,8 @@ struct Connection {
     string escapeString(in string value) {
         return _connection.borrow!((auto ref conn) @trusted {
             int error;
-            char[] buf = new char[value.length * 2];
+            // allocate space for terminating NUL: 2*len + 1
+            char[] buf = new char[value.length * 2 + 1];
             auto size = PQescapeStringConn(
                 conn._pg_conn,
                 &buf[0],      // to
@@ -143,11 +144,14 @@ struct Connection {
                 error == 0,
                 "Cannot escape string %s: %s".format(
                     value, errorMessage));
+            // size bytes were written (not counting terminating NUL)
             return buf[0 .. size].idup;
         });
     }
 
-    /** Execute query
+    /** Execute query as raw SQL.
+      * This is not recommended for queries with parameters,
+      * as it may lead to SQL injection. Perefer usage of execParams instead.
       *
       * Params:
       *     query = SQL query to execute
@@ -157,7 +161,7 @@ struct Connection {
     auto exec(in string query) {
         auto res = Result(
             _connection.borrow!((auto ref conn) @trusted {
-                return PQexec(_connection._pg_conn, query.toStringz);
+                return PQexec(conn._pg_conn, query.toStringz);
             })
         );
         return res.ensureQueryOk();
@@ -185,6 +189,8 @@ struct Connection {
             );
         });
         auto res = Result(pg_result);
+        // TODO: Use template param to decide where we need to ensureOk or not.
+        //       Also, make it in same way for `exec`
         return res.ensureQueryOk();
     }
 

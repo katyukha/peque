@@ -9,6 +9,7 @@ private import std.format;
 private import std.conv;
 private import std.datetime;
 private import std.exception;
+private import std.json: JSONValue, parseJSON;
 
 private import peque.pg_type;
 private import peque.exception;
@@ -106,17 +107,33 @@ T convertTextTypeToD(T)(
         case PGType.GUESS:
             enforce!ConversionError(
                 length >= 19,
-                "Cannot parse value '%s'. It is not valid timestamp");
+                "Cannot parse value as timestamp: value is too short");
             if (length == 19)
-                // it seems that it is timestamp with timezone
+                // no timezone suffix: treat as UTC timestamp
                 return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
             else
-                // it seems that it is timestamp with timezone
+                // timezone suffix present: parse as timestamp with timezone
                 return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
         case PGType.TIMESTAMP:
             return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
         case PGType.TIMESTAMPTZ:
             return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
+        default:
+            assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+    }
+}
+
+/// ditto
+T convertTextTypeToD(T)(
+        scope const char* data,
+        in int length,
+        in PGType pg_type)
+@trusted if (is(T == JSONValue)) {
+    switch(pg_type) {
+        case PGType.GUESS:
+        case PGType.JSON:
+        case PGType.JSONB:
+            return parseJSON(data[0 .. length].idup);
         default:
             assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
     }

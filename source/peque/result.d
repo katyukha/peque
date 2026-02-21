@@ -252,9 +252,10 @@ struct Result {
         enforce!RowNotExistsError(
             row_number >= 0 && row_number < ntuples,
             "Row %s does not exists in result!".format(row_number));
+        // fix: check column index against number of fields, not number of tuples
         enforce!ColNotExistsError(
-            col_number >= 0 && col_number < ntuples,
-            "Row %s does not exists in result!".format(row_number));
+            col_number >= 0 && col_number < nfields(),
+            "Column %s does not exists in result!".format(col_number));
         return ResultValue(_result, row_number, col_number);
     }
 
@@ -293,7 +294,6 @@ struct Result {
       * or if result was consumed via range API
       **/
    @property bool empty() {
-      import std.stdio;
       return _current_range_index >= ntuples;
    }
 
