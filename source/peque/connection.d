@@ -161,7 +161,7 @@ struct Connection {
     auto exec(in string query) {
         auto res = Result(
             _connection.borrow!((auto ref conn) @trusted {
-                return PQexec(_connection._pg_conn, query.toStringz);
+                return PQexec(conn._pg_conn, query.toStringz);
             })
         );
         return res.ensureQueryOk();

@@ -294,7 +294,6 @@ struct Result {
       * or if result was consumed via range API
       **/
    @property bool empty() {
-      import std.stdio;
       return _current_range_index >= ntuples;
    }
 

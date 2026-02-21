@@ -106,12 +106,12 @@ T convertTextTypeToD(T)(
         case PGType.GUESS:
             enforce!ConversionError(
                 length >= 19,
-                "Cannot parse value '%s'. It is not valid timestamp");
+                "Cannot parse value as timestamp: value is too short");
             if (length == 19)
-                // it seems that it is timestamp with timezone
+                // no timezone suffix: treat as UTC timestamp
                 return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
             else
-                // it seems that it is timestamp with timezone
+                // timezone suffix present: parse as timestamp with timezone
                 return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
         case PGType.TIMESTAMP:
             return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
