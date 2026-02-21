@@ -53,8 +53,6 @@ struct ResultValue {
     private int _row_number;
     private int _col_number;
 
-    @disable this(this);
-
     private this(ResultInternal result, in int row_number, in int col_number) {
         _result = result;
         _row_number = row_number;
@@ -132,8 +130,6 @@ struct ResultValue {
 struct ResultRow {
     private ResultInternal _result;
     private int _row_number;
-
-    @disable this(this);
 
     private this(ResultInternal result, in int row_number) {
         _result = result;

@@ -118,8 +118,10 @@ struct Connection {
     auto status() { return _connection.borrow!((auto ref conn) @trusted => PQstatus(conn._pg_conn)); }
 
     /// Return most recent error message
-    auto errorMessage() @trusted {
-        return PQerrorMessage(_connection._pg_conn).fromStringz.idup;
+    auto errorMessage() {
+        return _connection.borrow!((auto ref conn) @trusted {
+            return PQerrorMessage(conn._pg_conn).fromStringz.idup;
+        });
     }
 
     /** Escape value as postgresql string
