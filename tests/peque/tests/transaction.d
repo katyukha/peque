@@ -102,4 +102,45 @@ unittest {
     assert(res[0][0].get!(string[]) == ["t1", "t2", "t3", "t4", "t5"]);
 }
 
+// Test transaction() helper — commit on success, rollback on exception
+unittest {
+    import std.exception: assertThrown;
 
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
+
+    c.exec("
+        DROP TABLE IF EXISTS peque_transaction2;
+        CREATE TABLE peque_transaction2 (code varchar(5));
+    ");
+
+    Result res;
+
+    // Successful transaction: changes must be committed
+    c.transaction(() {
+        c.execParams("INSERT INTO peque_transaction2 VALUES ('a')");
+        c.execParams("INSERT INTO peque_transaction2 VALUES ('b')");
+    });
+    res = c.execParams("SELECT ARRAY(SELECT code FROM peque_transaction2 ORDER BY code)");
+    assert(res[0][0].get!(string[]) == ["a", "b"]);
+
+    // Failed transaction: changes must be rolled back
+    assertThrown(c.transaction(() {
+        c.execParams("INSERT INTO peque_transaction2 VALUES ('c')");
+        throw new Exception("abort");
+    }));
+    res = c.execParams("SELECT ARRAY(SELECT code FROM peque_transaction2 ORDER BY code)");
+    assert(res[0][0].get!(string[]) == ["a", "b"]);  // 'c' not committed
+
+    // transaction() with return value
+    auto count = c.transaction(() {
+        c.execParams("INSERT INTO peque_transaction2 VALUES ('d')");
+        return c.execParams("SELECT count(*) FROM peque_transaction2")[0][0].get!long;
+    });
+    assert(count == 3);
+}

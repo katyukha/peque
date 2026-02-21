@@ -253,6 +253,22 @@ struct Connection {
     auto commit() { return execParams("COMMIT"); }
 
     auto rollback() { return execParams("ROLLBACK"); }
+
+    /** Execute fun inside a transaction.
+      *
+      * Calls BEGIN before fun, COMMIT on success, and ROLLBACK if fun throws.
+      *
+      * Params:
+      *     fun = delegate to execute inside the transaction
+      *
+      * Returns: whatever fun returns (void is allowed)
+      **/
+    auto transaction(T)(scope T delegate() fun) {
+        begin();
+        scope(failure) rollback();
+        scope(success) commit();
+        return fun();
+    }
 }
 
 
