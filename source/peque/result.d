@@ -91,10 +91,6 @@ struct ResultValue {
 
     /// Implementation of get value
     private T getImpl(T)() {
-        enforce!ConversionError(
-            getFormat == ColFormat.text,
-            "At the moment, peque supports only deserialization of postgres text types.");
-
         // get original postgresql value
         scope const char* val = _result.borrow!((auto ref res) @trusted {
             return PQgetvalue(
@@ -102,8 +98,13 @@ struct ResultValue {
                 _row_number,
                 _col_number);
         });
-        // Return converted value
-        return convertTextTypeToD!T(val, getLength, getType);
+        // Dispatch to text or binary converter based on column wire format
+        final switch(getFormat) {
+            case ColFormat.text:
+                return convertTextTypeToD!T(val, getLength, getType);
+            case ColFormat.binary:
+                return convertBinaryTypeToD!T(val, getLength, getType);
+        }
     }
 
     /// Convert value to string representation
