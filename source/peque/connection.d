@@ -223,10 +223,15 @@ struct Connection {
             return r;
         }());
         static foreach(i; T.length.iota) {
-            param_values[i] = &values[i].value[0];
-            param_types[i] = values[i].type;
-            param_lengths[i] = values[i].length;
+            param_types[i]   = values[i].type;
             param_formats[i] = values[i].format;
+            if (values[i].isNull) {
+                param_values[i]  = null;
+                param_lengths[i] = 0;
+            } else {
+                param_values[i]  = &values[i].value[0];
+                param_lengths[i] = values[i].length;
+            }
         }
 
         auto pg_result = _connection.borrow!((auto ref conn) @trusted {

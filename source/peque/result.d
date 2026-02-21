@@ -93,24 +93,33 @@ struct ResultValue {
             getFormat == ColFormat.text,
             "At the moment, peque supports only deserialization of postgres text types.");
 
-        // get original postgresql value
-        scope const char* val = _result.borrow!((auto ref res) @trusted {
-            return PQgetvalue(
-                res._pg_result,
-                _row_number,
-                _col_number);
-        });
-        // Return converted value
-        return convertTextTypeToD!T(val, getLength, getType);
+        static if (is(T == Nullable!U, U)) {
+            if (isNull) return T.init;
+            scope const char* val = _result.borrow!((auto ref res) @trusted {
+                return PQgetvalue(res._pg_result, _row_number, _col_number);
+            });
+            return Nullable!U(convertTextTypeToD!U(val, getLength, getType));
+        } else {
+            // get original postgresql value
+            scope const char* val = _result.borrow!((auto ref res) @trusted {
+                return PQgetvalue(res._pg_result, _row_number, _col_number);
+            });
+            // Return converted value
+            return convertTextTypeToD!T(val, getLength, getType);
+        }
     }
 
     /// Convert value to string representation
     T get(T)() {
-        enforce!ConversionError(
-            !isNull,
-            "Attempt to call 'get' on NULL value. " ~
-            "Check value via .isNull method befor calling get.");
-        return getImpl!T;
+        static if (is(T == Nullable!U, U)) {
+            return getImpl!T;  // null is valid for Nullable
+        } else {
+            enforce!ConversionError(
+                !isNull,
+                "Attempt to call 'get' on NULL value. " ~
+                "Check value via .isNull method befor calling get.");
+            return getImpl!T;
+        }
     }
 
     /// ditto

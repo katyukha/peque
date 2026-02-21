@@ -9,11 +9,10 @@ private import std.json: JSONValue;
 private import std.traits:
     isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray;
 private import std.range: ElementType;
+private import std.typecons: Nullable;
 
 private import peque.pg_type;
 private import peque.pg_format;
-
-//TODO: Handle nullable types here
 
 /** Struct that represents value to be passed to PQexecParams.
   **/
@@ -21,6 +20,7 @@ package(peque) @safe pure const struct PGValue {
     PGType type;
     PGFormat format = PGFormat.TEXT;
     char[] value;
+    bool isNull = false;
 
     this(PGType type, PGFormat format, in char[] value) @safe pure {
         assert(
@@ -34,6 +34,12 @@ package(peque) @safe pure const struct PGValue {
         this.value = value;
     }
 
+    private this(PGType type, bool isNull) @safe pure
+    in (isNull, "Use the regular constructor for non-null values") {
+        this.type   = type;
+        this.isNull = true;
+    }
+
     /// Compute length of value
     int length() @trusted { return cast(int)value.length; }
 
@@ -41,6 +47,11 @@ package(peque) @safe pure const struct PGValue {
         return "type=%s, format=%s, length=%s, value=%s".format(
             this.type, this.format, this.length, this.value);
     }
+}
+
+/// Create a PGValue representing SQL NULL with the given PostgreSQL type OID.
+package(peque) PGValue pgNullValue(PGType type) @safe pure {
+    return PGValue(type, true);
 }
 
 
@@ -170,6 +181,20 @@ PGValue convertToPG(T) (in T value)
     }
     result ~= "}";
     return PGValue(PGArrayType, PGFormat.TEXT, result ~ "\0");
+}
+
+
+/// ditto — Nullable: sends SQL NULL when empty, delegates to inner type when set
+PGValue convertToPG(T)(in T value)
+@safe if (is(T == Nullable!U, U)) {
+    // Re-bind U inside the function body; the constraint's alias is not in scope here.
+    static if (is(T == Nullable!Inner, Inner)) {
+        if (value.isNull)
+            return pgNullValue(convertToPG!Inner(Inner.init).type);
+        return convertToPG!Inner(value.get);
+    } else {
+        static assert(false, "Unreachable");
+    }
 }
 
 
