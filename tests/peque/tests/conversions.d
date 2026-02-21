@@ -167,13 +167,13 @@ unittest {
     assert(res.getValue(0, 0).get!string == "9223372036854775899");
     assert(res.getValue(0, 0).get!ulong == 9223372036854775899);
 
-    res = c.execParams("SELECT round($1,10)", 0.1782788489);
+    res = c.execParams("SELECT round($1::numeric,10)", 0.1782788489);
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!float.isClose(0.1782788489f));
     assert(res.getValue(0, 0).get!double.isClose(0.1782788489));
     assert(res.getValue(0, 0).get!string == "0.1782788489");
 
-    res = c.execParams("SELECT round($1, 5)", 0.17827f);
+    res = c.execParams("SELECT round($1::numeric, 5)", 0.17827f);
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!float.isClose(0.1782700000f));
     assert(res.getValue(0, 0).get!double.isClose(0.1782700000));
