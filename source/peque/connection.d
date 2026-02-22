@@ -28,6 +28,25 @@ enum OnSuccess {
 }
 
 
+/** Transaction isolation level passed to Connection.transaction().
+  *
+  * Maps directly to PostgreSQL isolation levels. The default template parameter
+  * value is readCommitted, which is the PostgreSQL built-in default.
+  *
+  * Use serverDefault to emit a plain BEGIN with no ISOLATION LEVEL clause,
+  * deferring to whatever the server, role, or database has been configured with
+  * (postgresql.conf / ALTER ROLE / ALTER DATABASE).
+  *
+  * Note: PostgreSQL does not implement readUncommitted — it is omitted here.
+  **/
+enum IsolationLevel {
+    readCommitted,  /// Each statement sees a fresh snapshot of committed data (PostgreSQL built-in default).
+    repeatableRead, /// Entire transaction sees a snapshot taken at the first statement.
+    serializable,   /// Full serializability; may abort with a serialization failure that must be retried.
+    serverDefault,  /// Defer to the server/role/database configured default — emits plain BEGIN.
+}
+
+
 /// Connection to PostgreSQL database.
 struct Connection {
 
@@ -270,22 +289,38 @@ struct Connection {
 
     /** Execute fun inside a transaction.
       *
-      * Calls BEGIN before fun. On success, commits or rolls back depending on
-      * the onSuccess template parameter. On failure (exception), always rolls back.
+      * Issues BEGIN (with the requested isolation level) before calling fun.
+      * On success, commits or rolls back depending on onSuccess. On failure
+      * (exception), always rolls back.
       *
       * Params:
-      *     onSuccess = whether to commit or rollback when fun completes without throwing.
-      *                 Defaults to OnSuccess.commit. Use OnSuccess.rollback for
-      *                 dry-runs and tests that must not persist changes.
-      *     fun       = delegate receiving a ref Transaction handle; use it to run
-      *                 queries inside the transaction.
+      *     onSuccess = whether to commit or rollback when fun completes without
+      *                 throwing. Defaults to OnSuccess.commit. Use
+      *                 OnSuccess.rollback for dry-runs and tests that must not
+      *                 persist changes.
+      *     isolation = transaction isolation level. Defaults to
+      *                 IsolationLevel.readCommitted — always sets the level
+      *                 explicitly regardless of server configuration. Use
+      *                 IsolationLevel.serverDefault to defer to the server,
+      *                 role, or database configured default instead.
+      *     fun       = delegate receiving a ref Transaction handle; use it to
+      *                 run queries inside the transaction.
       *
       * Returns: whatever fun returns (void is allowed)
       **/
-    auto transaction(OnSuccess onSuccess = OnSuccess.commit, T)(
-            scope T delegate(ref Transaction) fun) {
+    auto transaction(
+            OnSuccess onSuccess = OnSuccess.commit,
+            IsolationLevel isolation = IsolationLevel.readCommitted,
+            T)(scope T delegate(ref Transaction) fun) {
         auto tx = Transaction(this);
-        begin();
+        static if (isolation == IsolationLevel.serverDefault)
+            begin();
+        else static if (isolation == IsolationLevel.readCommitted)
+            exec("BEGIN ISOLATION LEVEL READ COMMITTED");
+        else static if (isolation == IsolationLevel.repeatableRead)
+            exec("BEGIN ISOLATION LEVEL REPEATABLE READ");
+        else static if (isolation == IsolationLevel.serializable)
+            exec("BEGIN ISOLATION LEVEL SERIALIZABLE");
         scope(failure) tx.rollback();
         static if (onSuccess == OnSuccess.commit)
             scope(success) tx.commit();
