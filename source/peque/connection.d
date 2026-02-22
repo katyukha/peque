@@ -17,6 +17,17 @@ private import peque.pg_format;
 private import peque.result;
 
 
+/** Controls what happens at the end of a successful transaction() call.
+  *
+  * On failure (exception) the transaction is always rolled back regardless
+  * of this setting.
+  **/
+enum OnSuccess {
+    commit,   /// Commit the transaction (default).
+    rollback, /// Roll back even on success — useful for dry-runs and tests.
+}
+
+
 /// Connection to PostgreSQL database.
 struct Connection {
 
@@ -261,19 +272,65 @@ struct Connection {
 
     /** Execute fun inside a transaction.
       *
-      * Calls BEGIN before fun, COMMIT on success, and ROLLBACK if fun throws.
+      * Calls BEGIN before fun. On success, commits or rolls back depending on
+      * the onSuccess template parameter. On failure (exception), always rolls back.
       *
       * Params:
-      *     fun = delegate to execute inside the transaction
+      *     onSuccess = whether to commit or rollback when fun completes without throwing.
+      *                 Defaults to OnSuccess.commit. Use OnSuccess.rollback for
+      *                 dry-runs and tests that must not persist changes.
+      *     fun       = delegate receiving a ref Transaction handle; use it to run
+      *                 queries inside the transaction.
       *
       * Returns: whatever fun returns (void is allowed)
       **/
-    auto transaction(T)(scope T delegate() fun) {
+    auto transaction(OnSuccess onSuccess = OnSuccess.commit, T)(
+            scope T delegate(ref Transaction) fun) {
+        auto tx = Transaction(this);
         begin();
-        scope(failure) rollback();
-        scope(success) commit();
-        return fun();
+        scope(failure) tx.rollback();
+        static if (onSuccess == OnSuccess.commit)
+            scope(success) tx.commit();
+        else
+            scope(success) tx.rollback();
+        return fun(tx);
     }
+}
+
+
+/** Restricted connection handle passed into the delegate by Connection.transaction().
+  *
+  * Exposes exec, execParams, and escapeString but intentionally hides commit() and
+  * rollback() — transaction lifetime is managed entirely by Connection.transaction().
+  * This prevents accidental early commit/rollback inside the delegate.
+  *
+  * Transaction is not copyable and must not be stored beyond the delegate scope.
+  **/
+struct Transaction {
+    private Connection _conn;
+
+    @disable this(this);
+    @disable void opAssign(typeof(this));
+
+    package(peque) this(Connection conn) { _conn = conn; }
+
+    /// Execute raw SQL (forwards to Connection.exec).
+    auto exec(in string query) { return _conn.exec(query); }
+
+    /// Execute query with parameters (forwards to Connection.execParams).
+    auto execParams(in string query) { return _conn.execParams(query); }
+
+    /// ditto
+    auto execParams(T...)(in string query, T params) {
+        return _conn.execParams(query, params);
+    }
+
+    /// Escape a string value (forwards to Connection.escapeString).
+    string escapeString(in string value) { return _conn.escapeString(value); }
+
+    // Package-only — called exclusively by Connection.transaction() scope guards.
+    package(peque) auto commit()   { return _conn.commit(); }
+    package(peque) auto rollback() { return _conn.rollback(); }
 }
 
 

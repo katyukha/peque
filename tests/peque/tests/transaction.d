@@ -2,7 +2,7 @@ module peque.tests.transaction;
 
 private import std.process: environment;
 
-private import peque.connection: Connection;
+private import peque.connection: Connection, Transaction, OnSuccess;
 private import peque.result: Result;
 
 
@@ -122,25 +122,68 @@ unittest {
     Result res;
 
     // Successful transaction: changes must be committed
-    c.transaction(() {
-        c.execParams("INSERT INTO peque_transaction2 VALUES ('a')");
-        c.execParams("INSERT INTO peque_transaction2 VALUES ('b')");
+    c.transaction((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction2 VALUES ('a')");
+        tx.execParams("INSERT INTO peque_transaction2 VALUES ('b')");
     });
     res = c.execParams("SELECT ARRAY(SELECT code FROM peque_transaction2 ORDER BY code)");
     assert(res[0][0].get!(string[]) == ["a", "b"]);
 
     // Failed transaction: changes must be rolled back
-    assertThrown(c.transaction(() {
-        c.execParams("INSERT INTO peque_transaction2 VALUES ('c')");
+    assertThrown(c.transaction((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction2 VALUES ('c')");
         throw new Exception("abort");
     }));
     res = c.execParams("SELECT ARRAY(SELECT code FROM peque_transaction2 ORDER BY code)");
     assert(res[0][0].get!(string[]) == ["a", "b"]);  // 'c' not committed
 
     // transaction() with return value
-    auto count = c.transaction(() {
-        c.execParams("INSERT INTO peque_transaction2 VALUES ('d')");
-        return c.execParams("SELECT count(*) FROM peque_transaction2")[0][0].get!long;
+    auto count = c.transaction((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction2 VALUES ('d')");
+        return tx.execParams("SELECT count(*) FROM peque_transaction2")[0][0].get!long;
     });
     assert(count == 3);
+}
+
+// Test transaction() with OnSuccess.rollback — dry-run mode
+unittest {
+    import std.exception: assertThrown;
+
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
+
+    c.exec("
+        DROP TABLE IF EXISTS peque_transaction3;
+        CREATE TABLE peque_transaction3 (code varchar(5));
+    ");
+
+    // Successful delegate with OnSuccess.rollback: changes must NOT be persisted
+    c.transaction!(OnSuccess.rollback)((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction3 VALUES ('x')");
+        tx.execParams("INSERT INTO peque_transaction3 VALUES ('y')");
+    });
+    auto res = c.execParams("SELECT count(*) FROM peque_transaction3");
+    assert(res[0][0].get!long == 0);  // nothing committed
+
+    // Failed delegate with OnSuccess.rollback: still rolls back (no change)
+    assertThrown(c.transaction!(OnSuccess.rollback)((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction3 VALUES ('z')");
+        throw new Exception("abort");
+    }));
+    res = c.execParams("SELECT count(*) FROM peque_transaction3");
+    assert(res[0][0].get!long == 0);
+
+    // OnSuccess.rollback with return value
+    auto count = c.transaction!(OnSuccess.rollback)((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction3 VALUES ('a')");
+        return tx.execParams("SELECT count(*) FROM peque_transaction3")[0][0].get!long;
+    });
+    assert(count == 1);  // visible inside the transaction
+    res = c.execParams("SELECT count(*) FROM peque_transaction3");
+    assert(res[0][0].get!long == 0);  // rolled back after returning
 }
