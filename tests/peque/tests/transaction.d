@@ -187,3 +187,105 @@ unittest {
     res = c.execParams("SELECT count(*) FROM peque_transaction3");
     assert(res[0][0].get!long == 0);  // rolled back after returning
 }
+
+// Test Transaction.savepoint() — partial rollbacks within a transaction
+unittest {
+    import std.exception: assertThrown;
+
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
+
+    c.exec("
+        DROP TABLE IF EXISTS peque_transaction4;
+        CREATE TABLE peque_transaction4 (code varchar(5));
+    ");
+
+    // Successful savepoint: both outer and savepoint changes are committed
+    c.transaction((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction4 VALUES ('a')");
+        tx.savepoint((ref tx) {
+            tx.execParams("INSERT INTO peque_transaction4 VALUES ('b')");
+        });
+    });
+    auto res = c.execParams(
+        "SELECT ARRAY(SELECT code FROM peque_transaction4 ORDER BY code)");
+    assert(res[0][0].get!(string[]) == ["a", "b"]);
+
+    // Failed savepoint: only savepoint changes rolled back; outer transaction survives
+    c.transaction((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction4 VALUES ('c')");
+        assertThrown(tx.savepoint((ref tx) {
+            tx.execParams("INSERT INTO peque_transaction4 VALUES ('d')");
+            throw new Exception("abort savepoint");
+        }));
+        // 'd' rolled back to savepoint; 'c' still in the transaction
+    });
+    res = c.execParams(
+        "SELECT ARRAY(SELECT code FROM peque_transaction4 ORDER BY code)");
+    assert(res[0][0].get!(string[]) == ["a", "b", "c"]);  // 'd' not committed
+
+    // OnSuccess.rollback savepoint: savepoint changes rolled back even on success
+    c.transaction((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction4 VALUES ('e')");
+        tx.savepoint!(OnSuccess.rollback)((ref tx) {
+            tx.execParams("INSERT INTO peque_transaction4 VALUES ('f')");
+        });
+        // 'f' rolled back by savepoint; 'e' still in the transaction
+    });
+    res = c.execParams(
+        "SELECT ARRAY(SELECT code FROM peque_transaction4 ORDER BY code)");
+    assert(res[0][0].get!(string[]) == ["a", "b", "c", "e"]);  // 'f' not committed
+
+    // Savepoint with return value
+    auto count = c.transaction((ref tx) {
+        return tx.savepoint((ref tx) {
+            tx.execParams("INSERT INTO peque_transaction4 VALUES ('g')");
+            return tx.execParams(
+                "SELECT count(*) FROM peque_transaction4")[0][0].get!long;
+        });
+    });
+    assert(count == 5);  // a, b, c, e, g visible inside savepoint
+    res = c.execParams(
+        "SELECT ARRAY(SELECT code FROM peque_transaction4 ORDER BY code)");
+    assert(res[0][0].get!(string[]) == ["a", "b", "c", "e", "g"]);
+}
+
+// Test nested savepoints
+unittest {
+    import std.exception: assertThrown;
+
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
+
+    c.exec("
+        DROP TABLE IF EXISTS peque_transaction5;
+        CREATE TABLE peque_transaction5 (code varchar(5));
+    ");
+
+    // Nested savepoints: inner failure only rolls back inner changes
+    c.transaction((ref tx) {
+        tx.execParams("INSERT INTO peque_transaction5 VALUES ('a')");
+        tx.savepoint((ref tx) {
+            tx.execParams("INSERT INTO peque_transaction5 VALUES ('b')");
+            assertThrown(tx.savepoint((ref tx) {
+                tx.execParams("INSERT INTO peque_transaction5 VALUES ('c')");
+                throw new Exception("abort inner savepoint");
+            }));
+            // 'c' rolled back; 'b' still in outer savepoint
+        });
+        // 'a' and 'b' in the transaction
+    });
+    auto res = c.execParams(
+        "SELECT ARRAY(SELECT code FROM peque_transaction5 ORDER BY code)");
+    assert(res[0][0].get!(string[]) == ["a", "b"]);  // 'c' not committed
+}

@@ -308,6 +308,7 @@ struct Connection {
   **/
 struct Transaction {
     private Connection _conn;
+    private uint _spCounter;
 
     @disable this(this);
     @disable void opAssign(typeof(this));
@@ -327,6 +328,45 @@ struct Transaction {
 
     /// Escape a string value (forwards to Connection.escapeString).
     string escapeString(in string value) { return _conn.escapeString(value); }
+
+    /** Execute fun inside a savepoint.
+      *
+      * Creates a named savepoint before calling fun. On success, releases the
+      * savepoint (or rolls back to it and releases on OnSuccess.rollback). On
+      * failure (exception), rolls back to the savepoint and releases it, leaving
+      * the enclosing transaction intact.
+      *
+      * Savepoint names are auto-generated from a per-transaction counter
+      * (sp_0, sp_1, …) — unique within the transaction, no user input required.
+      *
+      * fun receives ref to the same Transaction, so business logic is unaware
+      * of savepoint nesting depth. Savepoints may be nested arbitrarily.
+      *
+      * Params:
+      *     onSuccess = OnSuccess.commit (default) releases the savepoint;
+      *                 OnSuccess.rollback rolls back to it and releases it —
+      *                 useful for dry-run sub-operations inside a transaction.
+      *     fun       = delegate to execute inside the savepoint.
+      *
+      * Returns: whatever fun returns (void is allowed)
+      **/
+    auto savepoint(OnSuccess onSuccess = OnSuccess.commit, T)(
+            scope T delegate(ref Transaction) fun) {
+        auto name = "sp_%d".format(_spCounter++);
+        _conn.exec("SAVEPOINT " ~ name);
+        scope(failure) {
+            _conn.exec("ROLLBACK TO SAVEPOINT " ~ name);
+            _conn.exec("RELEASE SAVEPOINT " ~ name);
+        }
+        static if (onSuccess == OnSuccess.commit)
+            scope(success) _conn.exec("RELEASE SAVEPOINT " ~ name);
+        else
+            scope(success) {
+                _conn.exec("ROLLBACK TO SAVEPOINT " ~ name);
+                _conn.exec("RELEASE SAVEPOINT " ~ name);
+            }
+        return fun(this);
+    }
 
     // Package-only — called exclusively by Connection.transaction() scope guards.
     package(peque) auto commit()   { return _conn.commit(); }
