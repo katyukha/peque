@@ -2,7 +2,7 @@ module peque.tests.transaction;
 
 private import std.process: environment;
 
-private import peque.connection: Connection, Transaction, OnSuccess;
+private import peque.connection: Connection, Transaction, OnSuccess, IsolationLevel;
 private import peque.result: Result;
 
 
@@ -279,4 +279,51 @@ unittest {
     auto res = c.execParams(
         "SELECT ARRAY(SELECT code FROM peque_transaction5 ORDER BY code)");
     assert(res[0][0].get!(string[]) == ["a", "b"]);  // 'c' not committed
+}
+
+// Test IsolationLevel template parameter — verify the level is actually applied
+unittest {
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
+
+    // Default (readCommitted) — always set explicitly
+    c.transaction((ref tx) {
+        auto level = tx.execParams(
+            "SELECT current_setting('transaction_isolation')")[0][0].get!string;
+        assert(level == "read committed");
+    });
+
+    // repeatableRead
+    c.transaction!(OnSuccess.commit, IsolationLevel.repeatableRead)((ref tx) {
+        auto level = tx.execParams(
+            "SELECT current_setting('transaction_isolation')")[0][0].get!string;
+        assert(level == "repeatable read");
+    });
+
+    // serializable
+    c.transaction!(OnSuccess.commit, IsolationLevel.serializable)((ref tx) {
+        auto level = tx.execParams(
+            "SELECT current_setting('transaction_isolation')")[0][0].get!string;
+        assert(level == "serializable");
+    });
+
+    // serverDefault — defers to server config; just verify it opens without error
+    // and that the session default (read committed on a stock server) is in effect
+    c.transaction!(OnSuccess.commit, IsolationLevel.serverDefault)((ref tx) {
+        auto level = tx.execParams(
+            "SELECT current_setting('transaction_isolation')")[0][0].get!string;
+        assert(level == "read committed");  // stock server default
+    });
+
+    // OnSuccess.rollback combined with non-default isolation level
+    c.transaction!(OnSuccess.rollback, IsolationLevel.repeatableRead)((ref tx) {
+        auto level = tx.execParams(
+            "SELECT current_setting('transaction_isolation')")[0][0].get!string;
+        assert(level == "repeatable read");
+    });
 }
