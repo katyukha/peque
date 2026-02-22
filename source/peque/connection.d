@@ -202,8 +202,6 @@ struct Connection {
             );
         });
         auto res = Result(pg_result);
-        // TODO: Use template param to decide where we need to ensureOk or not.
-        //       Also, make it in same way for `exec`
         return res.ensureQueryOk();
     }
 

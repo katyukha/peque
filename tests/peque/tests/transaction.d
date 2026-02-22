@@ -32,26 +32,22 @@ unittest {
                ('t3', 'Test 3'),
                ('t4', 'Test 4');
     ");
-    res.ensureQueryOk;
     assert(res.cmdStatus == "INSERT 0 4");
     assert(res.cmdTuples == 4);
     assert(res.ntuples == 0);
     assert(res.nfields == 0);
 
     res = c.execParams("SELECT ARRAY(SELECT code FROM peque_transaction ORDER BY code ASC)");
-    res.ensureQueryOk;
     assert(res[0][0].get!(string[]) == ["t1", "t2", "t3", "t4"]);
 
     // Start transaction
-    res = c.begin;
-    res.ensureQueryOk;
+    c.begin;
 
     // Insert row (via exec)
     res = c.exec("
         INSERT INTO peque_transaction (code, title)
         VALUES ('t5', 'Test 5');
     ");
-    res.ensureQueryOk;
     assert(res.cmdStatus == "INSERT 0 1");
 
     // Ensure row inserted
@@ -63,30 +59,26 @@ unittest {
         INSERT INTO peque_transaction (code, title)
         VALUES ('t6', 'Test 6')
     ");
-    res.ensureQueryOk;
     assert(res.cmdStatus == "INSERT 0 1");
 
     // Ensure row inserted
     res = c.execParams("SELECT ARRAY(SELECT code FROM peque_transaction ORDER BY code ASC)");
     assert(res[0][0].get!(string[]) == ["t1", "t2", "t3", "t4", "t5", "t6"]);
 
-    res = c.rollback;
-    res.ensureQueryOk;
+    c.rollback;
 
     // Ensure all changes discarded
     res = c.execParams("SELECT ARRAY(SELECT code FROM peque_transaction ORDER BY code ASC)");
     assert(res[0][0].get!(string[]) == ["t1", "t2", "t3", "t4"]);
 
     // Start new transaction
-    res = c.begin;
-    res.ensureQueryOk;
+    c.begin;
 
     // Insert row (via exec)
     res = c.exec("
         INSERT INTO peque_transaction (code, title)
         VALUES ('t5', 'Test 5');
     ");
-    res.ensureQueryOk;
     assert(res.cmdStatus == "INSERT 0 1");
 
     // Ensure row added
@@ -94,8 +86,7 @@ unittest {
     assert(res[0][0].get!(string[]) == ["t1", "t2", "t3", "t4", "t5"]);
 
     // Commit transaction
-    res = c.commit;
-    res.ensureQueryOk;
+    c.commit;
 
     // Ensure row is still in database
     res = c.execParams("SELECT ARRAY(SELECT code FROM peque_transaction ORDER BY code ASC)");
