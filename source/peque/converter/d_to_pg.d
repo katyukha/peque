@@ -9,11 +9,10 @@ private import std.json: JSONValue;
 private import std.traits:
     isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray;
 private import std.range: ElementType;
+private import std.typecons: Nullable;
 
 private import peque.pg_type;
 private import peque.pg_format;
-
-//TODO: Handle nullable types here
 
 /** Struct that represents value to be passed to PQexecParams.
   **/
@@ -21,17 +20,19 @@ package(peque) @safe pure const struct PGValue {
     PGType type;
     PGFormat format = PGFormat.TEXT;
     char[] value;
+    bool isNull = false;
 
-    this(PGType type, PGFormat format, in char[] value) @safe pure {
+    this(PGType type, PGFormat format, in char[] value, in bool is_null=false) @safe pure {
         assert(
-            value.length > 0 && value[$ - 1] == '\0',
+            is_null || (value.length > 0 && value[$ - 1] == '\0'),
              "PGValue value must be null-terminated!");
         assert(
-            value.length < int.max,
+            is_null || value.length < int.max,
              "Too large value length for PGValue!");
         this.type = type;
         this.format = format;
         this.value = value;
+        this.isNull = is_null;
     }
 
     /// Compute length of value
@@ -170,6 +171,20 @@ PGValue convertToPG(T) (in T value)
     }
     result ~= "}";
     return PGValue(PGArrayType, PGFormat.TEXT, result ~ "\0");
+}
+
+
+/// ditto — Nullable: sends SQL NULL when empty, delegates to inner type when set
+PGValue convertToPG(T)(in T value)
+@safe if (is(T == Nullable!U, U)) {
+    // Re-bind U inside the function body; the constraint's alias is not in scope here.
+    static if (is(T == Nullable!Inner, Inner)) {
+        if (value.isNull)
+            return PGValue(convertToPG!Inner(Inner.init).type, PGFormat.TEXT, value: null, is_null: true);
+        return convertToPG!Inner(value.get);
+    } else {
+        static assert(false, "Unreachable");
+    }
 }
 
 

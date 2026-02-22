@@ -1,4 +1,4 @@
-name: Tests (Linux)
+name: Tests (Linux) +  (PG Versions)
 on: [push]
 
 jobs:
@@ -7,26 +7,25 @@ jobs:
     strategy:
       matrix:
         os:
-          - ubuntu-latest
-          - ubuntu-22.04
           - ubuntu-24.04
           #- windows-latest
         dc:
           - dmd-latest
-          - dmd-2.111.0
           - ldc-latest
-          - ldc-1.41.0
         buildConf:
           - Static
           - Dynamic
         pgVersion:
+          - 15
+          - 16
           - 17
         include:
-          # ubuntu-22.04-arm
-          - { os: ubuntu-22.04-arm, dc: ldc-1.41.0, buildConf: Static,   pgVersion: 17 }
-          - { os: ubuntu-22.04-arm, dc: ldc-1.41.0, buildConf: Dynamic,  pgVersion: 17 }
           # ubuntu-24.04-arm
+          - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Static,   pgVersion: 15 }
+          - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Static,   pgVersion: 16 }
           - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Static,   pgVersion: 17 }
+          - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Dynamic,  pgVersion: 15 }
+          - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Dynamic,  pgVersion: 16 }
           - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Dynamic,  pgVersion: 17 }
     env:
       POSTGRES_USER: peque

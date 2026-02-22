@@ -53,8 +53,6 @@ struct ResultValue {
     private int _row_number;
     private int _col_number;
 
-    @disable this(this);
-
     private this(ResultInternal result, in int row_number, in int col_number) {
         _result = result;
         _row_number = row_number;
@@ -89,30 +87,34 @@ struct ResultValue {
         return cast(ColFormat)PQfformat(_result._pg_result, _col_number);
     }
 
-    /// Implementation of get value
+    /** Implementation of get value (low level).
+      *
+      * Null values and nullable types are handled in `get` method.
+      **/
     private T getImpl(T)() {
         enforce!ConversionError(
             getFormat == ColFormat.text,
             "At the moment, peque supports only deserialization of postgres text types.");
 
-        // get original postgresql value
         scope const char* val = _result.borrow!((auto ref res) @trusted {
-            return PQgetvalue(
-                res._pg_result,
-                _row_number,
-                _col_number);
+            return PQgetvalue(res._pg_result, _row_number, _col_number);
         });
-        // Return converted value
         return convertTextTypeToD!T(val, getLength, getType);
     }
 
     /// Convert value to string representation
     T get(T)() {
-        enforce!ConversionError(
-            !isNull,
-            "Attempt to call 'get' on NULL value. " ~
-            "Check value via .isNull method befor calling get.");
-        return getImpl!T;
+        static if (is(T == Nullable!U, U)) {
+            if (isNull) return T.init;
+            return Nullable!U(getImpl!U);
+        } else {
+            enforce!ConversionError(
+                !isNull,
+                "Attempt to call 'get' on NULL value. " ~
+                "Check value via .isNull method before calling get or " ~
+                "expect Nullable type.");
+            return getImpl!T;
+        }
     }
 
     /// ditto
@@ -132,8 +134,6 @@ struct ResultValue {
 struct ResultRow {
     private ResultInternal _result;
     private int _row_number;
-
-    @disable this(this);
 
     private this(ResultInternal result, in int row_number) {
         _result = result;

@@ -17,6 +17,17 @@ private import peque.pg_format;
 private import peque.result;
 
 
+/** Controls what happens at the end of a successful transaction() call.
+  *
+  * On failure (exception) the transaction is always rolled back regardless
+  * of this setting.
+  **/
+enum OnSuccess {
+    commit,   /// Commit the transaction (default).
+    rollback, /// Roll back even on success — useful for dry-runs and tests.
+}
+
+
 /// Connection to PostgreSQL database.
 struct Connection {
 
@@ -118,8 +129,10 @@ struct Connection {
     auto status() { return _connection.borrow!((auto ref conn) @trusted => PQstatus(conn._pg_conn)); }
 
     /// Return most recent error message
-    auto errorMessage() @trusted {
-        return PQerrorMessage(_connection._pg_conn).fromStringz.idup;
+    auto errorMessage() {
+        return _connection.borrow!((auto ref conn) @trusted {
+            return PQerrorMessage(conn._pg_conn).fromStringz.idup;
+        });
     }
 
     /** Escape value as postgresql string
@@ -189,8 +202,6 @@ struct Connection {
             );
         });
         auto res = Result(pg_result);
-        // TODO: Use template param to decide where we need to ensureOk or not.
-        //       Also, make it in same way for `exec`
         return res.ensureQueryOk();
     }
 
@@ -221,10 +232,15 @@ struct Connection {
             return r;
         }());
         static foreach(i; T.length.iota) {
-            param_values[i] = &values[i].value[0];
-            param_types[i] = values[i].type;
-            param_lengths[i] = values[i].length;
+            param_types[i]   = values[i].type;
             param_formats[i] = values[i].format;
+            if (values[i].isNull) {
+                param_values[i]  = null;
+                param_lengths[i] = 0;
+            } else {
+                param_values[i]  = &values[i].value[0];
+                param_lengths[i] = values[i].length;
+            }
         }
 
         auto pg_result = _connection.borrow!((auto ref conn) @trusted {
@@ -251,6 +267,108 @@ struct Connection {
     auto commit() { return execParams("COMMIT"); }
 
     auto rollback() { return execParams("ROLLBACK"); }
+
+    /** Execute fun inside a transaction.
+      *
+      * Calls BEGIN before fun. On success, commits or rolls back depending on
+      * the onSuccess template parameter. On failure (exception), always rolls back.
+      *
+      * Params:
+      *     onSuccess = whether to commit or rollback when fun completes without throwing.
+      *                 Defaults to OnSuccess.commit. Use OnSuccess.rollback for
+      *                 dry-runs and tests that must not persist changes.
+      *     fun       = delegate receiving a ref Transaction handle; use it to run
+      *                 queries inside the transaction.
+      *
+      * Returns: whatever fun returns (void is allowed)
+      **/
+    auto transaction(OnSuccess onSuccess = OnSuccess.commit, T)(
+            scope T delegate(ref Transaction) fun) {
+        auto tx = Transaction(this);
+        begin();
+        scope(failure) tx.rollback();
+        static if (onSuccess == OnSuccess.commit)
+            scope(success) tx.commit();
+        else
+            scope(success) tx.rollback();
+        return fun(tx);
+    }
+}
+
+
+/** Restricted connection handle passed into the delegate by Connection.transaction().
+  *
+  * Exposes exec, execParams, and escapeString but intentionally hides commit() and
+  * rollback() — transaction lifetime is managed entirely by Connection.transaction().
+  * This prevents accidental early commit/rollback inside the delegate.
+  *
+  * Transaction is not copyable and must not be stored beyond the delegate scope.
+  **/
+struct Transaction {
+    private Connection _conn;
+    private uint _spCounter;
+
+    @disable this(this);
+    @disable void opAssign(typeof(this));
+
+    package(peque) this(Connection conn) { _conn = conn; }
+
+    /// Execute raw SQL (forwards to Connection.exec).
+    auto exec(in string query) { return _conn.exec(query); }
+
+    /// Execute query with parameters (forwards to Connection.execParams).
+    auto execParams(in string query) { return _conn.execParams(query); }
+
+    /// ditto
+    auto execParams(T...)(in string query, T params) {
+        return _conn.execParams(query, params);
+    }
+
+    /// Escape a string value (forwards to Connection.escapeString).
+    string escapeString(in string value) { return _conn.escapeString(value); }
+
+    /** Execute fun inside a savepoint.
+      *
+      * Creates a named savepoint before calling fun. On success, releases the
+      * savepoint (or rolls back to it and releases on OnSuccess.rollback). On
+      * failure (exception), rolls back to the savepoint and releases it, leaving
+      * the enclosing transaction intact.
+      *
+      * Savepoint names are auto-generated from a per-transaction counter
+      * (sp_0, sp_1, …) — unique within the transaction, no user input required.
+      *
+      * fun receives ref to the same Transaction, so business logic is unaware
+      * of savepoint nesting depth. Savepoints may be nested arbitrarily.
+      *
+      * Params:
+      *     onSuccess = OnSuccess.commit (default) releases the savepoint;
+      *                 OnSuccess.rollback rolls back to it and releases it —
+      *                 useful for dry-run sub-operations inside a transaction.
+      *     fun       = delegate to execute inside the savepoint.
+      *
+      * Returns: whatever fun returns (void is allowed)
+      **/
+    auto savepoint(OnSuccess onSuccess = OnSuccess.commit, T)(
+            scope T delegate(ref Transaction) fun) {
+        auto name = "sp_%d".format(_spCounter++);
+        _conn.exec("SAVEPOINT " ~ name);
+        scope(failure) {
+            _conn.exec("ROLLBACK TO SAVEPOINT " ~ name);
+            _conn.exec("RELEASE SAVEPOINT " ~ name);
+        }
+        static if (onSuccess == OnSuccess.commit)
+            scope(success) _conn.exec("RELEASE SAVEPOINT " ~ name);
+        else
+            scope(success) {
+                _conn.exec("ROLLBACK TO SAVEPOINT " ~ name);
+                _conn.exec("RELEASE SAVEPOINT " ~ name);
+            }
+        return fun(this);
+    }
+
+    // Package-only — called exclusively by Connection.transaction() scope guards.
+    package(peque) auto commit()   { return _conn.commit(); }
+    package(peque) auto rollback() { return _conn.rollback(); }
 }
 
 
