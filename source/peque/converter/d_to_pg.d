@@ -22,22 +22,17 @@ package(peque) @safe pure const struct PGValue {
     char[] value;
     bool isNull = false;
 
-    this(PGType type, PGFormat format, in char[] value) @safe pure {
+    this(PGType type, PGFormat format, in char[] value, in bool is_null=false) @safe pure {
         assert(
-            value.length > 0 && value[$ - 1] == '\0',
+            is_null || (value.length > 0 && value[$ - 1] == '\0'),
              "PGValue value must be null-terminated!");
         assert(
-            value.length < int.max,
+            is_null || value.length < int.max,
              "Too large value length for PGValue!");
         this.type = type;
         this.format = format;
         this.value = value;
-    }
-
-    private this(PGType type, bool isNull) @safe pure
-    in (isNull, "Use the regular constructor for non-null values") {
-        this.type   = type;
-        this.isNull = true;
+        this.isNull = is_null;
     }
 
     /// Compute length of value
@@ -47,11 +42,6 @@ package(peque) @safe pure const struct PGValue {
         return "type=%s, format=%s, length=%s, value=%s".format(
             this.type, this.format, this.length, this.value);
     }
-}
-
-/// Create a PGValue representing SQL NULL with the given PostgreSQL type OID.
-package(peque) PGValue pgNullValue(PGType type) @safe pure {
-    return PGValue(type, true);
 }
 
 
@@ -190,7 +180,7 @@ PGValue convertToPG(T)(in T value)
     // Re-bind U inside the function body; the constraint's alias is not in scope here.
     static if (is(T == Nullable!Inner, Inner)) {
         if (value.isNull)
-            return pgNullValue(convertToPG!Inner(Inner.init).type);
+            return PGValue(convertToPG!Inner(Inner.init).type, PGFormat.TEXT, value: null, is_null: true);
         return convertToPG!Inner(value.get);
     } else {
         static assert(false, "Unreachable");
