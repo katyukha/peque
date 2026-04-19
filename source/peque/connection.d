@@ -15,6 +15,7 @@ private import peque.exception;
 private import peque.pg_type;
 private import peque.pg_format;
 private import peque.result;
+private import peque.wait_strategy;
 
 
 /** Controls what happens at the end of a successful transaction() call.
@@ -44,6 +45,17 @@ enum IsolationLevel {
     repeatableRead, /// Entire transaction sees a snapshot taken at the first statement.
     serializable,   /// Full serializability; may abort with a serialization failure that must be retried.
     serverDefault,  /// Defer to the server/role/database configured default — emits plain BEGIN.
+}
+
+
+/** Type-erased pair of wait delegates stored in every Connection.
+  *
+  * Set once at construction from a WaitStrategy value; never mutated afterwards.
+  * Read-only during query dispatch — trivially thread-safe without atomics.
+  **/
+private struct RuntimeWaitStrategy {
+    void delegate(int fd) @safe waitReadable;
+    void delegate(int fd) @safe waitWritable;
 }
 
 
@@ -95,9 +107,23 @@ struct Connection {
     ) ConnectionInternal;
 
 
-    private ConnectionInternal _connection;
+    package(peque) ConnectionInternal _connection;
+    private RuntimeWaitStrategy _asyncHooks;
 
-    this(in string conn_info) {
+    /** Construct from a connection string. WaitStrategy defaults to PollWaitStrategy.
+      *
+      * Pass a custom WaitStrategy as the second argument to override:
+      * ---
+      * // vibe.d pool factory:
+      * auto conn = Connection(connStr, VibeWaitStrategy());
+      *
+      * // Tests:
+      * MockWaitStrategy mock;
+      * auto conn = Connection(connStr, MockWS(&mock));
+      * ---
+      **/
+    this(WS = PollWaitStrategy)(in string conn_info, WS ws = WS.init)
+            if (isWaitStrategy!WS) {
         _connection = ConnectionInternal(conn_info);
         enforce!ConnectionError(
             _connection.borrow!((auto ref conn) @trusted => conn._pg_conn !is null),
@@ -105,9 +131,12 @@ struct Connection {
         enforce!ConnectionError(
             status == CONNECTION_OK,
             "Cannot connect to db: %s!".format(errorMessage));
+        _setHooks(ws);
     }
 
-    this(in string[string] params) {
+    /// ditto
+    this(WS = PollWaitStrategy)(in string[string] params, WS ws = WS.init)
+            if (isWaitStrategy!WS) {
         _connection = ConnectionInternal(params);
         enforce!ConnectionError(
             _connection.borrow!((auto ref conn) @trusted => conn._pg_conn !is null),
@@ -115,22 +144,26 @@ struct Connection {
         enforce!ConnectionError(
             status == CONNECTION_OK,
             "Cannot connect to db: %s!".format(errorMessage));
+        _setHooks(ws);
     }
 
-    this(in string dbname, in string user, in string password,
-            in string host, in string port) {
-        string[string] params;
-        if (dbname && dbname.length > 0)
-            params["dbname"] = dbname.dup;
-        if (user && user.length > 0)
-            params["user"] = user.dup;
-        if (password && password.length > 0)
-            params["password"] = password.dup;
-        if (host && host.length > 0)
-            params["host"] = host.dup;
-        if (port && port.length > 0)
-            params["port"] = port.dup;
-        this(params);
+    /// ditto
+    this(WS = PollWaitStrategy)(in string dbname, in string user, in string password,
+            in string host, in string port, WS ws = WS.init)
+            if (isWaitStrategy!WS) {
+        string[string] p;
+        if (dbname && dbname.length > 0)   p["dbname"]   = dbname.dup;
+        if (user && user.length > 0)       p["user"]     = user.dup;
+        if (password && password.length > 0) p["password"] = password.dup;
+        if (host && host.length > 0)       p["host"]     = host.dup;
+        if (port && port.length > 0)       p["port"]     = port.dup;
+        this(p, ws);
+    }
+
+    private void _setHooks(WS)(WS ws) if (isWaitStrategy!WS) {
+        _asyncHooks = RuntimeWaitStrategy(
+            (int fd) @trusted { ws.waitReadable(fd); },
+            (int fd) @trusted { ws.waitWritable(fd); });
     }
 
     auto serverVersion() {
@@ -151,6 +184,24 @@ struct Connection {
     auto errorMessage() {
         return _connection.borrow!((auto ref conn) @trusted {
             return PQerrorMessage(conn._pg_conn).fromStringz.idup;
+        });
+    }
+
+    /// Switch connection to non-blocking libpq mode.
+    /// Required by vibe.d pool factory so PQflush returns 1 (would block)
+    /// rather than briefly blocking the event thread.
+    void setNonBlocking(bool nb) @trusted {
+        _connection.borrow!((auto ref conn) @trusted {
+            enforce!ConnectionError(
+                PQsetnonblocking(conn._pg_conn, nb ? 1 : 0) == 0,
+                "PQsetnonblocking failed: " ~ errorMessage);
+        });
+    }
+
+    /// Return whether the connection is in non-blocking mode.
+    bool isNonBlocking() @trusted {
+        return _connection.borrow!((auto ref conn) @trusted {
+            return PQisnonblocking(conn._pg_conn) != 0;
         });
     }
 
@@ -181,47 +232,121 @@ struct Connection {
         });
     }
 
-    /** Execute query as raw SQL.
-      * This is not recommended for queries with parameters,
-      * as it may lead to SQL injection. Perefer usage of execParams instead.
-      *
-      * Params:
-      *     query = SQL query to execute
-      *
-      * Returns: PequeResult
-      **/
-    auto exec(in string query) {
-        auto res = Result(
-            _connection.borrow!((auto ref conn) @trusted {
-                return PQexec(conn._pg_conn, query.toStringz);
-            })
-        );
-        return res.ensureQueryOk();
+    // --- Private async loop helpers ---
+
+    /** Get the underlying socket fd for poll() calls. **/
+    private int _socket() @trusted {
+        return _connection.borrow!((auto ref conn) @trusted {
+            return PQsocket(conn._pg_conn);
+        });
     }
 
-    /** Execute query with parameters
+    /** Flush the send buffer after PQsendQuery* / PQsendPrepare*.
+      *
+      * PQflush returns:
+      *   0  — all data sent
+      *   1  — would block; wait for fd to be writable then retry
+      *  -1  — error
+      **/
+    private void _flushLoop() @trusted {
+        int fd = _socket();
+        _connection.borrow!((auto ref conn) @trusted {
+            while (true) {
+                int r = PQflush(conn._pg_conn);
+                if (r == 0) return;
+                enforce!QueryError(r > 0, "PQflush failed: " ~ errorMessage);
+                _asyncHooks.waitWritable(fd);
+            }
+        });
+    }
+
+    /** Wait until the server result is ready (PQisBusy == 0).
+      *
+      * Loop: waitReadable → PQconsumeInput → check PQisBusy.
+      **/
+    private void _waitForResult() @trusted {
+        int fd = _socket();
+        _connection.borrow!((auto ref conn) @trusted {
+            while (true) {
+                _asyncHooks.waitReadable(fd);
+                enforce!QueryError(
+                    PQconsumeInput(conn._pg_conn) == 1,
+                    "PQconsumeInput failed: " ~ errorMessage);
+                if (PQisBusy(conn._pg_conn) == 0) return;
+            }
+        });
+    }
+
+    /** Collect the last result and clear any intermediate ones.
+      *
+      * PQsendQuery can produce multiple results (multi-statement strings).
+      * We return the last one (matching PQexec behaviour) and PQclear all
+      * earlier ones. Caller must call ensureQueryOk() on the returned Result.
+      **/
+    private Result _collectResult() @trusted {
+        return _connection.borrow!((auto ref conn) @trusted {
+            auto cur = PQgetResult(conn._pg_conn);
+            enforce!QueryError(cur !is null,
+                "PQgetResult returned null — query send failed");
+            // Walk to the last result; PQclear each intermediate one.
+            PGresult* next;
+            while ((next = PQgetResult(conn._pg_conn)) !is null) {
+                PQclear(cur);
+                cur = next;
+            }
+            return Result(cur);
+        });
+    }
+
+    // --- Public query API ---
+
+    /** Execute query as raw SQL (async path via PQsendQuery).
+      *
+      * Supports multi-statement strings (separated by semicolons).
+      * Only the result of the first statement is returned.
+      *
+      * This method is NOT safe for user-supplied input — use execParams instead.
       *
       * Params:
-      *     query = SQL query to exexecute
-      *     params = variadic parameters for query.
+      *     query = SQL query string (hardcoded/trusted SQL only)
+      * Returns: Result of the first statement
+      **/
+    auto exec(in string query) {
+        _connection.borrow!((auto ref conn) @trusted {
+            enforce!QueryError(
+                PQsendQuery(conn._pg_conn, query.toStringz) == 1,
+                "PQsendQuery failed: " ~ errorMessage);
+        });
+        _flushLoop();
+        _waitForResult();
+        auto r = _collectResult();
+        return r.ensureQueryOk();
+    }
+
+    /** Execute query with parameters (async path via PQsendQueryParams).
       *
-      * Returns: PequeResult
+      * Safe for user-supplied values — parameters are passed separately,
+      * never interpolated into the SQL string.
+      *
+      * Params:
+      *     query  = SQL query string with $1, $2, … placeholders
+      *     params = variadic D values, converted to PostgreSQL text format
+      * Returns: Result
       **/
     auto execParams(in string query) {
-        auto pg_result = _connection.borrow!((auto ref conn) @trusted {
-             return PQexecParams(
-                     conn._pg_conn,
-                     query.toStringz,
-                     0,  // param length
-                     null,  // param types
-                     null,  // param_values.ptr,
-                     null,  // param_lengths.ptr,
-                     null,  // param_formats.ptr,
-                     PGFormat.TEXT,  // text result format
-            );
+        _connection.borrow!((auto ref conn) @trusted {
+            enforce!QueryError(
+                PQsendQueryParams(
+                    conn._pg_conn,
+                    query.toStringz,
+                    0, null, null, null, null,
+                    PGFormat.TEXT) == 1,
+                "PQsendQueryParams failed: " ~ errorMessage);
         });
-        auto res = Result(pg_result);
-        return res.ensureQueryOk();
+        _flushLoop();
+        _waitForResult();
+        auto r = _collectResult();
+        return r.ensureQueryOk();
     }
 
     /// ditto
@@ -236,7 +361,7 @@ struct Connection {
         int[T.length] param_formats;
 
         /* We have to convert all params to PGValue and keep references for them
-         * while PQexecParams completed.
+         * while PQsendQueryParams completes.
          *
          * This is done via string mixin to avoid copying elements of
          * array of PGValues.
@@ -262,30 +387,66 @@ struct Connection {
             }
         }
 
-        auto pg_result = _connection.borrow!((auto ref conn) @trusted {
-        //auto pg_result = (auto ref conn) @trusted {
-             return PQexecParams(
-                     conn._pg_conn,
-                     query.toStringz,
-                     T.length,  // param length
-                     param_types.ptr,
-                     param_values.ptr,
-                     param_lengths.ptr,
-                     param_formats.ptr,
-                     PGFormat.TEXT,  // text result format
-            );
-        //}(_connection);
+        _connection.borrow!((auto ref conn) @trusted {
+            enforce!QueryError(
+                PQsendQueryParams(
+                    conn._pg_conn,
+                    query.toStringz,
+                    T.length,
+                    param_types.ptr,
+                    param_values.ptr,
+                    param_lengths.ptr,
+                    param_formats.ptr,
+                    PGFormat.TEXT) == 1,
+                "PQsendQueryParams failed: " ~ errorMessage);
         });
-        auto res = Result(pg_result);
-        return res.ensureQueryOk();
+        _flushLoop();
+        _waitForResult();
+        auto r = _collectResult();
+        return r.ensureQueryOk();
     }
 
+    /** Prepare a named server-side statement.
+      *
+      * Returns a move-only PreparedStatement handle. The statement is
+      * deallocated automatically when the handle goes out of scope.
+      *
+      * The name must match ^[A-Za-z_][A-Za-z0-9_]*$ — validated before sending
+      * to prevent injection through the statement name.
+      *
+      * PreparedStatement must not outlive this Connection (or pool borrow scope).
+      *
+      * Params:
+      *     name  = server-side statement name (alphanumeric + underscore)
+      *     query = SQL query with $1, $2, … placeholders
+      * Returns: PreparedStatement handle
+      **/
+    auto prepare(in string name, in string query) {
+        import std.regex: matchFirst;
+        enforce!QueryError(
+            !matchFirst(name, `^[A-Za-z_][A-Za-z0-9_]*$`).empty,
+            "PreparedStatement name must be alphanumeric+underscore, got: " ~ name);
 
-    auto begin() { return execParams("BEGIN"); }
+        _connection.borrow!((auto ref conn) @trusted {
+            enforce!QueryError(
+                PQsendPrepare(
+                    conn._pg_conn,
+                    name.toStringz,
+                    query.toStringz,
+                    0, null) == 1,
+                "PQsendPrepare failed: " ~ errorMessage);
+        });
+        _flushLoop();
+        _waitForResult();
+        _collectResult().ensureQueryOk();
+        return PreparedStatement(name, this);
+    }
 
-    auto commit() { return execParams("COMMIT"); }
+    auto begin() { return exec("BEGIN"); }
 
-    auto rollback() { return execParams("ROLLBACK"); }
+    auto commit() { return exec("COMMIT"); }
+
+    auto rollback() { return exec("ROLLBACK"); }
 
     /** Execute fun inside a transaction.
       *
@@ -314,7 +475,7 @@ struct Connection {
             T)(scope T delegate(ref Transaction) fun) {
         auto tx = Transaction(this);
         static if (isolation == IsolationLevel.serverDefault)
-            begin();
+            exec("BEGIN");
         else static if (isolation == IsolationLevel.readCommitted)
             exec("BEGIN ISOLATION LEVEL READ COMMITTED");
         else static if (isolation == IsolationLevel.repeatableRead)
@@ -407,9 +568,112 @@ struct Transaction {
 }
 
 
+/** RAII handle to a server-side prepared statement.
+  *
+  * Move-only — copy is disabled. Destructor issues DEALLOCATE.
+  * Must not outlive the Connection (or pool borrow scope) that created it.
+  *
+  * Obtain via Connection.prepare():
+  * ---
+  * auto stmt = conn.prepare("find_user",
+  *     "SELECT id, name FROM users WHERE id = $1");
+  * auto result = stmt.exec(42);
+  * // stmt goes out of scope → DEALLOCATE find_user sent automatically
+  * ---
+  **/
+struct PreparedStatement {
+    private string      _name;
+    private Connection  _conn;   // copy of Connection (bumps SafeRefCounted refcount)
+    private bool        _valid = false;
+
+    @disable this(this);
+    @disable void opAssign(typeof(this));
+
+    package(peque) this(string name, Connection conn) {
+        _name  = name;
+        _conn  = conn;
+        _valid = true;
+    }
+
+    ~this() @trusted {
+        if (!_valid) return;
+        // Best-effort DEALLOCATE — ignore errors (connection may be closing)
+        try { _conn.exec("DEALLOCATE " ~ _name); } catch (Exception) {}
+        _valid = false;
+    }
+
+    /** Execute the prepared statement with the given parameters.
+      *
+      * Uses the same async path as execParams (PQsendQueryPrepared + flush/consume loop).
+      **/
+    auto exec(T...)(T params) {
+        import std.range: iota;
+        import std.conv;
+        import peque.converter;
+
+        static if (T.length == 0) {
+            _conn._connection.borrow!((auto ref conn) @trusted {
+                enforce!QueryError(
+                    PQsendQueryPrepared(
+                        conn._pg_conn,
+                        _name.toStringz,
+                        0, null, null, null,
+                        PGFormat.TEXT) == 1,
+                    "PQsendQueryPrepared failed: " ~ _conn.errorMessage);
+            });
+        } else {
+            uint[T.length] param_types;
+            const(char)*[T.length] param_values;
+            int[T.length] param_lengths;
+            int[T.length] param_formats;
+
+            PGValue[T.length] values = mixin(() {
+                auto r = "[convertToPG!(T[0])(params[0])";
+                static if (T.length > 1)
+                    static foreach(i; iota(1, T.length))
+                        r ~= ", convertToPG!(T[" ~ i.to!string ~ "])(params[" ~ i.to!string ~ "]) ";
+                r ~= "]";
+                return r;
+            }());
+            static foreach(i; T.length.iota) {
+                param_types[i]   = values[i].type;
+                param_formats[i] = values[i].format;
+                if (values[i].isNull) {
+                    param_values[i]  = null;
+                    param_lengths[i] = 0;
+                } else {
+                    param_values[i]  = &values[i].value[0];
+                    param_lengths[i] = values[i].length;
+                }
+            }
+
+            _conn._connection.borrow!((auto ref conn) @trusted {
+                enforce!QueryError(
+                    PQsendQueryPrepared(
+                        conn._pg_conn,
+                        _name.toStringz,
+                        T.length,
+                        param_values.ptr,
+                        param_lengths.ptr,
+                        param_formats.ptr,
+                        PGFormat.TEXT) == 1,
+                    "PQsendQueryPrepared failed: " ~ _conn.errorMessage);
+            });
+        }
+
+        _conn._flushLoop();
+        _conn._waitForResult();
+        auto r = _conn._collectResult();
+        return r.ensureQueryOk();
+    }
+
+    /// Returns the server-side statement name.
+    string name() const { return _name; }
+}
+
+
 unittest {
     import std.exception;
 
     Connection("some bad connection string").assertThrown!ConnectionError;
 }
-

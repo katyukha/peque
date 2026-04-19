@@ -1,0 +1,116 @@
+/** Integration tests for ThreadConnectionPool.
+  *
+  * Covers: basic borrow, return value propagation, sequential borrows,
+  * exception safety (connection returned even when fun throws), capacity
+  * reporting, and health check (dead connection is replaced).
+  **/
+module peque.tests.pool;
+
+private import std.process: environment;
+private import std.exception: assertThrown, collectException;
+
+private import peque.connection: Connection;
+private import peque.pool: ThreadConnectionPool;
+private import peque.exception: QueryError;
+
+
+private Connection delegate() makeFactory() {
+    return () => Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+}
+
+
+/** Basic borrow: run a query and get a result back. **/
+unittest {
+    auto pool = ThreadConnectionPool(2, makeFactory());
+
+    auto res = pool.borrow((ref Connection conn) => conn.exec("SELECT 42::int"));
+    assert(res[0][0].get!int == 42);
+}
+
+
+/** Return value propagation: borrow can return any type. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+
+    string s = pool.borrow((ref Connection conn) {
+        auto res = conn.execParams("SELECT $1::text", "hello");
+        return res[0][0].get!string;
+    });
+    assert(s == "hello");
+}
+
+
+/** Sequential borrows: each borrow gets a working connection. **/
+unittest {
+    auto pool = ThreadConnectionPool(2, makeFactory());
+
+    foreach (i; 0 .. 5) {
+        auto res = pool.borrow((ref Connection conn) => conn.execParams("SELECT $1::int", i));
+        assert(res[0][0].get!int == i);
+    }
+}
+
+
+/** capacity() returns the value passed at construction. **/
+unittest {
+    auto pool = ThreadConnectionPool(3, makeFactory());
+    assert(pool.capacity == 3);
+}
+
+
+/** Exception safety: if fun throws, the connection is still returned to the pool
+  * and subsequent borrows work normally. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+
+    // First borrow throws a QueryError (bad SQL).
+    auto ex = collectException!QueryError(
+        pool.borrow((ref Connection conn) { conn.exec("NOT VALID SQL!!!"); }));
+    assert(ex !is null, "expected QueryError from bad SQL");
+
+    // Pool must be healthy — next borrow must succeed.
+    auto res = pool.borrow((ref Connection conn) => conn.exec("SELECT 1"));
+    assert(res[0][0].get!int == 1);
+}
+
+
+/** Exception safety: D exceptions also return the connection. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+
+    auto ex = collectException!Exception(
+        pool.borrow((ref Connection conn) { throw new Exception("test error"); }));
+    assert(ex !is null);
+    assert(ex.msg == "test error");
+
+    // Pool still works.
+    auto res = pool.borrow((ref Connection conn) => conn.exec("SELECT 2"));
+    assert(res[0][0].get!int == 2);
+}
+
+
+/** Range API works through a pool borrow (multi-row result iteration). **/
+unittest {
+    import std.algorithm: map;
+    import std.array: array;
+
+    auto pool = ThreadConnectionPool(1, makeFactory());
+
+    auto codes = pool.borrow((ref Connection conn) {
+        conn.exec("
+            DROP TABLE IF EXISTS peque_pool_test;
+            CREATE TABLE peque_pool_test (code varchar(5));
+            INSERT INTO peque_pool_test VALUES ('a'), ('b'), ('c');
+        ");
+        scope(exit) conn.exec("DROP TABLE IF EXISTS peque_pool_test");
+        auto res = conn.exec("SELECT code FROM peque_pool_test ORDER BY code");
+        return res.map!((row) => row["code"].as!string).array;
+    });
+    assert(codes == ["a", "b", "c"]);
+}

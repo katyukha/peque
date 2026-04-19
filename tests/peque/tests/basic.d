@@ -187,7 +187,8 @@ unittest {
     res = c.exec("SELECT code FROM peque_test;");
     res.ensureQueryOk;
     string[] res_arr_1;
-    foreach(row; res) res_arr_1 ~= row["code"].as!string;
+    foreach (row; res)
+        res_arr_1 ~= row["code"].as!string;
     assert(res_arr_1 == ["t1", "t2", "t3", "r4"]);
     assert(res.map!((row) => row["code"].as!string).array == ["t1", "t2", "t3", "r4"]);
 

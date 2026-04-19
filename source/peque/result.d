@@ -204,7 +204,12 @@ struct Result {
         if (bad_states.canFind(status.statusType))
             throw new QueryError(errorMessage);
 
-        return this;
+        // Use an explicit named copy rather than `return this` to avoid a
+        // DMD optimization bug where returning `this` directly from a method
+        // called on an rvalue temporary corrupts non-SafeRefCounted fields
+        // (specifically _current_range_index).
+        auto r = this;
+        return r;
     }
 
     /// Return number of rows (tuples) fetched.

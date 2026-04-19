@@ -91,6 +91,27 @@ mixin(joinFnBinds!staticBinding((){
 
 
         {q{size_t}, q{PQescapeStringConn}, q{PGconn* conn, char* to, const(char)* from, size_t length, int* error}},
+
+        // Async send — return 1=ok, 0=fail
+        {q{int}, q{PQsendQuery},              q{PGconn* conn, const(char)* query}},
+        {q{int}, q{PQsendQueryParams},        q{PGconn* conn, const(char)* command, int nParams, const(Oid)* paramTypes, const(char*)* paramValues, const(int)* paramLengths, const(int)* paramFormats, int resultFormat}},
+
+        // Flush / consume / busy / socket
+        {q{int},       q{PQflush},            q{PGconn* conn}},         // 0=done, 1=would block, -1=error
+        {q{int},       q{PQsocket},           q{const(PGconn)* conn}},
+        {q{int},       q{PQconsumeInput},     q{PGconn* conn}},         // 1=ok, 0=error
+        {q{int},       q{PQisBusy},           q{PGconn* conn}},         // 1=busy, 0=result ready
+        {q{PGresult*}, q{PQgetResult},        q{PGconn* conn}},
+
+        // Non-blocking mode
+        {q{int}, q{PQsetnonblocking},         q{PGconn* conn, int arg}},
+        {q{int}, q{PQisnonblocking},          q{const(PGconn)* conn}},
+
+        // Prepared statements (async path) — return 1=ok, 0=fail
+        {q{int},       q{PQsendPrepare},          q{PGconn* conn, const(char)* stmtName, const(char)* query, int nParams, const(Oid)* paramTypes}},
+        {q{int},       q{PQsendQueryPrepared},    q{PGconn* conn, const(char)* stmtName, int nParams, const(char*)* paramValues, const(int)* paramLengths, const(int)* paramFormats, int resultFormat}},
+        {q{int},       q{PQsendDescribePrepared}, q{PGconn* conn, const(char)* stmtName}},
+        {q{PGresult*}, q{PQdescribePrepared},     q{PGconn* conn, const(char)* stmtName}},
     ];
 
     return ret;
