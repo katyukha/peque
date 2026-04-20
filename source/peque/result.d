@@ -186,6 +186,22 @@ struct ResultRow {
             return res._colIdx(name);
         });
     }
+
+    /** Hydrate this row into a struct T.
+      *
+      * Dispatches through the hydration chain in peque.hydration.hydrateRow:
+      *   1. T has this(ref ResultRow)              → user constructor
+      *   2. T has static T fromRow(ref ResultRow)  → user factory
+      *   3. @model on T                            → map @field/@primaryKey fields
+      *   4. @autoHydrate on T                      → map all fields by convention
+      *   5. None of the above                      → compile-time error
+      *
+      * See also: Result.as!(T[]) to hydrate all rows at once.
+      **/
+    T as(T)() if (is(T == struct)) {
+        import peque.hydration: hydrateRow;
+        return hydrateRow!T(this);
+    }
 }
 
 /** This struct represents result of query and allows to fetch data received
@@ -325,7 +341,28 @@ struct Result {
         return getValue(row_number, col_number);
     }
 
-    /** Check if result is empty (or consumed by foreach loop)
+    /** Hydrate all rows into a D array.
+     *
+     * T must be a slice type (e.g. Partner[]). The element type is hydrated
+     * via ResultRow.as!ElemType using the same dispatch chain as the single-row
+     * method.
+     *
+     * Example:
+     * ---
+     * auto partners = conn.exec("SELECT id, name FROM res_partner")
+     *                     .as!(Partner[]);
+     * ---
+     **/
+   T as(T)() if (is(T == E[], E)) {
+       import std.range: ElementType;
+       T results;
+       results.length = ntuples;
+       foreach (i; 0 .. ntuples)
+           results[i] = getRow(i).as!(ElementType!T);
+       return results;
+   }
+
+   /** Check if result is empty (or consumed by foreach loop)
       *
       * Returns True for both cases: if result was originally empty
       * or if result was consumed via range API
