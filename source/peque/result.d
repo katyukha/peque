@@ -154,6 +154,14 @@ struct ResultRow {
             "Column %s does not exists in result!".format(col_name));
         return ResultValue(_result, _row_number, col_number);
     }
+
+    /** Return the column index for the given name, or -1 if not found.
+      **/
+    package(peque) int _fieldIndex(in string name) @trusted {
+        return _result.borrow!((auto ref res) @trusted {
+            return PQfnumber(res._pg_result, name.toStringz);
+        });
+    }
 }
 
 /** This struct represents result of query and allows to fetch data received
