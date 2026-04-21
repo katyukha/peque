@@ -96,9 +96,48 @@ if (isModel!M && isQueryContext!Ctx) {
     private enum _crudDelSQL     = "DELETE FROM " ~ _crudTable ~
                                    " WHERE " ~ _crudPk ~ " = $1";
 
-    /// Return all rows as M[].
+    /** Return all rows as M[], with optional ORDER BY.
+      *
+      * Order of precedence (first match wins):
+      *  1. Host repository defines `enum string defaultOrder = "col ASC"`.
+      *  2. Model M carries `@defaultOrder!("col")` UDA.
+      *  3. Neither — no ORDER BY, undefined DB order.
+      **/
     M[] findAll() {
-        return _ctx.exec(_crudSelAllSQL).as!(M[]);
+        import std.traits: hasUDA;
+        import peque.model: defaultOrder;
+
+        // Compute ORDER BY clause entirely at compile time.
+        // We inline the logic here because mixin template symbols are resolved
+        // at the instantiation site, so module-level helpers from repository.d
+        // would not be visible when the mixin is used in other modules.
+        enum _order = () {
+            // 1. Per-repo override: host struct has `enum string defaultOrder`
+            static if (__traits(hasMember, typeof(this), "defaultOrder") &&
+                       is(typeof(typeof(this).defaultOrder) == string))
+                return " ORDER BY " ~ typeof(this).defaultOrder;
+            // 2. Model-level @defaultOrder UDA
+            else static if (hasUDA!(M, defaultOrder)) {
+                static foreach (uda; __traits(getAttributes, M)) {{
+                    static if (is(uda) && is(uda == defaultOrder!fields, fields...)) {
+                        string result;
+                        bool first = true;
+                        static foreach (f; fields) {
+                            if (!first) result ~= ", ";
+                            result ~= f;
+                            first = false;
+                        }
+                        return " ORDER BY " ~ result;
+                    }
+                }}
+                return "";  // unreachable but satisfies return-type inference
+            }
+            // 3. No ordering
+            else
+                return "";
+        }();
+
+        return _ctx.exec(_crudSelAllSQL ~ _order).as!(M[]);
     }
 
     /** Return the row matching id, or Nullable.init if not found.

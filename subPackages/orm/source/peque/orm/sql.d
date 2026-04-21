@@ -25,7 +25,7 @@ private import std.conv: to;
 // Priority: @field("explicit") > camelToSnake(memberName).
 // Template form (not a function) to avoid "requires instance" errors inside
 // static foreach in CTFE functions.
-private template _colName(alias F, string memberName) {
+package(peque.orm) template _colName(alias F, string memberName) {
     alias _fudas = getUDAs!(F, field);
     static if (_fudas.length > 0 && !is(_fudas[0]) && _fudas[0].columnName.length > 0)
         enum string _colName = _fudas[0].columnName;
@@ -34,7 +34,7 @@ private template _colName(alias F, string memberName) {
 }
 
 // True when a field maps to a DB column: @field, @primaryKey, or @many2one.
-private template _isColField(alias F) {
+package(peque.orm) template _isColField(alias F) {
     enum bool _isColField =
         hasUDA!(F, field) || hasUDA!(F, primaryKey) || hasMany2OneUDA!F;
 }

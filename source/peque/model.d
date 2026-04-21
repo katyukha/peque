@@ -172,6 +172,55 @@ struct many2many(T, string junctionTable, string selfKey = "", string targetKey 
 struct related {}
 
 
+/** Override the PostgreSQL column type used by schemaSQL / modelDDL.
+  *
+  * By default, schemaSQL maps D types to PostgreSQL types automatically
+  * (int → INTEGER, string → TEXT, etc.).  Use @pgType to override for a
+  * specific field when the default is wrong.
+  *
+  * The supplied string is used verbatim as the column type — no automatic
+  * SERIAL substitution even on @primaryKey fields.
+  *
+  * Examples:
+  * ---
+  * @pgType("VARCHAR(255)")  string name;
+  * @pgType("UUID")          string id;
+  * @pgType("NUMERIC(10,2)") double price;
+  * ---
+  **/
+struct pgType {
+    string typeName;
+    this(string t) @safe pure nothrow { typeName = t; }
+}
+
+
+/** Specify default sort order for findAll() and the base QuerySet.
+  *
+  * Applied on a model struct. CRUDMixin.findAll() appends ORDER BY when this
+  * UDA is present and neither the host repository nor an explicit QuerySet
+  * ordering overrides it.
+  *
+  * Single field (ascending implied):
+  * ---
+  * @defaultOrder!"name"
+  * @model("res_partner")
+  * struct Partner { ... }
+  * ---
+  *
+  * Multiple fields with explicit direction:
+  * ---
+  * @defaultOrder!("date DESC", "id DESC")
+  * @model("sale_order")
+  * struct Order { ... }
+  * ---
+  *
+  * Per-repository override: define `enum defaultOrder = "col ASC"` as a
+  * manifest constant in your repository struct — it takes priority over
+  * the model UDA.
+  **/
+struct defaultOrder(fields...) if (fields.length >= 1) {}
+
+
 /** Check if a symbol has any @many2one!T UDA attached (any T).
   *
   * Used internally by the hydration and ORM layers to detect FK fields.
