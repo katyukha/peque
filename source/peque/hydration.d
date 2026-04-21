@@ -14,7 +14,8 @@
 module peque.hydration;
 
 private import peque.result: ResultRow;
-private import peque.model: model, field, primaryKey, autoHydrate;
+private import peque.model: model, field, primaryKey, autoHydrate,
+    many2one, one2many, many2many, related, hasMany2OneUDA;
 
 
 // ---------------------------------------------------------------------------
@@ -108,7 +109,11 @@ private T _hydrateAnnotated(T)(ref ResultRow row) {
         alias FieldType = Fields!T[i];
         alias FieldDecl = __traits(getMember, T, memberName);
 
-        static if (hasUDA!(FieldDecl, field) || hasUDA!(FieldDecl, primaryKey)) {
+        // Column fields: @field, @primaryKey, or @many2one (FK column).
+        // @related, @one2many, @many2many have no DB column — skipped implicitly
+        // (they carry none of these UDAs, so the static if below is false).
+        static if (hasUDA!(FieldDecl, field) || hasUDA!(FieldDecl, primaryKey) ||
+                   hasMany2OneUDA!FieldDecl) {
             enum colName = _resolveColName!(FieldDecl, memberName);
             __traits(getMember, result, memberName) = row[colName].as!FieldType;
         }

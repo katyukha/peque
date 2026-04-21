@@ -89,3 +89,100 @@ struct primaryKey {}
   * ---
   **/
 struct autoHydrate {}
+
+
+/** Mark a field as a many-to-one (foreign key) relation.
+  *
+  * The field holds the integer FK value (always loaded as a real DB column).
+  * Column name is derived by camelCase→snake_case of the field name unless
+  * a @field("col") UDA is also present to override it.
+  *
+  * T = the target model struct.
+  *
+  * Example:
+  * ---
+  * @model("sale_order")
+  * struct Order {
+  *     @primaryKey          int              id;
+  *     @field               string           name;
+  *     @many2one!(Partner)  int              partnerId;   // column: partner_id
+  *     @related             Nullable!Partner partner;     // populated via joinOne!
+  * }
+  * ---
+  **/
+struct many2one(T) {}
+
+
+/** Mark a field as a one-to-many (inverse FK) relation.
+  *
+  * No DB column exists on this side. The array field is always empty at
+  * hydration time; it is populated only when QuerySet.prefetch! is used.
+  *
+  * T            = the target model struct.
+  * inverseField = D field name of the FK on T that points back to this model.
+  *                Column name is resolved by camelToSnake(inverseField).
+  *
+  * Example:
+  * ---
+  * @model("res_partner")
+  * struct Partner {
+  *     @primaryKey                          int       id;
+  *     @one2many!(Invoice, "partnerId")     Invoice[] invoices;
+  * }
+  * ---
+  **/
+struct one2many(T, string inverseField) {}
+
+
+/** Mark a field as a many-to-many relation via a junction table.
+  *
+  * No DB column exists on this side. The array field is always empty at
+  * hydration time; it is populated only when QuerySet.prefetch! is used.
+  *
+  * T             = the target model struct.
+  * junctionTable = SQL name of the junction table.
+  * selfKey       = column name in junction table pointing to this model's PK.
+  * targetKey     = column name in junction table pointing to T's PK.
+  *
+  * Example:
+  * ---
+  * @model("res_partner")
+  * struct Partner {
+  *     @primaryKey                                              int    id;
+  *     @many2many!(Tag, "partner_tag_rel", "partner_id", "tag_id")
+  *     Tag[] tags;
+  * }
+  * ---
+  **/
+struct many2many(T, string junctionTable, string selfKey = "", string targetKey = "") {}
+
+
+/** Mark a field as a populated relation object (not a DB column).
+  *
+  * Skipped by normal column hydration — left at its zero/init value.
+  * Populated by QuerySet.joinOne! (for @many2one backing fields) or
+  * QuerySet.prefetch! (for @one2many/@many2many fields).
+  *
+  * Example:
+  * ---
+  * @many2one!(Partner)  int              partnerId;  // DB column, always loaded
+  * @related             Nullable!Partner partner;    // populated via joinOne!
+  * ---
+  **/
+struct related {}
+
+
+/** Check if a symbol has any @many2one!T UDA attached (any T).
+  *
+  * Used internally by the hydration and ORM layers to detect FK fields.
+  **/
+template hasMany2OneUDA(alias sym) {
+    private template _isM2O(alias uda) {
+        static if (is(uda))
+            enum bool _isM2O = is(uda == many2one!U, U);
+        else
+            enum bool _isM2O = false;
+    }
+    import std.meta: anySatisfy;
+    enum bool hasMany2OneUDA = anySatisfy!(_isM2O, __traits(getAttributes, sym));
+}

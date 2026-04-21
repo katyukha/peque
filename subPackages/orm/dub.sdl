@@ -1,18 +1,12 @@
-name "peque"
-subPackage "subPackages/vibe"
-subPackage "subPackages/orm"
-description "Light postgresql binding to libpq"
+name "orm"
+description "ORM layer for peque — repository, CRUD mixin, compile-time SQL generation"
 homepage "https://github.com/katyukha/peque"
 authors "Dmytro Katyukha"
 copyright "Copyright © 2023, Dmytro Katyukha"
 license "MPL-2"
-target "library"
+targetType "library"
 
-/* dflags "-preview=dip1000" */
-
-dependency "versioned" version=">=0.1.0"
-dependency "bindbc-common" version=">=1.0.5"
-
+dependency "peque" path="../.."
 
 configuration "libraryStatic" {
     libs "pq"
@@ -20,18 +14,6 @@ configuration "libraryStatic" {
 }
 
 configuration "libraryDynamic" {
-    dependency "bindbc-loader" version=">=1.1.5"
-    versions "PequeDynamic"
-}
-
-configuration "sourceLibraryStatic" {
-    targetType "sourceLibrary"
-    libs "pq"
-    versions "PequeStatic"
-}
-
-configuration "sourceLibraryDynamic" {
-    targetType "sourceLibrary"
     dependency "bindbc-loader" version=">=1.1.5"
     versions "PequeDynamic"
 }
