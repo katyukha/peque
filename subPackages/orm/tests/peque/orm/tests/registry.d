@@ -1,12 +1,11 @@
-/** Integration tests for peque:orm Phase 4c — Registry, Environment, @defaultOrder.
+/** Integration tests for peque:orm Phase 4c — Registry, @defaultOrder.
   *
   * Covers:
   *  - ModelRepo!M as a Bind target
   *  - Custom single-Ctx-param repo as a Bind target
   *  - Registry + RegistryRepoFor lookup
   *  - MergeRegistries combining two registries
-  *  - Environment.repo!(M) — CRUD through the environment
-  *  - Environment.withTransaction — repos inside the delegate share the transaction
+  *  - RegistryRepoFor used directly (application-defined context pattern)
   *  - @defaultOrder UDA on model — findAll ORDER BY
   *  - Per-repo enum defaultOrder override
   **/
@@ -15,7 +14,7 @@ module peque.orm.tests.registry;
 private import std.process: environment;
 private import std.typecons: Nullable;
 
-private import peque.connection: Connection, Transaction, OnSuccess;
+private import peque.connection: Connection, Transaction, OnSuccess, IsolationLevel;
 private import peque.model: model, field, primaryKey, defaultOrder;
 private import peque.orm;
 
@@ -78,10 +77,6 @@ alias TagReg  = Registry!(Bind!(Tag,  TagRepo));
 alias NoteReg = Registry!(Bind!(Note, ModelRepo!Note));
 alias AppReg  = MergeRegistries!(TagReg, NoteReg);
 
-// Environments
-alias AppEnv    = Environment!(AppReg, Connection);
-alias AppEnvCtx = Environment!(AppReg, Connection, int);  // AppCtx = int (user id)
-
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -132,113 +127,103 @@ unittest {
 }
 
 
+// D doesn't allow chaining ! instantiations: RegistryRepoFor!(AppReg, Tag)!Ctx
+// won't parse. Resolve the lookup once into a plain alias, then instantiate it.
+private alias TagRepoTpl = RegistryRepoFor!(AppReg, Tag);
+
+
 // ---------------------------------------------------------------------------
-// Environment.repo! — basic CRUD via env
+// RegistryRepoFor — CRUD via registry lookup (application-defined context pattern)
 // ---------------------------------------------------------------------------
 
 unittest {
-    auto c   = makeConn();
+    auto c    = makeConn();
     setupTables(c);
-    auto env = AppEnv(&c);
+    auto repo = TagRepoTpl!Connection(&c);
 
-    auto tags = env.repo!(Tag).findAll();
+    auto tags = repo.findAll();
     assert(tags.length == 3);
 
     auto tpl = Tag(0, "Delta", 4);
-    auto ins = env.repo!(Tag).insert(tpl);
+    auto ins = repo.insert(tpl);
     assert(ins.id >= 1);
     assert(ins.name == "Delta");
 
     ins.priority = 99;
-    env.repo!(Tag).update(ins);
-    assert(env.repo!(Tag).findById(ins.id).get.priority == 99);
+    repo.update(ins);
+    assert(repo.findById(ins.id).get.priority == 99);
 
-    env.repo!(Tag).deleteById(ins.id);
-    assert(env.repo!(Tag).findById(ins.id).isNull);
+    repo.deleteById(ins.id);
+    assert(repo.findById(ins.id).isNull);
 }
 
 
 // ---------------------------------------------------------------------------
-// Custom TagRepo method accessible through Environment
+// Custom TagRepo method accessible via RegistryRepoFor
 // ---------------------------------------------------------------------------
 
 unittest {
-    auto c   = makeConn();
+    auto c    = makeConn();
     setupTables(c);
-    auto env = AppEnv(&c);
+    auto repo = TagRepoTpl!Connection(&c);
 
-    auto filtered = env.repo!(Tag).findByMinPriority(2);
+    auto filtered = repo.findByMinPriority(2);
     assert(filtered.length == 2);   // priority 2 and 3
 }
 
 
 // ---------------------------------------------------------------------------
-// Environment with AppCtx
+// Transaction — repos bound to Transaction share the same transaction
 // ---------------------------------------------------------------------------
 
 unittest {
-    auto c   = makeConn();
+    auto c    = makeConn();
     setupTables(c);
-    auto env = AppEnvCtx(&c, 42);
-    assert(env.appCtx == 42);
+    auto repo = TagRepoTpl!Connection(&c);
 
-    // repo still works
-    auto tags = env.repo!(Tag).findAll();
-    assert(tags.length == 3);
-}
-
-
-// ---------------------------------------------------------------------------
-// Environment.withTransaction — both inserts are in the same transaction
-// ---------------------------------------------------------------------------
-
-unittest {
-    auto c   = makeConn();
-    setupTables(c);
-    auto env = AppEnv(&c);
-
-    env.withTransaction((ref AppEnv.TxEnv txEnv) {
+    c.transaction((ref Transaction tx) {
+        auto txRepo = TagRepoTpl!Transaction(&tx);
         auto t1 = Tag(0, "TxA", 10);
         auto t2 = Tag(0, "TxB", 20);
-        txEnv.repo!(Tag).insert(t1);
-        txEnv.repo!(Tag).insert(t2);
+        txRepo.insert(t1);
+        txRepo.insert(t2);
     });
 
-    auto all = env.repo!(Tag).findAll();
     // Original 3 + 2 inserted in transaction
-    assert(all.length == 5);
+    assert(repo.findAll().length == 5);
 }
 
 unittest {
-    auto c   = makeConn();
+    auto c    = makeConn();
     setupTables(c);
-    auto env = AppEnv(&c);
+    auto repo = TagRepoTpl!Connection(&c);
 
     // Transaction rolled back on exception — inserts must not be visible
     try {
-        env.withTransaction((ref AppEnv.TxEnv txEnv) {
+        c.transaction((ref Transaction tx) {
+            auto txRepo = TagRepoTpl!Transaction(&tx);
             auto t = Tag(0, "RollMe", 99);
-            txEnv.repo!(Tag).insert(t);
+            txRepo.insert(t);
             throw new Exception("deliberate rollback");
         });
     } catch (Exception) {}
 
-    auto all = env.repo!(Tag).findAll();
-    assert(all.length == 3);  // unchanged
+    assert(repo.findAll().length == 3);  // unchanged
 }
 
 unittest {
-    // withTransaction with OnSuccess.rollback (dry-run)
-    auto c   = makeConn();
+    // OnSuccess.rollback (dry-run)
+    auto c    = makeConn();
     setupTables(c);
-    auto env = AppEnv(&c);
+    auto repo = TagRepoTpl!Connection(&c);
 
-    env.withTransaction!(OnSuccess.rollback)((ref AppEnv.TxEnv txEnv) {
+    c.transaction!(OnSuccess.rollback)((ref Transaction tx) {
+        auto txRepo = TagRepoTpl!Transaction(&tx);
         auto t = Tag(0, "DryRun", 0);
-        txEnv.repo!(Tag).insert(t);
+        txRepo.insert(t);
     });
 
-    assert(env.repo!(Tag).findAll().length == 3);
+    assert(repo.findAll().length == 3);
 }
 
 

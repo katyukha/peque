@@ -76,6 +76,7 @@ mixin template CRUDMixin(M, Ctx)
 if (isModel!M && isQueryContext!Ctx) {
     import std.typecons: Nullable, nullable;
     import std.conv: to;
+    import peque.orm.sql;
 
     // Compile-time SQL constants — computed once, stored as enum strings.
     private enum _crudTable = ormTableName!M;
