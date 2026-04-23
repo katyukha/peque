@@ -91,26 +91,45 @@ struct primaryKey {}
 struct autoHydrate {}
 
 
+/** Controls the ON DELETE behaviour of a @many2one FK column in generated DDL.
+  *
+  * Has no effect at query time — CRUD operations are unchanged.
+  * Only affects the REFERENCES clause emitted by schemaSQL / modelDDL.
+  *
+  * OnDelete.noAction is the PostgreSQL default; no clause is emitted for it.
+  * OnDelete.setNull requires the field type to be Nullable!T.
+  **/
+enum OnDelete {
+    noAction,   /// PostgreSQL default (deferred RESTRICT); no clause emitted
+    restrict,   /// ON DELETE RESTRICT
+    cascade,    /// ON DELETE CASCADE
+    setNull,    /// ON DELETE SET NULL  — field type must be Nullable!T
+    setDefault, /// ON DELETE SET DEFAULT
+}
+
+
 /** Mark a field as a many-to-one (foreign key) relation.
   *
   * The field holds the integer FK value (always loaded as a real DB column).
   * Column name is derived by camelCase→snake_case of the field name unless
   * a @field("col") UDA is also present to override it.
   *
-  * T = the target model struct.
+  * T        = the target model struct.
+  * onDelete = ON DELETE behaviour in generated DDL (default: noAction).
   *
   * Example:
   * ---
   * @model("sale_order")
   * struct Order {
-  *     @primaryKey          int              id;
-  *     @field               string           name;
-  *     @many2one!(Partner)  int              partnerId;   // column: partner_id
-  *     @related             Nullable!Partner partner;     // populated via joinOne!
+  *     @primaryKey                        int              id;
+  *     @field                             string           name;
+  *     @many2one!(Partner)                int              partnerId;
+  *     @many2one!(User, OnDelete.cascade) int              userId;
+  *     @related                           Nullable!Partner partner;
   * }
   * ---
   **/
-struct many2one(T) {}
+struct many2one(T, OnDelete onDelete = OnDelete.noAction) {}
 
 
 /** Mark a field as a one-to-many (inverse FK) relation.
@@ -221,17 +240,133 @@ struct pgType {
 struct defaultOrder(fields...) if (fields.length >= 1) {}
 
 
-/** Check if a symbol has any @many2one!T UDA attached (any T).
+/** Check if a symbol has any @many2one!(T, ...) UDA attached (any T, any OnDelete).
   *
   * Used internally by the hydration and ORM layers to detect FK fields.
   **/
 template hasMany2OneUDA(alias sym) {
     private template _isM2O(alias uda) {
         static if (is(uda))
-            enum bool _isM2O = is(uda == many2one!U, U);
+            enum bool _isM2O = is(uda == many2one!(U, od), U, OnDelete od);
         else
             enum bool _isM2O = false;
     }
     import std.meta: anySatisfy;
     enum bool hasMany2OneUDA = anySatisfy!(_isM2O, __traits(getAttributes, sym));
+}
+
+
+// ---------------------------------------------------------------------------
+// Schema Phase 2 — column and table constraint UDAs
+// ---------------------------------------------------------------------------
+
+/** Add a UNIQUE constraint to a column in the generated DDL. **/
+struct unique {}
+
+/** Add an inline CHECK constraint to a column in the generated DDL.
+  *
+  * Example:
+  * ---
+  * @check("price > 0")  double price;
+  * ---
+  **/
+struct check {
+    string expr;
+    this(string e) @safe pure nothrow { expr = e; }
+}
+
+/** Add a DEFAULT clause to a column in the generated DDL.
+  *
+  * The expression is passed verbatim to PostgreSQL.
+  *
+  * Example:
+  * ---
+  * @pgDefault("now()")  SysTime createdAt;
+  * @pgDefault("true")   bool    active;
+  * ---
+  **/
+struct pgDefault {
+    string expr;
+    this(string e) @safe pure nothrow { expr = e; }
+}
+
+/** Force NOT NULL on a Nullable!T field in the generated DDL.
+  *
+  * Rarely needed — non-Nullable fields already get NOT NULL automatically.
+  * Useful when a field is Nullable in D but has a DEFAULT in the DB so the
+  * column itself should be NOT NULL.
+  *
+  * Example:
+  * ---
+  * @pgDefault("0") @pgNotNull  Nullable!int priority;
+  * ---
+  **/
+struct pgNotNull {}
+
+/** Table-level UNIQUE (col1, col2, ...) constraint. Applied on the model struct.
+  *
+  * cols are SQL column names (snake_case).
+  *
+  * Example:
+  * ---
+  * @uniqueTogether!("name", "tenant_id")
+  * @model("res_partner")
+  * struct Partner { ... }
+  * ---
+  **/
+struct uniqueTogether(cols...) if (cols.length >= 2) {
+    enum string[] columns = [cols];
+}
+
+/** Named table-level CHECK constraint. Applied on the model struct.
+  *
+  * Example:
+  * ---
+  * @checkConstraint("chk_price_positive", "price > 0")
+  * @model("sale_order")
+  * struct Order { ... }
+  * ---
+  **/
+struct checkConstraint {
+    string name;
+    string expr;
+    this(string n, string e) @safe pure nothrow { name = n; expr = e; }
+}
+
+/** Create a single-column index on this field in the generated DDL.
+  *
+  * Emits: CREATE INDEX ON table (col);
+  *
+  * Example:
+  * ---
+  * @index  string email;
+  * ---
+  **/
+struct index {}
+
+/** Create a single-column unique index on this field in the generated DDL.
+  *
+  * Emits: CREATE UNIQUE INDEX ON table (col);
+  *
+  * Example:
+  * ---
+  * @uniqueIndex  string slug;
+  * ---
+  **/
+struct uniqueIndex {}
+
+/** Create a multi-column index. Applied on the model struct.
+  *
+  * cols are SQL column names (snake_case).
+  * Emits: CREATE INDEX ON table (col1, col2, ...);
+  *
+  * Example:
+  * ---
+  * @indexTogether!("partner_id", "status")
+  * @model("sale_order")
+  * struct Order { ... }
+  * ---
+  **/
+struct indexTogether(cols...) if (cols.length >= 2) {
+    enum string[] columns = [cols];
 }

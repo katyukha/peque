@@ -7,6 +7,16 @@
   *  - @pgType override (verbatim type, no SERIAL substitution)
   *  - @many2one → REFERENCES target_table(pk_col)
   *  - Nullable @many2one → no NOT NULL before REFERENCES
+  *  - @many2one with OnDelete → ON DELETE CASCADE / RESTRICT / SET NULL / SET DEFAULT
+  *  - @unique → UNIQUE on column
+  *  - @check → CHECK (expr) on column
+  *  - @pgDefault → DEFAULT expr on column
+  *  - @pgNotNull → NOT NULL on Nullable field
+  *  - @uniqueTogether → table-level UNIQUE (col1, col2)
+  *  - @checkConstraint → table-level CONSTRAINT name CHECK (expr)
+  *  - @index → CREATE INDEX ON table (col)
+  *  - @uniqueIndex → CREATE UNIQUE INDEX ON table (col)
+  *  - @indexTogether → CREATE INDEX ON table (col1, col2)
   *  - schemaSQL!Reg — all models concatenated
   *  - End-to-end: execute generated SQL, insert via ORM, verify round-trip
   **/
@@ -17,12 +27,15 @@ private import std.string: indexOf;
 private import std.typecons: Nullable;
 
 private import peque.connection: Connection;
-private import peque.model: model, field, primaryKey, many2one, pgType;
+private import peque.model:
+    model, field, primaryKey, many2one, pgType, OnDelete,
+    unique, check, pgDefault, pgNotNull,
+    uniqueTogether, checkConstraint, index, uniqueIndex, indexTogether;
 private import peque.orm;
 
 
 // ---------------------------------------------------------------------------
-// Test models
+// Test models — basic type mapping
 // ---------------------------------------------------------------------------
 
 @model("schema_authors")
@@ -52,6 +65,39 @@ alias SchemaReg = Registry!(
 
 
 // ---------------------------------------------------------------------------
+// Test models — Phase 2 features
+// ---------------------------------------------------------------------------
+
+@model("schema_categories")
+struct Category {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("schema_products")
+@uniqueTogether!("name", "sku")
+@checkConstraint("chk_price_positive", "price > 0")
+@indexTogether!("category_id", "active")
+struct Product {
+    @primaryKey                                                 int          id;
+    @field @unique @index                                       string       sku;
+    @field                                                      string       name;
+    @field @pgDefault("true")                                   bool         active;
+    @field @check("price > 0")                                  double       price;
+    @field @pgDefault("0")                                      int          stock;
+    @field @pgDefault("0") @pgNotNull                           Nullable!int reserved;
+    @many2one!(Category, OnDelete.cascade)                      int          categoryId;
+    @many2one!(Category, OnDelete.setNull)          Nullable!int altCategoryId;
+    @field @uniqueIndex                                         string       slug;
+}
+
+alias Phase2Reg = Registry!(
+    Bind!(Category, ModelRepo!Category),
+    Bind!(Product,  ModelRepo!Product),
+);
+
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -71,28 +117,17 @@ private bool contains(string haystack, string needle) {
 
 
 // ---------------------------------------------------------------------------
-// modelDDL content assertions
+// Basic type mapping
 // ---------------------------------------------------------------------------
 
 unittest {
     enum ddl = modelDDL!Author();
 
-    // Table name
     assert(ddl.contains("CREATE TABLE IF NOT EXISTS schema_authors"));
-
-    // @primaryKey int → SERIAL PRIMARY KEY
     assert(ddl.contains("id SERIAL PRIMARY KEY"));
-
-    // string → TEXT NOT NULL
     assert(ddl.contains("name TEXT NOT NULL"));
-
-    // bool → BOOLEAN NOT NULL
     assert(ddl.contains("active BOOLEAN NOT NULL"));
-
-    // long → BIGINT NOT NULL
     assert(ddl.contains("views BIGINT NOT NULL"));
-
-    // Nullable!string → TEXT (no NOT NULL)
     assert(ddl.contains("bio TEXT"));
     assert(!ddl.contains("bio TEXT NOT NULL"));
 }
@@ -101,25 +136,91 @@ unittest {
     enum ddl = modelDDL!Article();
 
     assert(ddl.contains("CREATE TABLE IF NOT EXISTS schema_articles"));
-
-    // @primaryKey int → SERIAL PRIMARY KEY
     assert(ddl.contains("id SERIAL PRIMARY KEY"));
-
-    // double → DOUBLE PRECISION NOT NULL
     assert(ddl.contains("rating DOUBLE PRECISION NOT NULL"));
-
-    // camelCase → snake_case
     assert(ddl.contains("word_count INTEGER NOT NULL"));
-
-    // @many2one: non-nullable FK
     assert(ddl.contains("author_id INTEGER NOT NULL REFERENCES schema_authors(id)"));
-
-    // @many2one: Nullable FK — no NOT NULL before REFERENCES
     assert(ddl.contains("editor_id INTEGER REFERENCES schema_authors(id)"));
     assert(!ddl.contains("editor_id INTEGER NOT NULL"));
-
-    // @pgType override: VARCHAR(255) verbatim, not SERIAL
     assert(ddl.contains("status VARCHAR(10) NOT NULL"));
+}
+
+
+// ---------------------------------------------------------------------------
+// @many2one OnDelete
+// ---------------------------------------------------------------------------
+
+unittest {
+    enum ddl = modelDDL!Product();
+
+    // cascade
+    assert(ddl.contains(
+        "category_id INTEGER NOT NULL REFERENCES schema_categories(id) ON DELETE CASCADE"));
+
+    // setNull — no NOT NULL, with ON DELETE SET NULL
+    assert(ddl.contains(
+        "alt_category_id INTEGER REFERENCES schema_categories(id) ON DELETE SET NULL"));
+    assert(!ddl.contains("alt_category_id INTEGER NOT NULL"));
+}
+
+// setNull on non-Nullable field must be a compile-time error — tested via
+// static assert in _buildColDef; not repeated here since it would break compilation.
+
+
+// ---------------------------------------------------------------------------
+// Column constraints: @unique, @check, @pgDefault, @pgNotNull
+// ---------------------------------------------------------------------------
+
+unittest {
+    enum ddl = modelDDL!Product();
+
+    // @unique → UNIQUE
+    assert(ddl.contains("sku TEXT NOT NULL UNIQUE"));
+
+    // @check → CHECK (price > 0) inline
+    assert(ddl.contains("CHECK (price > 0)"));
+
+    // @pgDefault on non-nullable bool
+    assert(ddl.contains("active BOOLEAN NOT NULL DEFAULT true"));
+
+    // @pgDefault on non-nullable int
+    assert(ddl.contains("stock INTEGER NOT NULL DEFAULT 0"));
+
+    // @pgDefault + @pgNotNull on Nullable!int — NOT NULL comes before DEFAULT
+    assert(ddl.contains("reserved INTEGER NOT NULL DEFAULT 0"));
+}
+
+
+// ---------------------------------------------------------------------------
+// Table constraints: @uniqueTogether, @checkConstraint
+// ---------------------------------------------------------------------------
+
+unittest {
+    enum ddl = modelDDL!Product();
+
+    // @uniqueTogether!("name", "sku")
+    assert(ddl.contains("UNIQUE (name, sku)"));
+
+    // @checkConstraint("chk_price_positive", "price > 0")
+    assert(ddl.contains("CONSTRAINT chk_price_positive CHECK (price > 0)"));
+}
+
+
+// ---------------------------------------------------------------------------
+// Index DDL: @index, @uniqueIndex, @indexTogether
+// ---------------------------------------------------------------------------
+
+unittest {
+    enum ddl = modelDDL!Product();
+
+    // @index on sku
+    assert(ddl.contains("CREATE INDEX IF NOT EXISTS idx_schema_products_sku ON schema_products (sku);"));
+
+    // @uniqueIndex on slug
+    assert(ddl.contains("CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_products_slug ON schema_products (slug);"));
+
+    // @indexTogether!("category_id", "active") on model
+    assert(ddl.contains("CREATE INDEX IF NOT EXISTS idx_schema_products_category_id_active ON schema_products (category_id, active);"));
 }
 
 
@@ -131,13 +232,20 @@ unittest {
     enum sql = schemaSQL!SchemaReg();
     assert(sql.contains("CREATE TABLE IF NOT EXISTS schema_authors"));
     assert(sql.contains("CREATE TABLE IF NOT EXISTS schema_articles"));
-    // Author must appear before Article (FK dependency order)
     assert(sql.indexOf("schema_authors") < sql.indexOf("schema_articles"));
+}
+
+unittest {
+    enum sql = schemaSQL!Phase2Reg();
+    assert(sql.contains("CREATE TABLE IF NOT EXISTS schema_categories"));
+    assert(sql.contains("CREATE TABLE IF NOT EXISTS schema_products"));
+    // categories must appear before products (FK dependency)
+    assert(sql.indexOf("schema_categories") < sql.indexOf("schema_products"));
 }
 
 
 // ---------------------------------------------------------------------------
-// End-to-end: execute generated SQL, use ORM to insert and query
+// End-to-end: basic models
 // ---------------------------------------------------------------------------
 
 unittest {
@@ -167,4 +275,40 @@ unittest {
     assert(found.name == "Ada");
     assert(found.active == true);
     assert(found.bio.isNull);
+}
+
+
+// ---------------------------------------------------------------------------
+// End-to-end: Phase 2 models (constraints, indexes, OnDelete)
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    c.exec(`
+        DROP TABLE IF EXISTS schema_products;
+        DROP TABLE IF EXISTS schema_categories;
+    `);
+
+    enum sql = schemaSQL!Phase2Reg();
+    c.exec(sql);
+
+    auto catRepo  = Repository!(Category, Connection)(&c);
+    auto prodRepo = Repository!(Product,  Connection)(&c);
+
+    auto catTpl = Category(0, "Electronics");
+    auto cat = catRepo.insert(catTpl);
+    assert(cat.id >= 1);
+
+    // Insert product with all fields
+    auto p = Product(0, "SKU-001", "Widget", true, 9.99, 50,
+                     Nullable!int(0), cat.id, Nullable!int.init, "widget-slug");
+    auto inserted = prodRepo.insert(p);
+    assert(inserted.id >= 1);
+    assert(inserted.sku == "SKU-001");
+    assert(inserted.categoryId == cat.id);
+    assert(inserted.altCategoryId.isNull);
+
+    // ON DELETE CASCADE: deleting category must cascade to products
+    catRepo.deleteById(cat.id);
+    assert(prodRepo.findById(inserted.id).isNull);
 }
