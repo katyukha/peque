@@ -178,6 +178,19 @@ if (isModel!M && isQueryContext!Ctx) {
     void deleteById(PkType)(PkType id) {
         _ctx.execParams(_crudDelSQL, id);
     }
+
+    /** Return a fresh QuerySet for model M scoped to this context.
+      *
+      * Example:
+      * ---
+      * auto active = repo.query().where("active = $1", true).all();
+      * auto count  = repo.query().count();
+      * ---
+      **/
+    auto query() {
+        import peque.orm.queryset: QuerySet;
+        return QuerySet!(M, Ctx)(_ctx);
+    }
 }
 
 
