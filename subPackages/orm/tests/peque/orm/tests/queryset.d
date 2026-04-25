@@ -86,7 +86,7 @@ unittest {
     auto rows = seed(c);
     auto repo = Repository!(Item, Connection)(&c);
 
-    auto active = repo.query().where("active = $1", true).all();
+    auto active = repo.query().whereRaw("active = $1", true).all();
     assert(active.length == 2);
     foreach (r; active) assert(r.active == true);
 }
@@ -103,8 +103,8 @@ unittest {
 
     // Both conditions use local $1; the second must be renumbered to $2.
     auto result = repo.query()
-                      .where("active = $1", true)
-                      .where("score > $1", 15)
+                      .whereRaw("active = $1", true)
+                      .whereRaw("score > $1", 15)
                       .all();
     assert(result.length == 1);
     assert(result[0].name == "Gamma");
@@ -151,11 +151,11 @@ unittest {
     auto rows = seed(c);
     auto repo = Repository!(Item, Connection)(&c);
 
-    auto found = repo.query().where("name = $1", "Beta").first();
+    auto found = repo.query().whereRaw("name = $1", "Beta").first();
     assert(!found.isNull);
     assert(found.get.name == "Beta");
 
-    auto notFound = repo.query().where("name = $1", "NoSuch").first();
+    auto notFound = repo.query().whereRaw("name = $1", "NoSuch").first();
     assert(notFound.isNull);
 }
 
@@ -170,8 +170,8 @@ unittest {
     auto repo = Repository!(Item, Connection)(&c);
 
     assert(repo.query().count() == 4);
-    assert(repo.query().where("active = $1", true).count() == 2);
-    assert(repo.query().where("score > $1", 100).count() == 0);
+    assert(repo.query().whereRaw("active = $1", true).count() == 2);
+    assert(repo.query().whereRaw("score > $1", 100).count() == 0);
 }
 
 
@@ -185,8 +185,8 @@ unittest {
     auto repo = Repository!(Item, Connection)(&c);
 
     assert( repo.query().exists());
-    assert( repo.query().where("name = $1", "Alpha").exists());
-    assert(!repo.query().where("name = $1", "Ghost").exists());
+    assert( repo.query().whereRaw("name = $1", "Alpha").exists());
+    assert(!repo.query().whereRaw("name = $1", "Ghost").exists());
 }
 
 
@@ -199,7 +199,7 @@ unittest {
     auto rows = seed(c);
     auto repo = Repository!(Item, Connection)(&c);
 
-    auto deleted = repo.query().where("active = $1", false).delete_();
+    auto deleted = repo.query().whereRaw("active = $1", false).delete_();
     assert(deleted == 2);
     assert(repo.query().count() == 2);
 }
@@ -224,9 +224,9 @@ unittest {
     auto rows = seed(c);
     auto repo = Repository!(Item, Connection)(&c);
 
-    auto base    = repo.query().where("active = $1", true);
-    auto high    = base.where("score > $1", 25).all();
-    auto low     = base.where("score < $1", 25).all();
+    auto base    = repo.query().whereRaw("active = $1", true);
+    auto high    = base.whereRaw("score > $1", 25).all();
+    auto low     = base.whereRaw("score < $1", 25).all();
 
     // base is unchanged
     assert(base.all().length == 2);

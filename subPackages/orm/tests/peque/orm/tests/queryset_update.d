@@ -70,7 +70,7 @@ unittest {
 
     auto id = rows[0].id;
     auto affected = repo.query()
-                        .where("id = $1", id)
+                        .whereRaw("id = $1", id)
                         .set!("name")("Updated Name")
                         .update();
 
@@ -93,7 +93,7 @@ unittest {
 
     // Activate all inactive rows
     auto affected = repo.query()
-                        .where("active = $1", false)
+                        .whereRaw("active = $1", false)
                         .set!("active")(true)
                         .update();
 
@@ -116,14 +116,14 @@ unittest {
 
     // Deactivate and zero out score for all inactive rows
     auto affected = repo.query()
-                        .where("active = $1", false)
+                        .whereRaw("active = $1", false)
                         .set!("active")(true)
                         .set!("score")(0)
                         .update();
 
     assert(affected == 2);
 
-    auto changed = repo.query().where("score = $1", 0).all();
+    auto changed = repo.query().whereRaw("score = $1", 0).all();
     assert(changed.length == 2);
     foreach (r; changed) {
         assert(r.active == true);
@@ -142,7 +142,7 @@ unittest {
     auto repo = Repository!(QuItem, Connection)(&c);
 
     auto affected = repo.query()
-                        .where("id = $1", -999)
+                        .whereRaw("id = $1", -999)
                         .set!("name")("Ghost")
                         .update();
 

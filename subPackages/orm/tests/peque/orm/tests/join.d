@@ -183,7 +183,7 @@ unittest {
 
     auto invoices = repo.query()
                         .joinOne!("partner")
-                        .where("_m.name = $1", "INV-001")
+                        .whereRaw("_m.name = $1", "INV-001")
                         .all();
 
     assert(invoices.length == 1);
@@ -205,7 +205,7 @@ unittest {
 
     auto invoices = repo.query()
                         .joinOne!("partner")
-                        .where("_m.name = $1", "INV-NULL")
+                        .whereRaw("_m.name = $1", "INV-NULL")
                         .all();
 
     assert(invoices.length == 1);
@@ -306,7 +306,7 @@ unittest {
 
     auto dtos = repo.query()
                     .joinOne!("partner")
-                    .where("_m.name != $1", "INV-NULL")
+                    .whereRaw("_m.name != $1", "INV-NULL")
                     .orderBy("_m.name ASC")
                     .select!InvoicePartnerDTO();
 

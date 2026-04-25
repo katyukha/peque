@@ -7,29 +7,22 @@
   * returns a new copy, so you can safely branch from a base query:
   *
   * ---
-  * auto base    = repo.query().where("active = $1", true);
-  * auto admins  = base.where("role = $1", "admin").all();
-  * auto editors = base.where("role = $1", "editor").all();
-  * ---
-  *
-  * WHERE clauses use local $1/$2/… numbering — they are renumbered
-  * automatically when multiple .where() calls are combined:
-  * ---
-  * repo.query()
-  *     .where("status = $1", "active")
-  *     .where("score > $1", 100)
-  *     .all();
-  * // → SELECT … WHERE (status = $1) AND (score > $2)
+  * auto base    = repo.query().where!"active"(true);
+  * auto admins  = base.where!"role"("admin").all();
+  * auto editors = base.where!"role"("editor").all();
   * ---
   *
   * Builder methods (return new QuerySet):
-  *  - where(sql, args...)   — add a WHERE filter
-  *  - orderBy(clause)       — set ORDER BY
-  *  - limit(n)              — set LIMIT
-  *  - offset(n)             — set OFFSET
-  *  - set!(fieldName)(val)  — accumulate a SET assignment (for update())
-  *  - joinOne!(relField)    — LEFT JOIN a @related/@many2one field
-  *  - prefetch!(relField)   — schedule a post-query SELECT for @one2many/@many2many
+  *  - where!"field"(val)      — type-safe equality WHERE (compile-time field check)
+  *  - whereIn!"field"(vals)   — type-safe IN clause
+  *  - where(Predicate)        — composable predicate (F expressions, OR/AND/NOT)
+  *  - whereRaw(sql, args...)  — raw SQL escape hatch (local $1/$2 renumbered)
+  *  - orderBy(clause)         — set ORDER BY
+  *  - limit(n)                — set LIMIT
+  *  - offset(n)               — set OFFSET
+  *  - set!(fieldName)(val)    — accumulate a SET assignment (for update())
+  *  - joinOne!(relField)      — LEFT JOIN a @related/@many2one field
+  *  - prefetch!(relField)     — schedule a post-query SELECT for @one2many/@many2many
   *
   * Terminal methods:
   *  - all()           → M[]         — fetch all matching rows
@@ -52,30 +45,13 @@ private import peque.converter: PGValue, convertToPG;
 private import peque.query_context: isQueryContext;
 private import peque.orm.repository: isModel;
 private import peque.orm.sql;
+private import peque.orm.predicate;
+private import peque.orm.field: FieldBuilder, F;
 
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-// Scan sql for $N tokens and add offset to each N.
-private string _renumberParams(string sql, int offset) pure {
-    if (offset == 0) return sql;
-    string result;
-    size_t i = 0;
-    while (i < sql.length) {
-        if (sql[i] == '$' && i + 1 < sql.length &&
-                sql[i + 1] >= '1' && sql[i + 1] <= '9') {
-            ++i;
-            size_t start = i;
-            while (i < sql.length && sql[i] >= '0' && sql[i] <= '9') ++i;
-            result ~= "$" ~ to!string(to!int(sql[start .. i]) + offset);
-        } else {
-            result ~= sql[i++];
-        }
-    }
-    return result;
-}
 
 // Extract the ORDER BY clause from @defaultOrder UDA on M, or "".
 private template _modelDefaultOrder(M) {
@@ -229,12 +205,6 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
 }
 
 
-// Module-level helper structs shared across all QuerySet instantiations.
-private struct _QSWhere {
-    string    sql;
-    PGValue[] params;
-}
-
 private struct _QSSet {
     string  colName;
     PGValue value;
@@ -265,12 +235,12 @@ if (isModel!M && isQueryContext!Ctx) {
 
     alias PrefetchFn = void delegate(ref M[], Ctx*);
 
-    private Ctx*        _ctx;
-    private _QSWhere[]    _wheres;
-    private _QSSet[]      _sets;
-    private string      _orderByClause;
-    private long        _limitVal  = -1;
-    private long        _offsetVal = -1;
+    private Ctx*         _ctx;
+    private Predicate[]  _wheres;
+    private _QSSet[]     _sets;
+    private string       _orderByClause;
+    private long         _limitVal  = -1;
+    private long         _offsetVal = -1;
     private PrefetchFn[] _prefetches;
 
     // Public because D instantiates template bodies at the call site, which
@@ -281,23 +251,64 @@ if (isModel!M && isQueryContext!Ctx) {
     // Builder methods — each returns a copy, leaving this unchanged
     // -----------------------------------------------------------------------
 
-    /** Add a WHERE filter.
+    /** Type-safe equality filter — field name validated at compile time.
       *
-      * sqlFrag uses local $1/$2/… numbering — placeholders are renumbered
-      * relative to prior .where() calls at SQL build time.
+      * The column expression uses the "_m." table alias, which is always
+      * present in the generated SQL (both plain and join paths).
       *
       * Example:
       * ---
-      * qs.where("status = $1 AND score > $2", "active", 100)
+      * repo.query().where!"active"(true).all()
+      * repo.query().where!"status"("active").where!"score"(10).all()
       * ---
       **/
-    QuerySet!(M, Ctx, JoinFields) where(T...)(string sqlFrag, T args) {
+    QuerySet!(M, Ctx, JoinFields) where(string fieldName, V)(V val) {
+        return where(F!(M, fieldName)(val));
+    }
+
+    /** Type-safe IN filter — field name validated at compile time.
+      *
+      * Example:
+      * ---
+      * repo.query().whereIn!"status"(["active", "pending"]).all()
+      * ---
+      **/
+    QuerySet!(M, Ctx, JoinFields) whereIn(string fieldName, V)(V[] vals) {
+        return where(F!(M, fieldName).contains(vals));
+    }
+
+    /** Composable predicate filter — supports OR, AND, NOT via F expressions.
+      *
+      * Example:
+      * ---
+      * repo.query().where(
+      *     F!(Item, "status")("active") | F!(Item, "status")("pending")
+      * ).all()
+      * ---
+      **/
+    QuerySet!(M, Ctx, JoinFields) where(Predicate pred) {
+        auto qs = this;
+        qs._wheres ~= pred;
+        return qs;
+    }
+
+    /** Raw SQL escape hatch — use when typed predicates don't cover the case
+      * (date ranges, full-text search, subqueries, etc.).
+      *
+      * sqlFrag uses local $1/$2/… numbering — placeholders are renumbered
+      * relative to prior filters at SQL build time.
+      *
+      * Example:
+      * ---
+      * qs.whereRaw("expires_at < $1", cutoff)
+      * qs.whereRaw("tsv @@ to_tsquery($1)", query)
+      * ---
+      **/
+    QuerySet!(M, Ctx, JoinFields) whereRaw(T...)(string sqlFrag, T args) {
         PGValue[] pgParams;
         static foreach (i, _; T)
             pgParams ~= convertToPG(args[i]);
-        auto qs = this;
-        qs._wheres ~= _QSWhere(sqlFrag, pgParams);
-        return qs;
+        return where(Predicate(RawNode(sqlFrag, pgParams)));
     }
 
     /** Override the ORDER BY clause.
@@ -425,17 +436,18 @@ if (isModel!M && isQueryContext!Ctx) {
     // Internal — accumulate renumbered WHERE SQL and flat PGValue[].
     // -----------------------------------------------------------------------
 
-    private void _buildWhere(out string whereSQL, out PGValue[] params) {
+    private void _buildWhere(out string whereSQL, out PGValue[] params, int startOffset = 0) {
         whereSQL = "";
         params   = [];
         if (_wheres.length == 0) return;
         whereSQL = " WHERE ";
-        int offset = 0;
-        foreach (i, ref w; _wheres) {
+        int offset = startOffset;
+        foreach (i, ref p; _wheres) {
+            auto s = serializePredicate(p, offset);
             if (i > 0) whereSQL ~= " AND ";
-            whereSQL ~= "(" ~ _renumberParams(w.sql, offset) ~ ")";
-            offset += cast(int)w.params.length;
-            params ~= w.params;
+            whereSQL ~= "(" ~ s.sql ~ ")";
+            offset += cast(int)s.params.length;
+            params ~= s.params;
         }
     }
 
@@ -456,7 +468,7 @@ if (isModel!M && isQueryContext!Ctx) {
         static if (JoinFields.length == 0) {
             // Simple path — no joins
             string sql = "SELECT " ~ buildSelectList!M() ~
-                         " FROM "  ~ ormTableName!M ~ whereSQL;
+                         " FROM "  ~ ormTableName!M ~ " _m" ~ whereSQL;
 
             if (_orderByClause.length)
                 sql ~= " ORDER BY " ~ _orderByClause;
@@ -569,7 +581,7 @@ if (isModel!M && isQueryContext!Ctx) {
         PGValue[] params;
         _buildWhere(whereSQL, params);
 
-        string sql = "SELECT COUNT(*) FROM " ~ ormTableName!M ~ whereSQL;
+        string sql = "SELECT COUNT(*) FROM " ~ ormTableName!M ~ " _m" ~ whereSQL;
         return _ctx.execParams(sql, params).getValue!long(0, 0);
     }
 
@@ -579,7 +591,7 @@ if (isModel!M && isQueryContext!Ctx) {
         PGValue[] params;
         _buildWhere(whereSQL, params);
 
-        string sql = "SELECT 1 FROM " ~ ormTableName!M ~ whereSQL ~ " LIMIT 1";
+        string sql = "SELECT 1 FROM " ~ ormTableName!M ~ " _m" ~ whereSQL ~ " LIMIT 1";
         return _ctx.execParams(sql, params).ntuples > 0;
     }
 
@@ -589,7 +601,7 @@ if (isModel!M && isQueryContext!Ctx) {
         PGValue[] params;
         _buildWhere(whereSQL, params);
 
-        string sql = "DELETE FROM " ~ ormTableName!M ~ whereSQL;
+        string sql = "DELETE FROM " ~ ormTableName!M ~ " _m" ~ whereSQL;
         return _ctx.execParams(sql, params).cmdTuples();
     }
 
@@ -617,21 +629,12 @@ if (isModel!M && isQueryContext!Ctx) {
             setParams ~= s.value;
         }
 
-        // Build WHERE clause renumbered by _sets.length
+        // Build WHERE clause with params numbered after SET params
         string whereSQL;
         PGValue[] whereParams;
-        if (_wheres.length > 0) {
-            whereSQL = " WHERE ";
-            int offset = cast(int)_sets.length;
-            foreach (i, ref w; _wheres) {
-                if (i > 0) whereSQL ~= " AND ";
-                whereSQL ~= "(" ~ _renumberParams(w.sql, offset) ~ ")";
-                offset += cast(int)w.params.length;
-                whereParams ~= w.params;
-            }
-        }
+        _buildWhere(whereSQL, whereParams, cast(int)_sets.length);
 
-        string sql = "UPDATE " ~ ormTableName!M ~
+        string sql = "UPDATE " ~ ormTableName!M ~ " _m" ~
                      " SET "   ~ setClause ~ whereSQL;
 
         PGValue[] allParams = setParams ~ whereParams;
