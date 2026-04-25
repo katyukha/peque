@@ -163,3 +163,81 @@ size_t countNonPkFields(M)() {
     }}
     return n;
 }
+
+
+// ---------------------------------------------------------------------------
+// ORM join / prefetch / partial-update helpers (package(peque.orm))
+// ---------------------------------------------------------------------------
+
+/** Return the SQL column name for fieldName on M if it is a DB column field.
+  * Returns "" if fieldName is not found or is not a column field.
+  **/
+package(peque.orm) string _fieldColName(M, string fieldName)() {
+    string result;
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (memberName == fieldName && _isColField!F)
+            result = _colName!(F, memberName);
+    }}
+    return result;
+}
+
+/** Build "prefix.col1, prefix.col2, ..." for all DB column fields of M. **/
+package(peque.orm) string _prefixedSelectList(M, string prefix)() {
+    string result;
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (_isColField!F) {
+            if (result.length) result ~= ", ";
+            result ~= prefix ~ "." ~ _colName!(F, memberName);
+        }
+    }}
+    return result;
+}
+
+/** Build "tableAlias.col AS colPrefixcol, ..." for all DB column fields of RelM.
+  * Used to SELECT joined-model columns with a disambiguating alias prefix.
+  **/
+package(peque.orm) string _joinSelectExtras(RelM, string tableAlias, string colPrefix)() {
+    string result;
+    static foreach (memberName; FieldNameTuple!RelM) {{
+        alias F = __traits(getMember, RelM, memberName);
+        static if (_isColField!F) {
+            if (result.length) result ~= ", ";
+            result ~= tableAlias ~ "." ~ _colName!(F, memberName) ~
+                      " AS " ~ colPrefix ~ _colName!(F, memberName);
+        }
+    }}
+    return result;
+}
+
+/** Find the SQL column name of the FK field on M that has @many2one!(RelType, ...).
+  * Returns "" when none is found.
+  **/
+package(peque.orm) string _findM2OFKColFor(M, RelType)() {
+    import peque.model: many2one, OnDelete;
+    string result;
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (hasMany2OneUDA!F) {
+            static foreach (uda; __traits(getAttributes, F)) {{
+                static if (is(uda)) {
+                    static if (is(uda == many2one!(U, od), U, OnDelete od) && is(U == RelType)) {
+                        result = _colName!(F, memberName);
+                    }
+                }
+            }}
+        }
+    }}
+    return result;
+}
+
+/** Return the D field name (not column name) of the @primaryKey field on M. **/
+package(peque.orm) string ormPkFieldName(M)() {
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (hasUDA!(F, primaryKey))
+            return memberName;
+    }}
+    assert(false, "No @primaryKey on " ~ M.stringof);
+}

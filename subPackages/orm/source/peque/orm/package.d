@@ -71,7 +71,7 @@ public import peque.orm.repository: isModel, CRUDMixin, Repository;
 public import peque.orm.sql:
     buildSelectList, buildInsertColList, buildInsertPlaceholders,
     buildUpdateSetClause, buildInsertValueExpr, buildUpdateValueExpr,
-    ormTableName, ormPkColName, countNonPkFields;
+    ormTableName, ormPkColName, ormPkFieldName, countNonPkFields;
 public import peque.orm.registry:
     ModelRepo, Bind, Registry, RegistryRepoFor, MergeRegistries;
 public import peque.orm.schema: modelDDL, schemaSQL;

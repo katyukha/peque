@@ -100,8 +100,12 @@ T hydrateRow(T)(ref ResultRow row) if (is(T == struct)) {
 
 /** Hydrate only @field- and @primaryKey-annotated fields.
   * Throws ColNotExistsError at runtime if an annotated field's column is absent.
+  *
+  * The optional colPrefix is prepended to every resolved column name before
+  * looking it up in the ResultRow.  Used by the ORM join layer to read aliased
+  * columns such as `__partner_id`, `__partner_name`, etc.
   **/
-private T _hydrateAnnotated(T)(ref ResultRow row) {
+package(peque) T _hydrateAnnotated(T, string colPrefix = "")(ref ResultRow row) {
     import std.traits: FieldNameTuple, Fields, hasUDA, getUDAs;
 
     T result;
@@ -114,7 +118,7 @@ private T _hydrateAnnotated(T)(ref ResultRow row) {
         // (they carry none of these UDAs, so the static if below is false).
         static if (hasUDA!(FieldDecl, field) || hasUDA!(FieldDecl, primaryKey) ||
                    hasMany2OneUDA!FieldDecl) {
-            enum colName = _resolveColName!(FieldDecl, memberName);
+            enum colName = colPrefix ~ _resolveColName!(FieldDecl, memberName);
             __traits(getMember, result, memberName) = row[colName].as!FieldType;
         }
     }}
