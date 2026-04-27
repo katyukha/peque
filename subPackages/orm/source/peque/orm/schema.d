@@ -68,6 +68,7 @@ module peque.orm.schema;
 
 private import std.traits: FieldNameTuple, hasUDA, getUDAs, TemplateOf;
 private import std.typecons: Nullable;
+private import std.json: JSONValue;
 
 private import peque.model:
     model, field, primaryKey, pgType,
@@ -102,6 +103,8 @@ private string _pgBaseType(T)() {
         return "DOUBLE PRECISION";
     else static if (is(T == string))
         return "TEXT";
+    else static if (is(T == JSONValue))
+        return "JSONB";
     else
         static assert(false,
             "No default PostgreSQL type for D type `" ~ T.stringof ~
