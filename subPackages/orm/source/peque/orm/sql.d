@@ -232,6 +232,27 @@ package(peque.orm) string _findM2OFKColFor(M, RelType)() {
     return result;
 }
 
+/** Return the FK column name for a specific @related field on M.
+  *
+  * If @related("fkFieldName") carries an explicit FK field name, the column
+  * for that field is returned.  Otherwise falls back to _findM2OFKColFor which
+  * returns the first @many2one!(RelType) column found — fine for models with a
+  * single FK to a given type, but ambiguous when there are two or more.
+  **/
+package(peque.orm) string _fkColForRelatedField(M, string relFieldName, RelType)() {
+    import peque.model: related;
+    alias RelFieldDecl = __traits(getMember, M, relFieldName);
+    alias relatedUDAs  = getUDAs!(RelFieldDecl, related);
+    static if (relatedUDAs.length > 0 && !is(relatedUDAs[0])
+               && relatedUDAs[0].fkField.length > 0) {
+        enum fkFN = relatedUDAs[0].fkField;
+        alias FKDecl = __traits(getMember, M, fkFN);
+        return _colName!(FKDecl, fkFN);
+    } else {
+        return _findM2OFKColFor!(M, RelType)();
+    }
+}
+
 /** Return the D field name (not column name) of the @primaryKey field on M. **/
 package(peque.orm) string ormPkFieldName(M)() {
     static foreach (memberName; FieldNameTuple!M) {{

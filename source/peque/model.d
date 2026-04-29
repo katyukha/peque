@@ -182,13 +182,28 @@ struct many2many(T, string junctionTable, string selfKey = "", string targetKey 
   * Populated by QuerySet.joinOne! (for @many2one backing fields) or
   * QuerySet.prefetch! (for @one2many/@many2many fields).
   *
-  * Example:
+  * When a model has more than one @many2one pointing to the same target type,
+  * each @related field must name its backing FK field explicitly so joinOne!
+  * can emit the correct ON clause.
+  *
+  * Example — single FK (common case, fkField omitted):
   * ---
-  * @many2one!(Partner)  int              partnerId;  // DB column, always loaded
-  * @related             Nullable!Partner partner;    // populated via joinOne!
+  * @many2one!(Partner)  int              partnerId;
+  * @related             Nullable!Partner partner;
+  * ---
+  *
+  * Example — two FKs to the same type (fkField required):
+  * ---
+  * @many2one!(Partner)          int              invoiceAddressId;
+  * @related("invoiceAddressId") Nullable!Partner invoiceAddress;
+  *
+  * @many2one!(Partner)          int              deliveryAddressId;
+  * @related("deliveryAddressId") Nullable!Partner deliveryAddress;
   * ---
   **/
-struct related {}
+struct related {
+    string fkField = "";
+}
 
 
 /** Override the PostgreSQL column type used by schemaSQL / modelDDL.

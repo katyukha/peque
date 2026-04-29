@@ -51,6 +51,14 @@ struct NullNode { string colExpr; }
 /// Raw SQL fragment — $1/$2/... are offset-shifted at serialisation time
 struct RawNode  { string sql; PGValue[] params; }
 
+/** EXISTS (SELECT 1 FROM tableName _sq WHERE (...))
+  *
+  * tableName is the bare SQL table name (no alias).
+  * inner is built with SF!(M, fieldName) references using the "_sq." prefix.
+  * NOT EXISTS = ~Predicate(ExistsNode(...)) via the existing NotNode/~ operator.
+  **/
+struct ExistsNode { string tableName; Predicate* inner; }
+
 
 // ---------------------------------------------------------------------------
 // Branch nodes — recursive via heap-allocated Predicate*
@@ -67,7 +75,7 @@ struct NotNode { Predicate* inner; }
 
 struct Predicate {
     private alias PT = SumType!(EqNode, OpNode, InNode, NullNode, RawNode,
-                                 AndNode, OrNode, NotNode);
+                                 ExistsNode, AndNode, OrNode, NotNode);
     PT _inner;
 
     this(T)(T node) { _inner = PT(node); }
@@ -127,6 +135,13 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
         },
         (ref NullNode n)  => SerializedPred(n.colExpr ~ " IS NULL", []),
         (ref RawNode n)   => SerializedPred(_shiftParams(n.sql, offset), n.params),
+        (ref ExistsNode n) {
+            auto i = serializePredicate(*n.inner, offset);
+            return SerializedPred(
+                "EXISTS (SELECT 1 FROM " ~ n.tableName ~ " _sq WHERE (" ~ i.sql ~ "))",
+                i.params,
+            );
+        },
         (ref AndNode n) {
             auto l = serializePredicate(*n.left,  offset);
             auto r = serializePredicate(*n.right, offset + cast(int)l.params.length);

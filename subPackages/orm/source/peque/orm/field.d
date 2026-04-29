@@ -43,7 +43,7 @@ module peque.orm.field;
 
 private import peque.converter: PGValue, convertToPG;
 private import peque.orm.predicate;
-private import peque.orm.sql: _fieldColName;
+private import peque.orm.sql: _fieldColName, ormTableName;
 
 
 /** Compile-time field reference builder.
@@ -56,6 +56,15 @@ struct FieldBuilder(string colExpr) {
     Predicate opCall(V)(V val) const {
         import peque.converter: convertToPG;
         return Predicate(EqNode(colExpr, convertToPG(val)));
+    }
+
+    /** Column-to-column equality: SF!(Inner, "fk")(F!(Outer, "pk"))
+      *
+      * Generates raw SQL `_sq.fk_col = _m.pk_col` with no bound parameters.
+      * Used inside exists!() to correlate inner and outer tables.
+      **/
+    Predicate opCall(string otherExpr)(FieldBuilder!otherExpr) const {
+        return Predicate(RawNode(colExpr ~ " = " ~ otherExpr, []));
     }
 
     /// Comparisons: .gt(v) > v, .gte(v) >= v, .lt(v) < v, .lte(v) <= v, .ne(v) != v
@@ -108,4 +117,62 @@ template F(M, string fieldName) {
         "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof ~
         " (must have @field, @primaryKey, or @many2one UDA)");
     enum FieldBuilder!("_m." ~ _col) F = FieldBuilder!("_m." ~ _col).init;
+}
+
+
+/** Build a compile-time field reference for the subquery table alias `_sq`.
+  *
+  * Used inside exists!() predicates to reference fields of the inner (subquery)
+  * model. SF!(Invoice, "orderId") resolves to the `_sq.order_id` column expression.
+  *
+  * Typical usage:
+  * ---
+  * .where(
+  *     exists!(Invoice)(
+  *         SF!(Invoice, "orderId")(F!(Order, "id")) &  // _sq.order_id = _m.id
+  *         SF!(Invoice, "status")("open")              // _sq.status = $1
+  *     )
+  * )
+  * ---
+  **/
+template SF(M, string fieldName) {
+    private enum _col = _fieldColName!(M, fieldName)();
+    static assert(_col.length > 0,
+        "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof ~
+        " (must have @field, @primaryKey, or @many2one UDA)");
+    enum FieldBuilder!("_sq." ~ _col) SF = FieldBuilder!("_sq." ~ _col).init;
+}
+
+
+/** Build an EXISTS (SELECT 1 FROM table _sq WHERE (...)) predicate.
+  *
+  * M is the inner model; its @model table name is used as the subquery table.
+  * inner is a Predicate built with SF!(M, fieldName) and/or F!(Outer, fieldName)
+  * references correlating the subquery to the outer query.
+  *
+  * NOT EXISTS: ~exists!(M)(inner)  — uses the existing NotNode/~ operator.
+  *
+  * Note: single-level EXISTS only. Nested exists!() calls are not supported
+  * because both inner tables would alias to `_sq`.
+  *
+  * ---
+  * // Orders that have at least one open invoice
+  * orderRepo.query()
+  *     .where(
+  *         exists!(Invoice)(
+  *             SF!(Invoice, "orderId")(F!(Order, "id")) &
+  *             SF!(Invoice, "status")("open")
+  *         )
+  *     )
+  *     .all();
+  *
+  * // Orders with NO invoices at all
+  * orderRepo.query()
+  *     .where(~exists!(Invoice)(SF!(Invoice, "orderId")(F!(Order, "id"))))
+  *     .all();
+  * ---
+  **/
+Predicate exists(M)(Predicate inner) {
+    enum tableName = ormTableName!M;
+    return Predicate(ExistsNode(tableName, new Predicate(inner)));
 }

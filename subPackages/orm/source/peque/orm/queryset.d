@@ -376,9 +376,11 @@ if (isModel!M && isQueryContext!Ctx) {
             "'" ~ relField ~ "' on " ~ M.stringof ~ " does not have @related UDA");
 
         alias RelType = _innerRelType!(M, relField);
-        enum fkCol = _findM2OFKColFor!(M, RelType)();
+        enum fkCol = _fkColForRelatedField!(M, relField, RelType)();
         static assert(fkCol.length > 0,
-            "No @many2one!(" ~ RelType.stringof ~ ") FK field found on " ~ M.stringof);
+            "No @many2one!(" ~ RelType.stringof ~ ") FK field found on " ~ M.stringof ~
+            " for @related field '" ~ relField ~ "'." ~
+            " If you have multiple FKs to the same type, add @related(\"fkFieldName\").");
 
         QuerySet!(M, Ctx, JoinFields, relField) qs2;
         qs2._ctx            = _ctx;
@@ -514,7 +516,7 @@ if (isModel!M && isQueryContext!Ctx) {
                 enum _jAlias  = "j" ~ to!string(idx);
                 enum _relTbl  = ormTableName!RelType;
                 enum _relPk   = ormPkColName!RelType();
-                enum _fkCol   = _findM2OFKColFor!(M, RelType)();
+                enum _fkCol   = _fkColForRelatedField!(M, jf, RelType)();
                 static assert(_fkCol.length > 0,
                     "No @many2one!(" ~ RelType.stringof ~ ") field found on " ~ M.stringof);
                 sql ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _jAlias ~
@@ -720,7 +722,7 @@ if (isModel!M && isQueryContext!Ctx) {
                 enum _jAlias  = "j" ~ to!string(idx);
                 enum _relTbl  = ormTableName!RelType;
                 enum _relPk   = ormPkColName!RelType();
-                enum _fkCol   = _findM2OFKColFor!(M, RelType)();
+                enum _fkCol   = _fkColForRelatedField!(M, jf, RelType)();
                 fromClause ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _jAlias ~
                               " ON " ~ _jAlias ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
             }}
