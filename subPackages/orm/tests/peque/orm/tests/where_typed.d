@@ -3,6 +3,7 @@
   * Covers:
   *  - where!"field"(val) — compile-time equality
   *  - whereIn!"field"(vals) — compile-time IN
+  *  - whereIn!"field"([]) — empty slice throws PequeException
   *  - F!(M,"field") comparison operators: >=, <=, >, <, !=
   *  - F!(M,"field").like()
   *  - F!(M,"field").isNull
@@ -16,9 +17,11 @@ module peque.orm.tests.where_typed;
 
 private import std.process: environment;
 private import std.typecons: Nullable;
+private import std.exception: assertThrown;
 
 private import peque.connection: Connection;
 private import peque.model: model, field, primaryKey;
+private import peque.exception: PequeException;
 private import peque.orm;
 
 
@@ -272,4 +275,26 @@ unittest {
     assert(r[0].name == "Alpha");
     assert(r[1].name == "Gamma");
     assert(r[2].name == "Epsilon");
+}
+
+
+// ---------------------------------------------------------------------------
+// whereIn! with empty slice — must throw PequeException, not AssertError.
+// SQL IN () is not valid syntax; callers must guard against empty lists.
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(WtItem, Connection)(&c);
+
+    // whereIn! delegates to contains(), which enforces non-empty.
+    assertThrown!PequeException(
+        repo.query().whereIn!"name"(cast(string[])[]).all(),
+        "whereIn! with empty slice must throw PequeException");
+
+    // F!(M,"field").contains() directly — same contract.
+    assertThrown!PequeException(
+        repo.query().where(F!(WtItem, "score").contains(cast(int[])[])).all(),
+        "contains() with empty slice must throw PequeException");
 }

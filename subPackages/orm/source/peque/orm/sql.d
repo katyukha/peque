@@ -169,6 +169,23 @@ size_t countNonPkFields(M)() {
 // ORM join / prefetch / partial-update helpers (package(peque.orm))
 // ---------------------------------------------------------------------------
 
+/** Runtime lookup: column name for D member name on M.
+  *
+  * Iterates all column fields of M (static foreach) and returns the SQL column
+  * name for the member whose D name equals memberName. Falls back to
+  * camelToSnake(memberName) for convention-based plain fields not found in
+  * the model (accepts camelCase names that convert cleanly).
+  **/
+package(peque.orm) string _fieldColNameRuntime(M)(string memberName) {
+    static foreach (mn; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, mn);
+        static if (_isColField!F) {
+            if (mn == memberName) return _colName!(F, mn);
+        }
+    }}
+    return camelToSnake(memberName);
+}
+
 /** Return the SQL column name for fieldName on M if it is a DB column field.
   * Returns "" if fieldName is not found or is not a column field.
   **/

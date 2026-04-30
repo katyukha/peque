@@ -148,3 +148,23 @@ unittest {
 
     assert(affected == 0);
 }
+
+
+// ---------------------------------------------------------------------------
+// update() with no set!() calls — must throw before hitting the database
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.exception: assertThrown;
+    import core.exception: AssertError;
+
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(QuItem, Connection)(&c);
+
+    // Calling update() without any set!() is a programming error —
+    // it would generate "UPDATE ... SET  WHERE ..." which is invalid SQL.
+    assertThrown!AssertError(
+        repo.query().whereRaw("id = $1", rows[0].id).update(),
+        "update() with no set!() calls must throw before executing SQL");
+}

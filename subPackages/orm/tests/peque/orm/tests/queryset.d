@@ -216,6 +216,28 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// whereRaw with zero bound parameters — hardcoded SQL fragment, no $N
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(Item, Connection)(&c);
+
+    // No placeholders — the parameter renumbering logic must handle empty args.
+    auto all = repo.query().whereRaw("1=1").all();
+    assert(all.length == 4, "whereRaw with no params must not discard any rows");
+
+    // Combine with a typed filter to verify param numbering still works after.
+    auto active = repo.query()
+                      .whereRaw("1=1")
+                      .whereRaw("active = $1", true)
+                      .all();
+    assert(active.length == 2);
+}
+
+
+// ---------------------------------------------------------------------------
 // Branching from a base QuerySet
 // ---------------------------------------------------------------------------
 

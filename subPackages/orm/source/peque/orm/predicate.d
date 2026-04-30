@@ -30,6 +30,8 @@ module peque.orm.predicate;
 private import std.conv: to;
 private import std.sumtype: SumType, match;
 private import peque.converter: PGValue;
+private import peque.exception: PequeException;
+private import std.exception: enforce;
 
 
 // ---------------------------------------------------------------------------
@@ -59,6 +61,23 @@ struct RawNode  { string sql; PGValue[] params; }
   **/
 struct ExistsNode { string tableName; Predicate* inner; }
 
+/** Unresolved field-path predicate — created by the type-free F!"path" template.
+  *
+  * path:      D camelCase field path, e.g. "status", "deliveryAddress.country"
+  * op:        "=", "!=", ">", ">=", "<", "<=", "LIKE", "IN", "IS NULL"
+  * params:    bound values (empty for IS NULL; one for scalar ops; multiple for IN)
+  * otherPath: second path for column-to-column comparisons, else ""
+  *
+  * PathNodes MUST be resolved by the QuerySet before serialization; calling
+  * serializePredicate on an unresolved PathNode is a programming error.
+  **/
+struct PathNode {
+    string    path;
+    string    op;
+    PGValue[] params;
+    string    otherPath;
+}
+
 
 // ---------------------------------------------------------------------------
 // Branch nodes — recursive via heap-allocated Predicate*
@@ -75,8 +94,8 @@ struct NotNode { Predicate* inner; }
 
 struct Predicate {
     private alias PT = SumType!(EqNode, OpNode, InNode, NullNode, RawNode,
-                                 ExistsNode, AndNode, OrNode, NotNode);
-    PT _inner;
+                                 ExistsNode, PathNode, AndNode, OrNode, NotNode);
+    package(peque) PT _inner;
 
     this(T)(T node) { _inner = PT(node); }
 
@@ -136,11 +155,21 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
         (ref NullNode n)  => SerializedPred(n.colExpr ~ " IS NULL", []),
         (ref RawNode n)   => SerializedPred(_shiftParams(n.sql, offset), n.params),
         (ref ExistsNode n) {
+            enforce!PequeException(!_containsExistsNode(*n.inner),
+                "Nested EXISTS subqueries are not supported: both levels would " ~
+                "alias their inner table to _sq, producing incorrect SQL. " ~
+                "Rewrite using a JOIN or a single-level exists!() instead.");
             auto i = serializePredicate(*n.inner, offset);
             return SerializedPred(
                 "EXISTS (SELECT 1 FROM " ~ n.tableName ~ " _sq WHERE (" ~ i.sql ~ "))",
                 i.params,
             );
+        },
+        (ref PathNode n) {
+            assert(false,
+                "PathNode for path '" ~ n.path ~ "' was not resolved before SQL serialization. " ~
+                "Pass F!\"path\" predicates through QuerySet.where() which resolves them.");
+            return SerializedPred.init;
         },
         (ref AndNode n) {
             auto l = serializePredicate(*n.left,  offset);
@@ -158,6 +187,23 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
         },
     );
 }
+
+// Return true if the predicate tree contains at least one ExistsNode anywhere.
+private bool _containsExistsNode(ref Predicate pred) {
+    return pred._inner.match!(
+        (ref EqNode   _) => false,
+        (ref OpNode   _) => false,
+        (ref InNode   _) => false,
+        (ref NullNode _) => false,
+        (ref RawNode  _) => false,
+        (ref ExistsNode _) => true,
+        (ref PathNode _) => false,
+        (ref AndNode n) => _containsExistsNode(*n.left) || _containsExistsNode(*n.right),
+        (ref OrNode  n) => _containsExistsNode(*n.left) || _containsExistsNode(*n.right),
+        (ref NotNode n) => _containsExistsNode(*n.inner),
+    );
+}
+
 
 // Offset all $N tokens in a SQL fragment by `offset`.
 package(peque) string _shiftParams(string sql, int offset) pure {

@@ -273,3 +273,64 @@ unittest {
     foreach (s; ma.status()) assert(s.applied);
     foreach (s; mb.status()) assert(s.applied);
 }
+
+
+// ---------------------------------------------------------------------------
+// rollback(n > applied_count) — must roll back all applied, not throw
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    cleanup(c, "mig_test_rb_excess");
+    auto m = Migrator!(TestMigs)(&c, "mig_test_rb_excess");
+
+    m.migrate();  // applies M1 + M2
+
+    // Requesting 10 rollbacks when only 2 are applied must silently roll back
+    // all 2 and not throw.
+    m.rollback(10);
+
+    auto st = m.status();
+    assert(st.length == 2);
+    assert(!st[0].applied, "M1 must be rolled back");
+    assert(!st[1].applied, "M2 must be rolled back");
+}
+
+
+// ---------------------------------------------------------------------------
+// migrate() failure mid-list: failing up() is rolled back, migration not recorded
+// ---------------------------------------------------------------------------
+
+struct M_Fail {
+    enum description = "always fails";
+    void up(ref Connection conn) {
+        // Deliberately invalid SQL so PostgreSQL rejects it.
+        conn.exec("THIS IS NOT VALID SQL @@@@");
+    }
+    void down(ref Connection conn) {
+        // nothing to undo — up() never succeeded
+    }
+}
+
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: QueryError;
+
+    auto c = makeConn();
+    cleanup(c, "mig_test_fail");
+    c.exec(`DROP TABLE IF EXISTS mig_foo`);
+    c.exec(`DROP TABLE IF EXISTS mig_baz`);
+    c.execParams(`DELETE FROM schema_versions WHERE namespace = $1`, "mig_test_fail");
+
+    alias FailMigs = MigrationList!(M1_CreateFoo, M_Fail);
+    auto m = Migrator!(FailMigs)(&c, "mig_test_fail");
+
+    // The second migration throws — the whole migrate() must propagate the error.
+    assertThrown!QueryError(m.migrate());
+
+    // M1 was applied before the failure and committed in its own transaction.
+    auto st = m.status();
+    assert(st.length == 2);
+    assert( st[0].applied, "M1 committed before the failing migration must remain applied");
+    assert(!st[1].applied, "failed migration must not be recorded in schema_versions");
+}

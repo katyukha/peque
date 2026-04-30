@@ -69,6 +69,7 @@ module peque.orm.schema;
 private import std.traits: FieldNameTuple, hasUDA, getUDAs, TemplateOf;
 private import std.typecons: Nullable;
 private import std.json: JSONValue;
+private import std.datetime: SysTime, DateTime, Date;
 
 private import peque.model:
     model, field, primaryKey, pgType,
@@ -105,6 +106,12 @@ private string _pgBaseType(T)() {
         return "TEXT";
     else static if (is(T == JSONValue))
         return "JSONB";
+    else static if (is(T == SysTime))
+        return "TIMESTAMPTZ";
+    else static if (is(T == DateTime))
+        return "TIMESTAMP";
+    else static if (is(T == Date))
+        return "DATE";
     else
         static assert(false,
             "No default PostgreSQL type for D type `" ~ T.stringof ~

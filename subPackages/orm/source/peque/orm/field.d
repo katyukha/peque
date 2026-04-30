@@ -44,6 +44,9 @@ module peque.orm.field;
 private import peque.converter: PGValue, convertToPG;
 private import peque.orm.predicate;
 private import peque.orm.sql: _fieldColName, ormTableName;
+private import peque.hydration: camelToSnake;
+private import peque.exception: PequeException;
+private import std.exception: enforce;
 
 
 /** Compile-time field reference builder.
@@ -90,7 +93,9 @@ struct FieldBuilder(string colExpr) {
       **/
     Predicate contains(V)(V[] vals) const {
         import peque.converter: convertToPG;
-        assert(vals.length > 0, "contains() called with empty value list");
+        enforce!PequeException(vals.length > 0,
+            "contains() / whereIn!() called with an empty value list — " ~
+            "SQL IN () is invalid; pass at least one value or skip the filter entirely");
         PGValue[] pgVals;
         foreach (v; vals) pgVals ~= convertToPG(v);
         return Predicate(InNode(colExpr, pgVals));
@@ -99,6 +104,11 @@ struct FieldBuilder(string colExpr) {
     /// IS NULL: F!(M, "field").isNull
     @property Predicate isNull() const {
         return Predicate(NullNode(colExpr));
+    }
+
+    /// Column-to-column !=: F!(M, "a").ne(F!(M, "b")) or F!"a".ne(F!"b")
+    Predicate ne(string otherExpr)(FieldBuilder!otherExpr) const {
+        return Predicate(RawNode(colExpr ~ " != " ~ otherExpr, []));
     }
 }
 
@@ -175,4 +185,125 @@ template SF(M, string fieldName) {
 Predicate exists(M)(Predicate inner) {
     enum tableName = ormTableName!M;
     return Predicate(ExistsNode(tableName, new Predicate(inner)));
+}
+
+
+// ---------------------------------------------------------------------------
+// Type-free F and SF — no explicit model type required
+// ---------------------------------------------------------------------------
+
+private bool _pathHasDot(string s) pure nothrow @safe @nogc {
+    foreach (c; s) if (c == '.') return true;
+    return false;
+}
+
+/** Type-free field builder — no explicit model type needed.
+  *
+  * For plain fields (no dot): resolves via camelToSnake convention, returns a
+  * concrete FieldBuilder with "_m." prefix identical to F!(M, "field").
+  *
+  * For join paths (one or two dots): returns a PathBuilder that carries the
+  * unresolved path. The QuerySet resolves it against the model at SQL-build time,
+  * adding implicit LEFT JOINs as needed.
+  *
+  * Usage:
+  * ---
+  * repo.query().where(F!"status"("active"))          // plain field
+  * repo.query().where(F!"partner.name"("Acme"))      // 1-level join, implicit JOIN
+  * repo.query().where(F!"partner.company.rate"(5))   // 2-level join, implicit JOINs
+  * repo.query().where(F!"invoiceId".ne(F!"orderId")) // column-to-column !=
+  * repo.query().orderBy(F!"partner.name" ~ " ASC")  // join path in ORDER BY
+  * ---
+  *
+  * Note: plain-field resolution uses camelToSnake without model validation.
+  * Typos in field names become runtime PostgreSQL errors rather than compile-time
+  * failures. Use F!(M, "field") when compile-time validation is desired.
+  **/
+template F(string path) {
+    static if (_pathHasDot(path)) {
+        enum PathBuilder!path F = PathBuilder!path.init;
+    } else {
+        enum FieldBuilder!("_m." ~ camelToSnake(path)) F =
+            FieldBuilder!("_m." ~ camelToSnake(path)).init;
+    }
+}
+
+/** Type-free subquery field builder for use inside exists!() predicates.
+  *
+  * Returns a FieldBuilder with "_sq." prefix — no model type validation.
+  * Column name resolved via camelToSnake convention.
+  *
+  * Usage (inside exists!(M)(...)  — M provides the inner table):
+  * ---
+  * exists!(Invoice)(
+  *     SF!"orderId"(F!"id") &   // _sq.order_id = _m.id
+  *     SF!"status"("open")      // _sq.status = $1
+  * )
+  * ---
+  **/
+template SF(string fieldName) {
+    enum FieldBuilder!("_sq." ~ camelToSnake(fieldName)) SF =
+        FieldBuilder!("_sq." ~ camelToSnake(fieldName)).init;
+}
+
+
+// ---------------------------------------------------------------------------
+// PathBuilder — carries an unresolved field path for type-free F!
+// ---------------------------------------------------------------------------
+
+/** Unresolved join-path field builder produced by F!"rel.field".
+  *
+  * All operator methods produce PathNode predicates that the QuerySet resolves
+  * against the model type at SQL-build time, adding implicit LEFT JOINs.
+  *
+  * Also supports `PathBuilder ~ string` for use in orderBy():
+  *   .orderBy(F!"partner.name" ~ " ASC")
+  **/
+struct PathBuilder(string path) {
+    /// Equality
+    Predicate opCall(V)(V val) const {
+        return Predicate(PathNode(path, "=", [convertToPG(val)], ""));
+    }
+    /// Column-to-column equality
+    Predicate opCall(string other)(PathBuilder!other) const {
+        return Predicate(PathNode(path, "=", [], other));
+    }
+
+    /// > v
+    Predicate gt(V)(V val)  const { return Predicate(PathNode(path, ">",   [convertToPG(val)], "")); }
+    /// >= v
+    Predicate gte(V)(V val) const { return Predicate(PathNode(path, ">=",  [convertToPG(val)], "")); }
+    /// < v
+    Predicate lt(V)(V val)  const { return Predicate(PathNode(path, "<",   [convertToPG(val)], "")); }
+    /// <= v
+    Predicate lte(V)(V val) const { return Predicate(PathNode(path, "<=",  [convertToPG(val)], "")); }
+    /// != v (scalar)
+    Predicate ne(V)(V val)  const { return Predicate(PathNode(path, "!=",  [convertToPG(val)], "")); }
+    /// Column-to-column !=
+    Predicate ne(string other)(PathBuilder!other) const {
+        return Predicate(PathNode(path, "!=", [], other));
+    }
+
+    /// LIKE pattern
+    Predicate like(string pat) const {
+        return Predicate(PathNode(path, "LIKE", [convertToPG(pat)], ""));
+    }
+
+    /// IN (set membership)
+    Predicate contains(V)(V[] vals) const {
+        enforce!PequeException(vals.length > 0,
+            "contains() / whereIn!() called with an empty value list — " ~
+            "SQL IN () is invalid; pass at least one value or skip the filter entirely");
+        PGValue[] pgVals;
+        foreach (v; vals) pgVals ~= convertToPG(v);
+        return Predicate(PathNode(path, "IN", pgVals, ""));
+    }
+
+    /// IS NULL
+    @property Predicate isNull() const {
+        return Predicate(PathNode(path, "IS NULL", [], ""));
+    }
+
+    /// For use in orderBy: F!"partner.name" ~ " ASC" → "partner.name ASC"
+    string opBinary(string op : "~")(string suffix) const { return path ~ suffix; }
 }

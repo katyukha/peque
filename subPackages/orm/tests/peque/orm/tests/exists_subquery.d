@@ -13,9 +13,11 @@ module peque.orm.tests.exists_subquery;
 
 private import std.process: environment;
 private import std.typecons: Nullable;
+private import std.exception: assertThrown;
 
 private import peque.connection: Connection;
 private import peque.model: model, field, primaryKey, many2one;
+private import peque.exception: PequeException;
 private import peque.orm;
 
 
@@ -188,4 +190,53 @@ unittest {
         .all();
     assert(res.length == 1);
     assert(res[0].ref_ == "ORD-2");
+}
+
+
+// ---------------------------------------------------------------------------
+// Nested EXISTS — must throw PequeException at serialisation time, not produce
+// silently wrong SQL (both levels would alias to _sq)
+// ---------------------------------------------------------------------------
+
+unittest {
+    import peque.orm.predicate: serializePredicate;
+
+    // Build a nested exists: exists!(EqOrder)(... exists!(EqInvoice)(...) ...)
+    // This is statically constructable; the error fires at serialisation.
+    auto inner = exists!(EqInvoice)(
+        SF!(EqInvoice, "orderId")(F!(EqOrder, "id"))
+    );
+    auto outer = exists!(EqOrder)(inner);
+
+    assertThrown!PequeException(serializePredicate(outer),
+        "nested exists!() must throw PequeException at serialisation time");
+}
+
+unittest {
+    import peque.orm.predicate: serializePredicate;
+
+    // NOT EXISTS wrapping a nested EXISTS must also be caught.
+    auto inner = exists!(EqInvoice)(
+        SF!(EqInvoice, "orderId")(F!(EqOrder, "id"))
+    );
+    auto outer = ~exists!(EqOrder)(inner);
+
+    assertThrown!PequeException(serializePredicate(outer),
+        "~exists!() wrapping a nested exists!() must throw PequeException");
+}
+
+unittest {
+    // Via QuerySet.where() — the error propagates to the terminal method caller.
+    auto c = makeConn();
+    setup(c);
+    auto orders = Repository!(EqOrder, Connection)(&c);
+
+    auto inner = exists!(EqInvoice)(
+        SF!(EqInvoice, "orderId")(F!(EqOrder, "id"))
+    );
+    auto outer = exists!(EqOrder)(inner);
+
+    assertThrown!PequeException(
+        orders.query().where(outer).all(),
+        "nested exists!() via QuerySet.where().all() must throw PequeException");
 }
