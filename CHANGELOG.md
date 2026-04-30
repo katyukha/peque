@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`peque:orm`** — ORM-layer that provides compile-time model registry,
+  schema-generation, QuerySets and basic CRUD implementation.
+- **`peque:migrate`** — Minimal migration runner infrastructure.
+
+---
+
 ## [0.2.0]
 
 ### Added

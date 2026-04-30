@@ -17,6 +17,9 @@ scope, without depending on the GC.
 - Configurable transaction isolation level (`readCommitted`, `repeatableRead`, `serializable`, `serverDefault`)
 - Savepoint support for partial rollbacks within a transaction
 - Static or dynamic (`bindbc-loader`) loading of `libpq`
+- **`peque:orm`** — compile-time ORM with type-safe WHERE predicates, QuerySet, and schema generation
+- **`peque:migrate`** — compile-time D-struct migration runner with rollback and checksum verification
+- **`peque:vibe`** — vibe.d fiber-aware integration (`VibeWaitStrategy` + `VibeConnectionPool`)
 
 ## Supported types
 
@@ -25,7 +28,7 @@ scope, without depending on the GC.
 | `string` | `text`, `varchar`, `char`, … |
 | `JSONValue` | `json`, `jsonb` |
 | `int`, `long`, `short` | `integer`, `bigint`, `smallint` |
-| `float`, `double` | `real`, `double precision` |
+| `float`, `double` | `real`, `double precision` (incl. `NaN`, `Infinity`, `-Infinity`) |
 | `bool` | `boolean` |
 | `Date` | `date` |
 | `DateTime` | `timestamp` |
@@ -45,6 +48,14 @@ scope, without depending on the GC.
 `dub.sdl`:
 ```
 dependency "peque" version="~>0.1.0"
+```
+
+Sub-packages are opt-in:
+
+```
+dependency "peque:orm"     version="~>0.1.0"   // ORM layer
+dependency "peque:migrate" version="~>0.1.0"   // migration runner
+dependency "peque:vibe"    version="~>0.1.0"   // vibe.d integration
 ```
 
 Choose a configuration depending on how you want to link `libpq`:
@@ -142,24 +153,11 @@ c.transaction!(OnSuccess.rollback)((ref tx) {
 });
 ```
 
-Business logic functions take `ref Transaction` and are completely unaware of
-nesting depth:
-
-```d
-void deductStock(ref Transaction tx, string item, int qty) {
-    tx.execParams(
-        "UPDATE items SET qty = qty - $1 WHERE name = $2", qty, item);
-}
-
-c.transaction((ref tx) { deductStock(tx, "apple", 1); });
-```
-
 ### Savepoints
 
 `Transaction.savepoint()` creates a PostgreSQL savepoint. On exception, only
 the savepoint changes are rolled back — the enclosing transaction remains open
-and intact. The delegate receives the same `ref Transaction`, so the same
-business logic functions work at any nesting depth without modification.
+and intact.
 
 ```d
 c.transaction((ref tx) {
@@ -178,39 +176,299 @@ c.transaction((ref tx) {
 });
 ```
 
-Savepoints can be nested arbitrarily. `OnSuccess.rollback` works on savepoints
-too — useful for dry-run sub-operations inside a larger transaction.
-
 ### Isolation levels
 
-The `IsolationLevel` template parameter controls the PostgreSQL transaction
-isolation level. The default is `readCommitted`, which is always set
-**explicitly** in the `BEGIN` statement regardless of server configuration —
-so the behaviour is predictable even if the server or role has a different
-`default_transaction_isolation` configured.
-
 ```d
-import peque;
-
-// Read committed (default) — explicit in BEGIN, immune to server config
+// Read committed (default)
 c.transaction((ref tx) { ... });
 
 // Repeatable read
 c.transaction!(OnSuccess.commit, IsolationLevel.repeatableRead)((ref tx) { ... });
 
-// Serializable — may throw on conflict, application must be prepared to retry
+// Serializable — may abort; application must be prepared to retry
 c.transaction!(OnSuccess.commit, IsolationLevel.serializable)((ref tx) { ... });
 
-// Server default — emits plain BEGIN, defers to postgresql.conf / ALTER ROLE / ALTER DATABASE
+// Server default — defers to postgresql.conf / ALTER ROLE / ALTER DATABASE
 c.transaction!(OnSuccess.commit, IsolationLevel.serverDefault)((ref tx) { ... });
 ```
 
-| Value | BEGIN emitted | Notes |
-|---|---|---|
-| `readCommitted` (default) | `BEGIN ISOLATION LEVEL READ COMMITTED` | Predictable regardless of server config |
-| `repeatableRead` | `BEGIN ISOLATION LEVEL REPEATABLE READ` | |
-| `serializable` | `BEGIN ISOLATION LEVEL SERIALIZABLE` | May abort; application must retry |
-| `serverDefault` | `BEGIN` | Respects server/role/database configuration |
+---
+
+## ORM (`peque:orm`)
+
+`peque:orm` is a compile-time ORM that generates SQL from model UDA metadata.
+Nothing is reflected at runtime — all column names, table names, and SELECT
+lists are computed by the compiler.
+
+### Model definition
+
+```d
+import peque.orm;
+
+@model("res_partner")
+struct Partner {
+    @primaryKey int    id;
+    @field      string name;
+    @field      string email;
+    @field      bool   active;
+}
+```
+
+### Registry and schema
+
+A `Registry` maps models to repository templates. `schemaSQL` generates
+`CREATE TABLE` statements for every model in the registry.
+
+```d
+alias AppReg = Registry!(Bind!(Partner, ModelRepo!Partner));
+
+// On first run / migration:
+conn.exec(schemaSQL!AppReg());
+```
+
+### Repository CRUD
+
+```d
+auto repo = Repository!(Partner, Connection)(&conn);
+
+// Insert — returns the row with server-assigned id
+auto p = repo.insert(Partner(0, "Acme Corp", "info@acme.com", true));
+
+// Fetch by primary key — returns Nullable!Partner
+auto found = repo.findById(p.id);
+
+// Update entire row
+p.name = "Acme Ltd";
+repo.update(p);
+
+// Delete by primary key
+repo.deleteById(p.id);
+```
+
+### QuerySet
+
+`repo.query()` returns a lazy `QuerySet`. Filters accumulate without touching
+the database; a terminal method sends the query.
+
+```d
+// All active partners
+auto active = repo.query().where!"active"(true).all();
+
+// Filtered, ordered, paginated
+auto page = repo.query()
+    .where!"active"(true)
+    .orderBy("name ASC")
+    .limit(10).offset(20)
+    .all();
+
+// Count
+long n = repo.query().where!"active"(true).count();
+
+// Exists
+bool any = repo.query().where!"active"(true).exists();
+
+// First match — returns Nullable!Partner
+auto first = repo.query().where!"name"("Acme Ltd").first();
+
+// Delete matching rows — returns count deleted
+long deleted = repo.query().where!"active"(false).delete_();
+
+// Partial update — set only named fields
+long updated = repo.query()
+    .where!"active"(false)
+    .set!"name"("Archived")
+    .update();
+```
+
+### Type-safe predicates
+
+`F!(Model, "field")` builds a compile-time field reference. Unknown field names
+are compile-time errors.
+
+```d
+import peque.orm;
+
+// Comparison operators
+repo.query().where(F!(Partner, "id").gte(100)).all();
+repo.query().where(F!(Partner, "name").like("Acme%")).all();
+repo.query().where(F!(Partner, "name").ne("Ghost")).all();
+
+// IN
+repo.query().where(F!(Partner, "id").contains([1, 2, 3])).all();
+// or sugar:
+repo.query().whereIn!"id"([1, 2, 3]).all();
+
+// IS NULL
+repo.query().where(F!(Partner, "email").isNull).all();
+
+// OR / AND / NOT composition
+auto pred = F!(Partner, "active")(true) & F!(Partner, "id").gte(10);
+repo.query().where(pred).all();
+
+auto orPred = F!(Partner, "name")("Acme") | F!(Partner, "name")("Beta");
+repo.query().where(orPred).all();
+
+repo.query().where(~F!(Partner, "active")(false)).all();
+```
+
+The type-free variant `F!"fieldName"` infers the column name from the
+camelCase→snake_case convention without model validation. Field-name typos
+become PostgreSQL runtime errors rather than compile-time failures — use
+`F!(Model, "field")` when compile-time checking is preferred.
+
+```d
+repo.query().where(F!"active"(true)).all();
+repo.query().where(F!"id".gte(10)).all();
+```
+
+### Raw SQL escape hatch
+
+`whereRaw` embeds a SQL fragment verbatim — placeholders use local `$1`/`$2`
+numbering and are renumbered automatically relative to prior filters.
+
+```d
+repo.query().whereRaw("tsv @@ to_tsquery($1)", "acme & corp").all();
+```
+
+**Security:** `sqlFrag` is embedded in the query verbatim — never pass
+user-controlled input as the first argument. All runtime values must go through
+the variadic args.
+
+### EXISTS subqueries
+
+```d
+@model("invoices")
+struct Invoice {
+    @primaryKey int    id;
+    @field      int    partnerId;
+    @field      string status;
+}
+
+alias InvoiceRepo = Repository!(Invoice, Connection);
+
+// Partners that have at least one open invoice
+partnerRepo.query()
+    .where(
+        exists!(Invoice)(
+            SF!(Invoice, "partnerId")(F!(Partner, "id")) &
+            SF!(Invoice, "status")("open")
+        )
+    )
+    .all();
+
+// Partners with NO invoices at all
+partnerRepo.query()
+    .where(~exists!(Invoice)(
+        SF!(Invoice, "partnerId")(F!(Partner, "id"))
+    ))
+    .all();
+```
+
+Note: single-level `exists!()` only. Nested `exists!()` calls conflict on the
+`_sq` alias and throw `PequeException` at serialisation time.
+
+---
+
+## Migrations (`peque:migrate`)
+
+Migrations are plain D structs compiled into the application binary. Each
+struct has `up()` and optionally `down()`. Version numbers are assigned by
+position in `MigrationList` — never reorder migrations.
+
+```d
+import peque;
+import peque.migrate;
+
+struct V1_CreateUsers {
+    enum description = "create users table";
+    void up(ref Connection conn) {
+        conn.exec(`CREATE TABLE users (
+            id    serial PRIMARY KEY,
+            name  text   NOT NULL,
+            email text   NOT NULL DEFAULT ''
+        )`);
+    }
+    void down(ref Connection conn) {
+        conn.exec(`DROP TABLE users`);
+    }
+}
+
+struct V2_AddIndex {
+    enum description = "index users.email";
+    void up(ref Connection conn) {
+        conn.exec(`CREATE INDEX ON users (email)`);
+    }
+    // no down() — irreversible; rollback throws MigrationError
+}
+
+alias AppMigrations = MigrationList!(V1_CreateUsers, V2_AddIndex);
+```
+
+### Running migrations
+
+```d
+auto m = Migrator!(AppMigrations)(&conn, "myapp");
+
+m.migrate();          // apply all pending (advisory-locked, each in its own transaction)
+m.rollback(1);        // roll back the last applied migration (requires down())
+m.status();           // returns MigrationStatus[] with applied / pending info
+```
+
+### Integration with `peque:orm`
+
+The first migration can reuse `schemaSQL` to create all ORM-managed tables:
+
+```d
+struct V1_InitSchema {
+    enum description = "create all tables";
+    void up(ref Connection conn) {
+        conn.exec(schemaSQL!AppReg());
+    }
+}
+```
+
+### Multiple namespaces
+
+Libraries and applications can share a database with independent version
+sequences:
+
+```d
+Migrator!(LibMigrations)(&conn, "mylib").migrate();
+Migrator!(AppMigrations)(&conn, "myapp").migrate();
+```
+
+### Checksum verification
+
+Each migration's checksum (SHA-256 of its fully-qualified name + description)
+is stored on first apply. Re-running `migrate()` after editing an already-applied
+migration throws `MigrationError` rather than silently re-applying or skipping.
+
+---
+
+## vibe.d (`peque:vibe`)
+
+`peque:vibe` provides a fiber-aware wait strategy and connection pool for
+vibe.d applications. Instead of blocking the OS thread while waiting for
+PostgreSQL, control yields to the vibe.d event loop.
+
+```d
+dependency "peque:vibe" version="~>0.1.0"
+```
+
+```d
+import peque;
+import peque.vibe;
+
+// Single connection with fiber-aware I/O
+auto conn = Connection(..., VibeWS());
+
+// Connection pool — hands out connections to fibers, queues waiters
+auto pool = VibeConnectionPool(5, () => Connection(..., VibeWS()));
+auto c = pool.acquire();
+scope(exit) pool.release(c);
+```
+
+---
 
 
 ## vibe.d (`peque:vibe`)
@@ -314,6 +572,13 @@ POSTGRES_PASSWORD=peque \
 POSTGRES_HOST=localhost \
 POSTGRES_PORT=5432 \
 dub test --config=unittestStatic
+```
+
+Sub-package tests:
+
+```sh
+cd subPackages/orm     && dub test --config=unittestStatic
+cd subPackages/migrate && dub test --config=unittestStatic
 ```
 
 ## License
