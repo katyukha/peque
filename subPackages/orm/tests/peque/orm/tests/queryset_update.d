@@ -156,7 +156,7 @@ unittest {
 
 unittest {
     import std.exception: assertThrown;
-    import core.exception: AssertError;
+    import peque.exception: PequeException;
 
     auto c    = makeConn();
     auto rows = seed(c);
@@ -164,7 +164,7 @@ unittest {
 
     // Calling update() without any set!() is a programming error —
     // it would generate "UPDATE ... SET  WHERE ..." which is invalid SQL.
-    assertThrown!AssertError(
+    assertThrown!PequeException(
         repo.query().whereRaw("id = $1", rows[0].id).update(),
-        "update() with no set!() calls must throw before executing SQL");
+        "update() with no set!() calls must throw PequeException");
 }

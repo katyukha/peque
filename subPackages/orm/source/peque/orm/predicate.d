@@ -145,6 +145,8 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
             [n.value],
         ),
         (ref InNode n) {
+            if (n.values.length == 0)
+                return SerializedPred("FALSE", []);
             string ph;
             foreach (i, _; n.values) {
                 if (i > 0) ph ~= ", ";

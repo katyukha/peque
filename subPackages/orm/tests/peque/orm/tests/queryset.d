@@ -238,6 +238,42 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// whereIn with an empty slice — must throw PequeException before hitting the DB
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: PequeException;
+
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(Item, Connection)(&c);
+
+    // An empty value list would produce "IN ()" which is a SQL syntax error.
+    // FieldBuilder.contains() catches this early and throws PequeException.
+    string[] empty;
+    repo.query().whereIn!"name"(empty).all().assertThrown!PequeException;
+}
+
+
+// ---------------------------------------------------------------------------
+// update() with no set!() calls — must throw PequeException, not assert
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: PequeException;
+
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(Item, Connection)(&c);
+
+    repo.query().update().assertThrown!PequeException;
+    repo.query().where!"active"(true).update().assertThrown!PequeException;
+}
+
+
+// ---------------------------------------------------------------------------
 // Branching from a base QuerySet
 // ---------------------------------------------------------------------------
 

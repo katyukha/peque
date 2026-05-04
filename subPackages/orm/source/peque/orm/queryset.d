@@ -39,6 +39,8 @@ private import std.typecons: Nullable, nullable;
 private import std.conv: to;
 private import std.traits: hasUDA, FieldNameTuple, Fields;
 private import std.string: indexOf, strip, split;
+private import std.exception: enforce;
+private import peque.exception: PequeException;
 
 private import peque.model: model, defaultOrder, field, primaryKey, related,
     one2many, many2many, many2one, OnDelete, hasMany2OneUDA, autoHydrate;
@@ -1059,7 +1061,7 @@ if (isModel!M && isQueryContext!Ctx) {
       * ---
       **/
     long update() {
-        assert(_sets.length > 0, "update() called with no set!() assignments");
+        enforce!PequeException(_sets.length > 0, "update() called with no set!() assignments");
 
         _FilterJoin[] fjoins;
         int fjIdx = 0;
