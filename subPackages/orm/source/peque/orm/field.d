@@ -43,6 +43,7 @@ module peque.orm.field;
 
 private import peque.converter: PGValue, convertToPG;
 private import peque.orm.predicate;
+private import peque.orm.subquery: SubQuery;
 private import peque.orm.sql: _fieldColName, ormTableName;
 private import peque.hydration: camelToSnake;
 
@@ -106,6 +107,15 @@ struct FieldBuilder(string colExpr) {
     /// Column-to-column !=: F!(M, "a").ne(F!(M, "b")) or F!"a".ne(F!"b")
     Predicate ne(string otherExpr)(FieldBuilder!otherExpr) const {
         return Predicate(RawNode(colExpr ~ " != " ~ otherExpr, []));
+    }
+
+    /** IN (SELECT ...): F!(M,"field").inSubquery(qs.asSubquery!"field"())
+      *
+      * sub is produced by QuerySet.asSubquery!"field"() — a SQL subquery atom
+      * with no DB call.  NOT IN: ~F!(M, "field").inSubquery(sub).
+      **/
+    Predicate inSubquery(T)(SubQuery!T sub) const {
+        return Predicate(InSubqueryNode(colExpr, sub.sql, sub.params));
     }
 }
 
@@ -298,6 +308,17 @@ struct PathBuilder(string path) {
     /// IS NULL
     @property Predicate isNull() const {
         return Predicate(PathNode(path, "IS NULL", [], ""));
+    }
+
+    /** IN (SELECT ...): F!"rel.field".inSubquery(qs.asSubquery!"field"())
+      *
+      * The join path is resolved by the QuerySet at SQL-build time.
+      * NOT IN: ~F!"rel.field".inSubquery(sub).
+      **/
+    Predicate inSubquery(T)(SubQuery!T sub) const {
+        // op="IN_SUB", params=subquery params, otherPath=subquery SQL.
+        // _resolvePred handles this case by constructing InSubqueryNode.
+        return Predicate(PathNode(path, "IN_SUB", sub.params, sub.sql));
     }
 
     /// For use in orderBy: F!"partner.name" ~ " ASC" → "partner.name ASC"

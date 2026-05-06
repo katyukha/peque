@@ -25,13 +25,14 @@
   *  - prefetch!(relField)     — schedule a post-query SELECT for @one2many/@many2many
   *
   * Terminal methods:
-  *  - all()           → M[]         — fetch all matching rows
-  *  - first()         → Nullable!M  — fetch at most one row
-  *  - count()         → long        — SELECT COUNT(*)
-  *  - exists()        → bool        — SELECT 1 … LIMIT 1
-  *  - delete_()       → long        — DELETE, returns rows deleted
-  *  - update()        → long        — partial UPDATE using accumulated set!() calls
-  *  - select!DTO()    → DTO[]       — project main + join columns into a DTO
+  *  - all()                → M[]          — fetch all matching rows
+  *  - first()              → Nullable!M   — fetch at most one row
+  *  - count()              → long         — SELECT COUNT(*)
+  *  - exists()             → bool         — SELECT 1 … LIMIT 1
+  *  - asSubquery!"f"()     → SubQuery!T   — capture as single-column subquery atom (no DB call)
+  *  - delete_()            → long         — DELETE, returns rows deleted
+  *  - update()             → long         — partial UPDATE using accumulated set!() calls
+  *  - select!DTO()         → DTO[]        — project main + join columns into a DTO
   **/
 module peque.orm.queryset;
 
@@ -50,7 +51,8 @@ private import peque.orm.repository: isModel;
 private import peque.orm.sql;
 private import peque.orm.predicate;
 private import peque.orm.field: FieldBuilder, PathBuilder, F;
-private import peque.orm.predicate: PathNode, LiteralNode;
+private import peque.orm.predicate: PathNode, LiteralNode, InSubqueryNode;
+private import peque.orm.subquery: SubQuery;
 private import std.sumtype: match;
 
 
@@ -475,10 +477,13 @@ private Predicate _resolvePred(M, JoinFields...)(
         (ref InNode n)      => p,
         (ref NullNode n)    => p,
         (ref RawNode n)     => p,
-        (ref LiteralNode n) => p,
-        (ref ExistsNode n)  => p,
+        (ref LiteralNode n)      => p,
+        (ref ExistsNode n)       => p,
+        (ref InSubqueryNode n)   => p,
         (ref PathNode n) {
             string colExpr = _resolvePathToCol!(M, JoinFields)(n.path, fjoins, idx);
+            if (n.op == "IN_SUB")
+                return Predicate(InSubqueryNode(colExpr, n.otherPath, n.params));
             if (n.otherPath.length) {
                 string other = _resolvePathToCol!(M, JoinFields)(n.otherPath, fjoins, idx);
                 return Predicate(RawNode(colExpr ~ " " ~ n.op ~ " " ~ other, []));
@@ -1030,6 +1035,53 @@ if (isModel!M && isQueryContext!Ctx) {
         sql ~= _filterJoinSQL(fjoins);
         sql ~= whereSQL ~ " LIMIT 1";
         return _ctx.execParams(sql, params).ntuples > 0;
+    }
+
+    /** Capture this QuerySet as a single-column SQL subquery atom.
+      *
+      * No database call is made.  Returns a SubQuery!T carrying:
+      *   SELECT _m.colname FROM table _m [WHERE ...] [LIMIT ...] [OFFSET ...]
+      *
+      * fieldName must be a DB column field on M (compile-time check).
+      * T is the D type of that field, inferred at compile time.
+      *
+      * Pass the result to F!(M, "f").inSubquery(sub) or F!"f".inSubquery(sub)
+      * to embed it as col IN (SELECT ...) in another QuerySet's WHERE clause.
+      *
+      * Example:
+      * ---
+      * auto activeCatIds = catRepo.query()
+      *     .where!"active"(true)
+      *     .asSubquery!"id"();
+      *
+      * auto products = prodRepo.query()
+      *     .where(F!(Product, "categoryId").inSubquery(activeCatIds))
+      *     .all();
+      * ---
+      **/
+    auto asSubquery(string fieldName)() {
+        enum _col = _fieldColName!(M, fieldName)();
+        static assert(_col.length > 0,
+            "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof);
+        alias _FieldType = typeof(__traits(getMember, M.init, fieldName));
+
+        _FilterJoin[] fjoins;
+        int fjIdx = 0;
+        Predicate[] resolved;
+        foreach (ref p; _wheres)
+            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
+
+        string whereSQL;
+        PGValue[] params;
+        _buildWhereFromArray(resolved, whereSQL, params);
+
+        string sql = "SELECT _m." ~ _col ~ " FROM " ~ ormTableName!M ~ " _m";
+        sql ~= _filterJoinSQL(fjoins);
+        sql ~= whereSQL;
+        if (_limitVal  >= 0) sql ~= " LIMIT "  ~ to!string(_limitVal);
+        if (_offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_offsetVal);
+
+        return SubQuery!_FieldType(sql, params);
     }
 
     /** Delete all matching rows and return the number of rows deleted.

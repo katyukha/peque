@@ -78,3 +78,4 @@ public import peque.orm.schema: modelDDL, schemaSQL;
 public import peque.orm.queryset: QuerySet;
 public import peque.orm.predicate: Predicate, SerializedPred, serializePredicate;
 public import peque.orm.field: FieldBuilder, PathBuilder, F, SF, exists;
+public import peque.orm.subquery: SubQuery;

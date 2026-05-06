@@ -64,6 +64,20 @@ struct LiteralNode { bool value; }
   **/
 struct ExistsNode { string tableName; Predicate* inner; }
 
+/** col IN (SELECT ...) — produced by F!(M,"f").inSubquery(qs.asSubquery!"f"()).
+  *
+  * subquerySql holds the full SELECT statement; subqueryParams are its bound
+  * values.  $N tokens in subquerySql are shifted by the outer offset at
+  * serialisation time so they don't collide with outer query parameters.
+  *
+  * NOT IN: ~Predicate(InSubqueryNode(...)) via the existing NotNode/~ operator.
+  **/
+struct InSubqueryNode {
+    string    colExpr;
+    string    subquerySql;
+    PGValue[] subqueryParams;
+}
+
 /** Unresolved field-path predicate — created by the type-free F!"path" template.
   *
   * path:      D camelCase field path, e.g. "status", "deliveryAddress.country"
@@ -98,6 +112,7 @@ struct NotNode { Predicate* inner; }
 struct Predicate {
     private alias PT = SumType!(EqNode, OpNode, InNode, NullNode, RawNode,
                                  LiteralNode, ExistsNode, PathNode,
+                                 InSubqueryNode,
                                  AndNode, OrNode, NotNode);
     package(peque) PT _inner;
 
@@ -186,6 +201,10 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
                 i.params,
             );
         },
+        (ref InSubqueryNode n) => SerializedPred(
+            n.colExpr ~ " IN (" ~ _shiftParams(n.subquerySql, offset) ~ ")",
+            n.subqueryParams,
+        ),
         (ref PathNode n) {
             assert(false,
                 "PathNode for path '" ~ n.path ~ "' was not resolved before SQL serialization. " ~
@@ -218,8 +237,9 @@ private bool _containsExistsNode(ref Predicate pred) {
         (ref NullNode    _) => false,
         (ref RawNode     _) => false,
         (ref LiteralNode _) => false,
-        (ref ExistsNode  _) => true,
-        (ref PathNode    _) => false,
+        (ref ExistsNode      _) => true,
+        (ref InSubqueryNode  _) => false,
+        (ref PathNode        _) => false,
         (ref AndNode n) => _containsExistsNode(*n.left) || _containsExistsNode(*n.right),
         (ref OrNode  n) => _containsExistsNode(*n.left) || _containsExistsNode(*n.right),
         (ref NotNode n) => _containsExistsNode(*n.inner),
