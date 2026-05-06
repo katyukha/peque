@@ -211,6 +211,55 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// deleteByRec(M record) — record-based single delete
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c    = makeConn();
+    setupItems(c);
+    auto repo = Repository!(Item, Connection)(&c);
+    auto all  = repo.findAll();
+    auto item = all[0];
+
+    repo.deleteByRec(item);
+
+    assert(repo.findAll().length == 2);
+    assert(repo.findById(item.id).isNull);
+}
+
+
+// ---------------------------------------------------------------------------
+// deleteByRec(M[] records) — batch delete via single IN-clause round-trip
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c    = makeConn();
+    setupItems(c);
+    auto repo = Repository!(Item, Connection)(&c);
+    auto all  = repo.findAll();
+
+    // Delete two of the three rows; verify count and remaining row
+    auto deleted = repo.deleteByRec(all[0 .. 2]);
+    assert(deleted == 2);
+
+    auto remaining = repo.findAll();
+    assert(remaining.length == 1);
+    assert(remaining[0].id == all[2].id);
+}
+
+unittest {
+    // Empty slice — must return 0 without touching the DB
+    auto c    = makeConn();
+    setupItems(c);
+    auto repo = Repository!(Item, Connection)(&c);
+
+    Item[] empty;
+    assert(repo.deleteByRec(empty) == 0);
+    assert(repo.findAll().length == 3);
+}
+
+
+// ---------------------------------------------------------------------------
 // Explicit @field column-name override in SELECT / INSERT / UPDATE
 // ---------------------------------------------------------------------------
 

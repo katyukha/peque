@@ -69,8 +69,11 @@ template isModel(M) {
   *  - findAll()            → M[]
   *  - findById(id)         → Nullable!M
   *  - insert(ref M)        → M          (uses RETURNING to get generated PK)
+  *  - insertMany(M[])      → M[]        (single round-trip, all PKs assigned)
   *  - update(ref M)        → void
   *  - deleteById(id)       → void
+  *  - deleteByRec(M)        → void       (record-based; extracts PK internally)
+  *  - deleteByRec(M[])      → long       (single IN-clause round-trip)
   **/
 mixin template CRUDMixin(M, Ctx)
 if (isModel!M && isQueryContext!Ctx) {
@@ -195,6 +198,39 @@ if (isModel!M && isQueryContext!Ctx) {
     /// Delete the row with the given primary-key value.
     void deleteById(PkType)(PkType id) {
         _ctx.execParams(_crudDelSQL, id);
+    }
+
+    /// Delete the row matching record's PK.
+    void deleteByRec(M record) {
+        enum _pkField = ormPkFieldName!M();
+        deleteById(__traits(getMember, record, _pkField));
+    }
+
+    /** Delete all records in the slice and return the number of rows deleted.
+      *
+      * Uses a single DELETE … WHERE pk IN ($1, $2, …) round-trip.
+      * Returns 0 immediately when records is empty.
+      **/
+    long deleteByRec(M[] records) {
+        import peque.converter: PGValue, convertToPG;
+
+        if (records.length == 0) return 0;
+
+        enum _pkField = ormPkFieldName!M();
+        PGValue[] pkParams;
+        pkParams.reserve(records.length);
+        foreach (ref r; records)
+            pkParams ~= convertToPG(__traits(getMember, r, _pkField));
+
+        string ph;
+        foreach (i; 0 .. records.length) {
+            if (i > 0) ph ~= ", ";
+            ph ~= "$" ~ (i + 1).to!string;
+        }
+
+        string sql = "DELETE FROM " ~ _crudTable ~
+                     " WHERE " ~ _crudPk ~ " IN (" ~ ph ~ ")";
+        return _ctx.execParams(sql, pkParams).cmdTuples();
     }
 
     /** Return a fresh QuerySet for model M scoped to this context.
