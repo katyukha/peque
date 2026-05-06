@@ -68,12 +68,13 @@ template isModel(M) {
   * Generated methods:
   *  - findAll()            → M[]
   *  - findById(id)         → Nullable!M
-  *  - insert(ref M)        → M          (uses RETURNING to get generated PK)
-  *  - insertMany(M[])      → M[]        (single round-trip, all PKs assigned)
+  *  - existsById(id)       → bool        (SELECT 1 … LIMIT 1; lighter than findById)
+  *  - insert(ref M)        → M           (uses RETURNING to get generated PK)
+  *  - insertMany(M[])      → M[]         (single round-trip, all PKs assigned)
   *  - update(ref M)        → void
   *  - deleteById(id)       → void
-  *  - deleteByRec(M)        → void       (record-based; extracts PK internally)
-  *  - deleteByRec(M[])      → long       (single IN-clause round-trip)
+  *  - deleteByRec(M)       → void        (record-based; extracts PK internally)
+  *  - deleteByRec(M[])     → long        (single IN-clause round-trip)
   **/
 mixin template CRUDMixin(M, Ctx)
 if (isModel!M && isQueryContext!Ctx) {
@@ -89,6 +90,8 @@ if (isModel!M && isQueryContext!Ctx) {
     private enum _crudSelAllSQL  = "SELECT " ~ _crudSel ~ " FROM " ~ _crudTable;
     private enum _crudSelByIdSQL = "SELECT " ~ _crudSel ~ " FROM " ~ _crudTable ~
                                    " WHERE " ~ _crudPk ~ " = $1";
+    private enum _crudExistsByIdSQL = "SELECT 1 FROM " ~ _crudTable ~
+                                      " WHERE " ~ _crudPk ~ " = $1 LIMIT 1";
     private enum _crudInsSQL     = "INSERT INTO " ~ _crudTable ~
                                    " (" ~ buildInsertColList!M() ~ ")" ~
                                    " VALUES (" ~ buildInsertPlaceholders!M() ~ ")" ~
@@ -142,6 +145,14 @@ if (isModel!M && isQueryContext!Ctx) {
         }();
 
         return _ctx.exec(_crudSelAllSQL ~ _order).as!(M[]);
+    }
+
+    /** Return true if a row with the given primary-key value exists.
+      *
+      * Executes SELECT 1 … LIMIT 1 — fetches no column data, lighter than findById.
+      **/
+    bool existsById(PkType)(PkType id) {
+        return _ctx.execParams(_crudExistsByIdSQL, id).ntuples > 0;
     }
 
     /** Return the row matching id, or Nullable.init if not found.

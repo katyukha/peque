@@ -147,6 +147,34 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// existsById — found and not found
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c    = makeConn();
+    setupItems(c);
+    auto repo = Repository!(Item, Connection)(&c);
+    auto all  = repo.findAll();
+
+    assert( repo.existsById(all[0].id));
+    assert( repo.existsById(all[1].id));
+    assert(!repo.existsById(-1));
+}
+
+unittest {
+    // After deletion the ID must no longer exist
+    auto c    = makeConn();
+    setupItems(c);
+    auto repo = Repository!(Item, Connection)(&c);
+    auto item = repo.findAll()[0];
+
+    assert(repo.existsById(item.id));
+    repo.deleteById(item.id);
+    assert(!repo.existsById(item.id));
+}
+
+
+// ---------------------------------------------------------------------------
 // insert — RETURNING populates the generated PK
 // ---------------------------------------------------------------------------
 
