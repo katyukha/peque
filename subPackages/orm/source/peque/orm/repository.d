@@ -163,6 +163,24 @@ if (isModel!M && isQueryContext!Ctx) {
         ).getRow(0).as!M;
     }
 
+    /** Insert multiple records in a single statement and return the inserted rows.
+      *
+      * Uses INSERT … VALUES (…), (…) … RETURNING to fetch all generated PKs and
+      * server-side defaults in one round-trip.  Returns [] immediately when
+      * records is empty.  Order of returned rows matches insertion order.
+      **/
+    M[] insertMany(M[] records) {
+        if (records.length == 0) return [];
+
+        enum _nf = countNonPkFields!M();
+        auto params = buildInsertParamsMany!M(records);
+        string sql = "INSERT INTO " ~ _crudTable ~
+                     " (" ~ buildInsertColList!M() ~ ") VALUES " ~
+                     buildMultiRowPlaceholders(_nf, records.length) ~
+                     " RETURNING " ~ _crudSel;
+        return _ctx.execParams(sql, params).as!(M[]);
+    }
+
     /** Update the row matching record's PK with record's current field values.
       *
       * All non-PK column fields are written.  If you want a partial update,

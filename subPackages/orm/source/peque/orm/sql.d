@@ -15,6 +15,7 @@ private import peque.model: model, field, primaryKey, hasMany2OneUDA;
 private import peque.hydration: camelToSnake;
 private import std.traits: FieldNameTuple, hasUDA, getUDAs;
 private import std.conv: to;
+private import peque.converter: PGValue, convertToPG;
 
 
 // ---------------------------------------------------------------------------
@@ -162,6 +163,43 @@ size_t countNonPkFields(M)() {
             n++;
     }}
     return n;
+}
+
+/** Build multi-row VALUES placeholders for insertMany.
+  *
+  * buildMultiRowPlaceholders(3, 2) → "($1,$2,$3), ($4,$5,$6)"
+  **/
+string buildMultiRowPlaceholders(size_t nFields, size_t nRows) pure {
+    string result;
+    foreach (row; 0 .. nRows) {
+        if (row > 0) result ~= ", ";
+        result ~= "(";
+        foreach (col; 0 .. nFields) {
+            if (col > 0) result ~= ", ";
+            result ~= "$" ~ (row * nFields + col + 1).to!string;
+        }
+        result ~= ")";
+    }
+    return result;
+}
+
+/** Build a flat PGValue[] from a slice of records.
+  *
+  * Iterates records in order, then non-PK column fields in declaration order,
+  * converting each field value via convertToPG.  The resulting array is the
+  * parameter list for a multi-row INSERT built by buildMultiRowPlaceholders.
+  **/
+PGValue[] buildInsertParamsMany(M)(in M[] records) {
+    PGValue[] params;
+    params.reserve(records.length * countNonPkFields!M());
+    foreach (ref rec; records) {
+        static foreach (memberName; FieldNameTuple!M) {{
+            alias F = __traits(getMember, M, memberName);
+            static if (!hasUDA!(F, primaryKey) && _isColField!F)
+                params ~= convertToPG(__traits(getMember, rec, memberName));
+        }}
+    }
+    return params;
 }
 
 
