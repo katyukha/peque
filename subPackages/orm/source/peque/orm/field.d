@@ -45,8 +45,6 @@ private import peque.converter: PGValue, convertToPG;
 private import peque.orm.predicate;
 private import peque.orm.sql: _fieldColName, ormTableName;
 private import peque.hydration: camelToSnake;
-private import peque.exception: PequeException;
-private import std.exception: enforce;
 
 
 /** Compile-time field reference builder.
@@ -93,9 +91,8 @@ struct FieldBuilder(string colExpr) {
       **/
     Predicate contains(V)(V[] vals) const {
         import peque.converter: convertToPG;
-        enforce!PequeException(vals.length > 0,
-            "contains() / whereIn!() called with an empty value list — " ~
-            "SQL IN () is invalid; pass at least one value or skip the filter entirely");
+        if (vals.length == 0)
+            return Predicate.none;
         PGValue[] pgVals;
         foreach (v; vals) pgVals ~= convertToPG(v);
         return Predicate(InNode(colExpr, pgVals));
@@ -291,9 +288,8 @@ struct PathBuilder(string path) {
 
     /// IN (set membership)
     Predicate contains(V)(V[] vals) const {
-        enforce!PequeException(vals.length > 0,
-            "contains() / whereIn!() called with an empty value list — " ~
-            "SQL IN () is invalid; pass at least one value or skip the filter entirely");
+        if (vals.length == 0)
+            return Predicate.none;
         PGValue[] pgVals;
         foreach (v; vals) pgVals ~= convertToPG(v);
         return Predicate(PathNode(path, "IN", pgVals, ""));

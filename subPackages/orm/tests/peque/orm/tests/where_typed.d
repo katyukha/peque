@@ -279,8 +279,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// whereIn! with empty slice — must throw PequeException, not AssertError.
-// SQL IN () is not valid syntax; callers must guard against empty lists.
+// whereIn! / contains() with empty slice — returns zero rows (SQL: FALSE)
 // ---------------------------------------------------------------------------
 
 unittest {
@@ -288,13 +287,7 @@ unittest {
     auto rows = seed(c);
     auto repo = Repository!(WtItem, Connection)(&c);
 
-    // whereIn! delegates to contains(), which enforces non-empty.
-    assertThrown!PequeException(
-        repo.query().whereIn!"name"(cast(string[])[]).all(),
-        "whereIn! with empty slice must throw PequeException");
-
-    // F!(M,"field").contains() directly — same contract.
-    assertThrown!PequeException(
-        repo.query().where(F!(WtItem, "score").contains(cast(int[])[])).all(),
-        "contains() with empty slice must throw PequeException");
+    // Empty slice → Predicate.none → WHERE FALSE → zero rows, no SQL error.
+    assert(repo.query().whereIn!"name"(cast(string[])[]).all().length == 0);
+    assert(repo.query().where(F!(WtItem, "score").contains(cast(int[])[])).all().length == 0);
 }

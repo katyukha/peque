@@ -53,6 +53,9 @@ struct NullNode { string colExpr; }
 /// Raw SQL fragment — $1/$2/... are offset-shifted at serialisation time
 struct RawNode  { string sql; PGValue[] params; }
 
+/// Constant TRUE (value=true) or FALSE (value=false) — no parameters.
+struct LiteralNode { bool value; }
+
 /** EXISTS (SELECT 1 FROM tableName _sq WHERE (...))
   *
   * tableName is the bare SQL table name (no alias).
@@ -94,13 +97,28 @@ struct NotNode { Predicate* inner; }
 
 struct Predicate {
     private alias PT = SumType!(EqNode, OpNode, InNode, NullNode, RawNode,
-                                 ExistsNode, PathNode, AndNode, OrNode, NotNode);
+                                 LiteralNode, ExistsNode, PathNode,
+                                 AndNode, OrNode, NotNode);
     package(peque) PT _inner;
 
     this(T)(T node) { _inner = PT(node); }
 
     // Copy constructor — needed when boxing into heap-allocated Predicate*.
     this(Predicate src) { _inner = src._inner; }
+
+    /** Always-false predicate — matches no rows. SQL: FALSE.
+      *
+      * Identity element for | (OR): none | p == p
+      * Absorbing element for & (AND): none & p == none
+      **/
+    static @property Predicate none() { return Predicate(LiteralNode(false)); }
+
+    /** Always-true predicate — matches every row. SQL: TRUE.
+      *
+      * Absorbing element for | (OR): all | p == all
+      * Identity element for & (AND): all & p == p
+      **/
+    static @property Predicate all() { return Predicate(LiteralNode(true)); }
 
     /// Compose with OR.
     Predicate opBinary(string op : "|")(Predicate rhs) {
@@ -154,8 +172,9 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
             }
             return SerializedPred(n.colExpr ~ " IN (" ~ ph ~ ")", n.values);
         },
-        (ref NullNode n)  => SerializedPred(n.colExpr ~ " IS NULL", []),
-        (ref RawNode n)   => SerializedPred(_shiftParams(n.sql, offset), n.params),
+        (ref NullNode n)    => SerializedPred(n.colExpr ~ " IS NULL", []),
+        (ref RawNode n)     => SerializedPred(_shiftParams(n.sql, offset), n.params),
+        (ref LiteralNode n) => SerializedPred(n.value ? "TRUE" : "FALSE", []),
         (ref ExistsNode n) {
             enforce!PequeException(!_containsExistsNode(*n.inner),
                 "Nested EXISTS subqueries are not supported: both levels would " ~
@@ -193,13 +212,14 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
 // Return true if the predicate tree contains at least one ExistsNode anywhere.
 private bool _containsExistsNode(ref Predicate pred) {
     return pred._inner.match!(
-        (ref EqNode   _) => false,
-        (ref OpNode   _) => false,
-        (ref InNode   _) => false,
-        (ref NullNode _) => false,
-        (ref RawNode  _) => false,
-        (ref ExistsNode _) => true,
-        (ref PathNode _) => false,
+        (ref EqNode      _) => false,
+        (ref OpNode      _) => false,
+        (ref InNode      _) => false,
+        (ref NullNode    _) => false,
+        (ref RawNode     _) => false,
+        (ref LiteralNode _) => false,
+        (ref ExistsNode  _) => true,
+        (ref PathNode    _) => false,
         (ref AndNode n) => _containsExistsNode(*n.left) || _containsExistsNode(*n.right),
         (ref OrNode  n) => _containsExistsNode(*n.left) || _containsExistsNode(*n.right),
         (ref NotNode n) => _containsExistsNode(*n.inner),

@@ -50,7 +50,7 @@ private import peque.orm.repository: isModel;
 private import peque.orm.sql;
 private import peque.orm.predicate;
 private import peque.orm.field: FieldBuilder, PathBuilder, F;
-private import peque.orm.predicate: PathNode;
+private import peque.orm.predicate: PathNode, LiteralNode;
 private import std.sumtype: match;
 
 
@@ -470,12 +470,13 @@ private Predicate _resolvePred(M, JoinFields...)(
     Predicate p, ref _FilterJoin[] fjoins, ref int idx)
 {
     return p._inner.match!(
-        (ref EqNode n)     => p,
-        (ref OpNode n)     => p,
-        (ref InNode n)     => p,
-        (ref NullNode n)   => p,
-        (ref RawNode n)    => p,
-        (ref ExistsNode n) => p,
+        (ref EqNode n)      => p,
+        (ref OpNode n)      => p,
+        (ref InNode n)      => p,
+        (ref NullNode n)    => p,
+        (ref RawNode n)     => p,
+        (ref LiteralNode n) => p,
+        (ref ExistsNode n)  => p,
         (ref PathNode n) {
             string colExpr = _resolvePathToCol!(M, JoinFields)(n.path, fjoins, idx);
             if (n.otherPath.length) {
@@ -656,6 +657,9 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** Type-safe IN filter — field name validated at compile time.
       *
+      * Passing an empty slice is equivalent to calling .none() — the query
+      * will match no rows (SQL: WHERE FALSE).
+      *
       * Example:
       * ---
       * repo.query().whereIn!"status"(["active", "pending"]).all()
@@ -663,6 +667,22 @@ if (isModel!M && isQueryContext!Ctx) {
       **/
     QuerySet!(M, Ctx, JoinFields) whereIn(string fieldName, V)(V[] vals) {
         return where(F!(M, fieldName).contains(vals));
+    }
+
+    /** Return a QuerySet that matches no rows — SQL: WHERE FALSE.
+      *
+      * Useful as a safe default when an access-control rule produces an
+      * empty allowed-ID set: start from .none() and OR in permitted predicates
+      * rather than testing for an empty collection at every call site.
+      *
+      * Example:
+      * ---
+      * auto qs = allowedIds.empty ? repo.query().none()
+      *                            : repo.query().whereIn!"id"(allowedIds);
+      * ---
+      **/
+    QuerySet!(M, Ctx, JoinFields) none() {
+        return where(Predicate.none);
     }
 
     /** Composable predicate filter — supports OR, AND, NOT via F expressions.

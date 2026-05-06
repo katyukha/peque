@@ -238,21 +238,55 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// whereIn with an empty slice — must throw PequeException before hitting the DB
+// whereIn with an empty slice — must return zero rows (SQL: WHERE FALSE)
 // ---------------------------------------------------------------------------
 
 unittest {
-    import std.exception: assertThrown;
-    import peque.exception: PequeException;
-
     auto c    = makeConn();
     auto rows = seed(c);
     auto repo = Repository!(Item, Connection)(&c);
 
-    // An empty value list would produce "IN ()" which is a SQL syntax error.
-    // FieldBuilder.contains() catches this early and throws PequeException.
+    // An empty value list is equivalent to Predicate.none — the query must
+    // return zero rows without hitting the DB with invalid "IN ()" SQL.
     string[] empty;
-    repo.query().whereIn!"name"(empty).all().assertThrown!PequeException;
+    assert(repo.query().whereIn!"name"(empty).all().length == 0);
+}
+
+
+// ---------------------------------------------------------------------------
+// Predicate.none / Predicate.all / qs.none()
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(Item, Connection)(&c);
+
+    // .none predicate — always false → zero rows
+    assert(repo.query().where(Predicate.none).all().length == 0);
+    assert(repo.query().where(Predicate.none).count() == 0);
+    assert(repo.query().where(Predicate.none).exists() == false);
+
+    // .all predicate — always true → all rows
+    assert(repo.query().where(Predicate.all).all().length == 4);
+    assert(repo.query().where(Predicate.all).count() == 4);
+
+    // qs.none() convenience sugar
+    assert(repo.query().none().all().length == 0);
+    assert(repo.query().none().count() == 0);
+
+    // Combining with real filters: none | pred == pred (identity for OR)
+    auto active = repo.query()
+        .where(Predicate.none | F!(Item, "active")(true))
+        .all();
+    assert(active.length == 2);
+    foreach (r; active) assert(r.active == true);
+
+    // Combining with real filters: all & pred == pred (identity for AND)
+    auto highScore = repo.query()
+        .where(Predicate.all & F!(Item, "score").gte(30))
+        .all();
+    assert(highScore.length == 2);
 }
 
 
