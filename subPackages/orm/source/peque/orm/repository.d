@@ -108,9 +108,9 @@ if (isModel!M && isQueryContext!Ctx) {
     private enum _crudUpsertByPkSQL =
         "INSERT INTO " ~ _crudTable ~
         " (" ~ _crudPk ~ ", " ~ buildInsertColList!M() ~ ")" ~
-        " VALUES (" ~ buildInsertPlaceholdersWithPk!M() ~ ")" ~
+        " VALUES (" ~ _buildInsertPlaceholdersWithPk!M() ~ ")" ~
         " ON CONFLICT (" ~ _crudPk ~ ") DO UPDATE SET " ~
-        buildExcludedSetClause!M() ~
+        _buildExcludedSetClause!M() ~
         " RETURNING " ~ _crudSel;
 
     /** Return all rows as M[], with optional ORDER BY.
@@ -219,7 +219,7 @@ if (isModel!M && isQueryContext!Ctx) {
       * For natural-key upserts (conflict on email, code, …) use upsert!"field".
       **/
     M upsert(ref M record) {
-        static assert(buildExcludedSetClause!M().length > 0,
+        static assert(_buildExcludedSetClause!M().length > 0,
             M.stringof ~ " has no non-PK fields; upsert() has nothing to update. " ~
             "Use insert() instead.");
         enum _pkField = ormPkFieldName!M();
@@ -227,7 +227,7 @@ if (isModel!M && isQueryContext!Ctx) {
         if (pkVal == typeof(pkVal).init)
             return insert(record);
         return mixin(
-            `_ctx.execParams(_crudUpsertByPkSQL, ` ~ buildInsertValueExprWithPk!M() ~ `)`
+            `_ctx.execParams(_crudUpsertByPkSQL, ` ~ _buildInsertValueExprWithPk!M() ~ `)`
         ).getRow(0).as!M;
     }
 
@@ -253,7 +253,7 @@ if (isModel!M && isQueryContext!Ctx) {
             static assert(_fieldColName!(M, cf)().length > 0,
                 "'" ~ cf ~ "' is not a DB column field on " ~ M.stringof);
         }
-        enum _setCl = buildExcludedSetClause!(M, conflictFields)();
+        enum _setCl = _buildExcludedSetClause!(M, conflictFields)();
         static assert(_setCl.length > 0,
             "upsert!" ~ conflictFields.stringof ~ " on " ~ M.stringof ~
             " leaves no fields to update (all non-PK fields are conflict keys). " ~
@@ -287,12 +287,12 @@ if (isModel!M && isQueryContext!Ctx) {
             // PK set — include in INSERT; never overwrite existing PK on conflict
             enum _sqlPk = "INSERT INTO " ~ _crudTable ~
                           " (" ~ _crudPk ~ ", " ~ buildInsertColList!M() ~ ")" ~
-                          " VALUES (" ~ buildInsertPlaceholdersWithPk!M() ~ ")" ~
+                          " VALUES (" ~ _buildInsertPlaceholdersWithPk!M() ~ ")" ~
                           " ON CONFLICT (" ~ _conflictCols ~ ") DO UPDATE SET " ~
                           _setCl ~
                           " RETURNING " ~ _crudSel;
             return mixin(
-                `_ctx.execParams(_sqlPk, ` ~ buildInsertValueExprWithPk!M() ~ `)`
+                `_ctx.execParams(_sqlPk, ` ~ _buildInsertValueExprWithPk!M() ~ `)`
             ).getRow(0).as!M;
         }
     }
