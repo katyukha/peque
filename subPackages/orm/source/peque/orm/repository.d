@@ -71,6 +71,8 @@ template isModel(M) {
   *  - existsById(id)       → bool        (SELECT 1 … LIMIT 1; lighter than findById)
   *  - insert(ref M)        → M           (uses RETURNING to get generated PK)
   *  - insertMany(M[])      → M[]         (single round-trip, all PKs assigned)
+  *  - upsert(ref M)        → M           (INSERT or ON CONFLICT (pk) DO UPDATE)
+  *  - upsert!("f")(ref M)  → M           (INSERT or ON CONFLICT (f) DO UPDATE)
   *  - update(ref M)        → void
   *  - deleteById(id)       → void
   *  - deleteByRec(M)       → void        (record-based; extracts PK internally)
@@ -102,6 +104,14 @@ if (isModel!M && isQueryContext!Ctx) {
                                    " = $" ~ to!string(countNonPkFields!M() + 1);
     private enum _crudDelSQL     = "DELETE FROM " ~ _crudTable ~
                                    " WHERE " ~ _crudPk ~ " = $1";
+    // upsert-by-PK SQL: used when caller provides an explicit PK value.
+    private enum _crudUpsertByPkSQL =
+        "INSERT INTO " ~ _crudTable ~
+        " (" ~ _crudPk ~ ", " ~ buildInsertColList!M() ~ ")" ~
+        " VALUES (" ~ buildInsertPlaceholdersWithPk!M() ~ ")" ~
+        " ON CONFLICT (" ~ _crudPk ~ ") DO UPDATE SET " ~
+        buildExcludedSetClause!M() ~
+        " RETURNING " ~ _crudSel;
 
     /** Return all rows as M[], with optional ORDER BY.
       *
@@ -193,6 +203,98 @@ if (isModel!M && isQueryContext!Ctx) {
                      buildMultiRowPlaceholders(_nf, records.length) ~
                      " RETURNING " ~ _crudSel;
         return _ctx.execParams(sql, params).as!(M[]);
+    }
+
+    /** Insert or update by primary key.
+      *
+      * Behaviour depends on the PK field value at runtime:
+      *  - PK == typeof(PK).init (e.g. int 0) → plain INSERT; DB assigns the PK.
+      *  - PK is set              → INSERT … ON CONFLICT (pk) DO UPDATE SET
+      *                             non_pk_cols=EXCLUDED.non_pk_cols RETURNING *.
+      *
+      * The returned M always reflects the final DB state (RETURNING *).
+      *
+      * Use this for idempotent re-saves of records with caller-provided PKs
+      * (UUIDs, natural integer keys) or to re-apply a previously inserted record.
+      * For natural-key upserts (conflict on email, code, …) use upsert!"field".
+      **/
+    M upsert(ref M record) {
+        static assert(buildExcludedSetClause!M().length > 0,
+            M.stringof ~ " has no non-PK fields; upsert() has nothing to update. " ~
+            "Use insert() instead.");
+        enum _pkField = ormPkFieldName!M();
+        auto pkVal = __traits(getMember, record, _pkField);
+        if (pkVal == typeof(pkVal).init)
+            return insert(record);
+        return mixin(
+            `_ctx.execParams(_crudUpsertByPkSQL, ` ~ buildInsertValueExprWithPk!M() ~ `)`
+        ).getRow(0).as!M;
+    }
+
+    /** Insert or update by a natural conflict key (or composite key).
+      *
+      * conflictFields: one or more D field names on M that carry a UNIQUE
+      * constraint in the DB (e.g. upsert!"email" or upsert!("tenantId","code")).
+      *
+      * PK behaviour:
+      *  - PK == init → INSERT without PK (DB auto-assigns).
+      *  - PK is set  → INSERT with PK; on conflict the PK is not overwritten.
+      *
+      * DO UPDATE SET covers all non-PK, non-conflict-key columns.
+      * The returned M reflects the final DB state (RETURNING *).
+      **/
+    M upsert(conflictFields...)(ref M record)
+    if (conflictFields.length > 0) {
+        // Compile-time validation
+        static foreach (cf; conflictFields) {
+            static assert(is(typeof(cf) == string),
+                "upsert conflict fields must be string literals, got: " ~
+                typeof(cf).stringof);
+            static assert(_fieldColName!(M, cf)().length > 0,
+                "'" ~ cf ~ "' is not a DB column field on " ~ M.stringof);
+        }
+        enum _setCl = buildExcludedSetClause!(M, conflictFields)();
+        static assert(_setCl.length > 0,
+            "upsert!" ~ conflictFields.stringof ~ " on " ~ M.stringof ~
+            " leaves no fields to update (all non-PK fields are conflict keys). " ~
+            "Use insert() instead.");
+
+        // Conflict column list  e.g. "email" or "tenant_id, code"
+        enum _conflictCols = () {
+            string r;
+            static foreach (cf; conflictFields) {
+                if (r.length) r ~= ", ";
+                r ~= _fieldColName!(M, cf)();
+            }
+            return r;
+        }();
+
+        enum _pkField = ormPkFieldName!M();
+        auto pkVal = __traits(getMember, record, _pkField);
+
+        if (pkVal == typeof(pkVal).init) {
+            // PK not set — exclude from INSERT, let DB assign
+            enum _sql = "INSERT INTO " ~ _crudTable ~
+                        " (" ~ buildInsertColList!M() ~ ")" ~
+                        " VALUES (" ~ buildInsertPlaceholders!M() ~ ")" ~
+                        " ON CONFLICT (" ~ _conflictCols ~ ") DO UPDATE SET " ~
+                        _setCl ~
+                        " RETURNING " ~ _crudSel;
+            return mixin(
+                `_ctx.execParams(_sql, ` ~ buildInsertValueExpr!M() ~ `)`
+            ).getRow(0).as!M;
+        } else {
+            // PK set — include in INSERT; never overwrite existing PK on conflict
+            enum _sqlPk = "INSERT INTO " ~ _crudTable ~
+                          " (" ~ _crudPk ~ ", " ~ buildInsertColList!M() ~ ")" ~
+                          " VALUES (" ~ buildInsertPlaceholdersWithPk!M() ~ ")" ~
+                          " ON CONFLICT (" ~ _conflictCols ~ ") DO UPDATE SET " ~
+                          _setCl ~
+                          " RETURNING " ~ _crudSel;
+            return mixin(
+                `_ctx.execParams(_sqlPk, ` ~ buildInsertValueExprWithPk!M() ~ `)`
+            ).getRow(0).as!M;
+        }
     }
 
     /** Update the row matching record's PK with record's current field values.

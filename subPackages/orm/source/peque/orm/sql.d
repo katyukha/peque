@@ -183,6 +183,89 @@ string buildMultiRowPlaceholders(size_t nFields, size_t nRows) pure {
     return result;
 }
 
+/** INSERT column list including the PK (PK first): "id, name, email_address".
+  *
+  * Used by upsert() when the caller provides an explicit PK value.
+  **/
+package(peque.orm) string buildInsertColListWithPk(M)() {
+    string result;
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (hasUDA!(F, primaryKey))
+            result = _colName!(F, memberName);
+    }}
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (!hasUDA!(F, primaryKey) && _isColField!F)
+            result ~= ", " ~ _colName!(F, memberName);
+    }}
+    return result;
+}
+
+/** INSERT placeholders including PK ($1 for PK): "$1, $2, $3".
+  *
+  * Used alongside buildInsertColListWithPk for upsert-by-PK.
+  **/
+package(peque.orm) string buildInsertPlaceholdersWithPk(M)() {
+    string result = "$1";
+    int n = 1;
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (!hasUDA!(F, primaryKey) && _isColField!F) {
+            n++;
+            result ~= ", $" ~ n.to!string;
+        }
+    }}
+    return result;
+}
+
+/** D mixin expression for INSERT values including PK (PK first).
+  *
+  * Example output: "record.id, record.name, record.emailAddress"
+  **/
+package(peque.orm) string buildInsertValueExprWithPk(M)() {
+    string result;
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (hasUDA!(F, primaryKey))
+            result = "record." ~ memberName;
+    }}
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (!hasUDA!(F, primaryKey) && _isColField!F)
+            result ~= ", record." ~ memberName;
+    }}
+    return result;
+}
+
+/** ON CONFLICT … DO UPDATE SET clause using the EXCLUDED pseudo-table.
+  *
+  * Generates "col=EXCLUDED.col, …" for all non-PK column fields whose D name
+  * is not in skipFields.  skipFields are D member names of the conflict-target
+  * fields (not SQL column names).
+  *
+  * Returns "" when every non-PK field is skipped — callers should static assert
+  * against this (empty SET is invalid SQL; use insert() for that case instead).
+  **/
+package(peque.orm) string buildExcludedSetClause(M, skipFields...)() {
+    string result;
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (!hasUDA!(F, primaryKey) && _isColField!F) {
+            bool skip = false;
+            static foreach (sf; skipFields)
+                static if (is(typeof(sf) == string))
+                    if (memberName == sf) skip = true;
+            if (!skip) {
+                if (result.length) result ~= ", ";
+                result ~= _colName!(F, memberName) ~ "=EXCLUDED." ~ _colName!(F, memberName);
+            }
+        }
+    }}
+    return result;
+}
+
+
 /** Build a flat PGValue[] from a slice of records.
   *
   * Iterates records in order, then non-PK column fields in declaration order,
