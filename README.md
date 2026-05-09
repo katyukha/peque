@@ -214,6 +214,41 @@ struct Partner {
 }
 ```
 
+### Column constraints and indexes
+
+```d
+@model("products")
+@uniqueTogether!("name", "tenant_id")
+@checkConstraint("chk_price", "price > 0")
+@indexTogether!("category_id", "active")
+@uniqueIndexTogether!("tenant_id", "slug")
+struct Product {
+    @primaryKey                                int    id;
+    @field @unique @index                      string sku;
+    @field @check("price > 0")                 double price;
+    @field @pgDefault("true")                  bool   active;
+    @field @pgDefault("0") @pgNotNull          Nullable!int stock;
+    @field @pgType("NUMERIC(10,2)")            double cost;
+    @field @uniqueIndex                        string slug;
+    @field @uniqueIndex(where: "active = true") string externalId;
+    @field @ginIndex                           JSONValue metadata;
+    @field @hashIndex                          string sessionToken;
+    @field @gistIndex                          string location;
+}
+```
+
+Index name convention (all checked against PostgreSQL's 63-byte limit at compile time):
+
+| UDA | Prefix | Method |
+|---|---|---|
+| `@index` | `idx_` | btree (default, no `USING`) |
+| `@uniqueIndex` | `uniq_` | btree |
+| `@ginIndex` | `gin_` | `USING gin` |
+| `@gistIndex` | `gist_` | `USING gist` |
+| `@hashIndex` | `hash_` | `USING hash` |
+| `@indexTogether` | `idx_` | btree |
+| `@uniqueIndexTogether` | `uniq_` | btree |
+
 ### Registry and schema
 
 A `Registry` maps models to repository templates. `schemaSQL` generates

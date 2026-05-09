@@ -53,13 +53,28 @@
   *
   * Index generation (appended after CREATE TABLE):
   * ---
-  * @index       string email;   // CREATE INDEX ON table (email);
-  * @uniqueIndex string slug;    // CREATE UNIQUE INDEX ON table (slug);
+  * @index                         string email;  // CREATE INDEX ON table (email)
+  * @index(where: "active = true") string email;  // partial index
+  * @uniqueIndex                   string slug;   // CREATE UNIQUE INDEX ON table (slug)
+  * @ginIndex                      string tags;   // CREATE INDEX … USING gin (tags)
+  * @gistIndex                     string loc;    // CREATE INDEX … USING gist (loc)
+  * @hashIndex                     string code;   // CREATE INDEX … USING hash (code)
   *
   * @indexTogether!("partner_id", "status")
   * @model("sale_order")
-  * struct Order { ... }         // CREATE INDEX ON sale_order (partner_id, status);
+  * struct Order { ... }         // CREATE INDEX ON sale_order (partner_id, status)
+  *
+  * @uniqueIndexTogether!("tenant_id", "email")
+  * @model("users")
+  * struct User { ... }          // CREATE UNIQUE INDEX ON users (tenant_id, email)
   * ---
+  *
+  * Index name convention (all checked against PostgreSQL's 63-byte limit at compile time):
+  *   @index / @indexTogether        → idx_{table}_{col[s]}
+  *   @uniqueIndex / @uniqueIndexTogether → uniq_{table}_{col[s]}
+  *   @ginIndex                      → gin_{table}_{col}
+  *   @gistIndex                     → gist_{table}_{col}
+  *   @hashIndex                     → hash_{table}_{col}
   *
   * Statement order in schemaSQL equals the registry binding order — ensure
   * FK-referenced tables appear before the tables that reference them.
@@ -75,7 +90,9 @@ private import peque.model:
     model, field, primaryKey, pgType,
     OnDelete, many2one, hasMany2OneUDA,
     unique, check, pgDefault, pgNotNull,
-    uniqueTogether, checkConstraint, index, uniqueIndex, indexTogether;
+    uniqueTogether, checkConstraint,
+    index, uniqueIndex, ginIndex, gistIndex, hashIndex,
+    indexTogether, uniqueIndexTogether;
 private import peque.orm.sql: ormTableName, ormPkColName, _isColField, _colName;
 private import peque.orm.registry: Bind;
 
@@ -240,56 +257,105 @@ private string _joinUnderscore(string[] cols) pure {
 
 private enum size_t PG_MAX_IDENT = 63;
 
-// Build the CREATE INDEX IF NOT EXISTS statements for model M.
-// Generated index names are deterministic:
-//   @index / @uniqueIndex on a field : idx_{table}_{col} / uniq_{table}_{col}
-//   @indexTogether on the model      : idx_{table}_{col1}_{col2}_...
-// A compile-time error is raised if any generated name exceeds 63 bytes.
+// Build one CREATE [UNIQUE] INDEX IF NOT EXISTS statement.
+// Called during CTFE — assert fires as a compile-time error when the name is too long.
+// using_: access method; "btree" or "" → USING clause is omitted (btree is PG default).
+private string _buildOneIndex(
+    bool isUnique, string using_,
+    string tbl, string cols, string where_, string idxName) pure
+{
+    assert(idxName.length <= PG_MAX_IDENT,
+        "Generated index name \"" ~ idxName ~ "\" exceeds PostgreSQL's " ~
+        "63-byte identifier limit. Shorten the table or column name.");
+    string s = "CREATE " ~ (isUnique ? "UNIQUE " : "") ~
+               "INDEX IF NOT EXISTS " ~ idxName ~ " ON " ~ tbl;
+    if (using_.length && using_ != "btree") s ~= " USING " ~ using_;
+    s ~= " (" ~ cols ~ ")";
+    if (where_.length) s ~= " WHERE " ~ where_;
+    return s ~ ";\n";
+}
+
+// Build all CREATE INDEX statements for model M.
+// Handles field-level: @index, @uniqueIndex, @ginIndex, @gistIndex, @hashIndex
+//          model-level: @indexTogether, @uniqueIndexTogether
+// All support an optional WHERE clause for partial indexes.
+// Index names are deterministic; exceeding 63 bytes is a compile-time error.
 private string _buildIndexSQL(M)() {
     string result;
     enum table = ormTableName!M;
 
-    // Field-level @index / @uniqueIndex
+    // Field-level: iterate each column field and inspect its UDAs.
+    // Each UDA type has two branches:
+    //   instance  (@index(where: "cond")) — typeof(uda) == T, read uda.where
+    //   type-value (@index, no parens)    — is(uda == T),     where defaults to ""
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
         static if (_isColField!F) {
             enum col = _colName!(F, memberName);
-            static if (hasUDA!(F, index)) {
-                enum _n = "idx_" ~ table ~ "_" ~ col;
-                static assert(_n.length <= PG_MAX_IDENT,
-                    "Generated index name \"" ~ _n ~ "\" is " ~ _n.length.stringof ~
-                    " bytes, exceeding PostgreSQL's 63-byte limit. " ~
-                    "Shorten the table or column name.");
-                result ~= "CREATE INDEX IF NOT EXISTS " ~ _n ~
-                          " ON " ~ table ~ " (" ~ col ~ ");\n";
-            }
-            static if (hasUDA!(F, uniqueIndex)) {
-                enum _n = "uniq_" ~ table ~ "_" ~ col;
-                static assert(_n.length <= PG_MAX_IDENT,
-                    "Generated index name \"" ~ _n ~ "\" is " ~ _n.length.stringof ~
-                    " bytes, exceeding PostgreSQL's 63-byte limit. " ~
-                    "Shorten the table or column name.");
-                result ~= "CREATE UNIQUE INDEX IF NOT EXISTS " ~ _n ~
-                          " ON " ~ table ~ " (" ~ col ~ ");\n";
-            }
+            static foreach (uda; __traits(getAttributes, F)) {{
+                static if (is(typeof(uda) == index))
+                    result ~= _buildOneIndex(false, "btree", table, col, uda.where,
+                                             "idx_"  ~ table ~ "_" ~ col);
+                else static if (is(uda == index))
+                    result ~= _buildOneIndex(false, "btree", table, col, "",
+                                             "idx_"  ~ table ~ "_" ~ col);
+
+                static if (is(typeof(uda) == uniqueIndex))
+                    result ~= _buildOneIndex(true,  "btree", table, col, uda.where,
+                                             "uniq_" ~ table ~ "_" ~ col);
+                else static if (is(uda == uniqueIndex))
+                    result ~= _buildOneIndex(true,  "btree", table, col, "",
+                                             "uniq_" ~ table ~ "_" ~ col);
+
+                static if (is(typeof(uda) == ginIndex))
+                    result ~= _buildOneIndex(false, "gin",   table, col, uda.where,
+                                             "gin_"  ~ table ~ "_" ~ col);
+                else static if (is(uda == ginIndex))
+                    result ~= _buildOneIndex(false, "gin",   table, col, "",
+                                             "gin_"  ~ table ~ "_" ~ col);
+
+                static if (is(typeof(uda) == gistIndex))
+                    result ~= _buildOneIndex(false, "gist",  table, col, uda.where,
+                                             "gist_" ~ table ~ "_" ~ col);
+                else static if (is(uda == gistIndex))
+                    result ~= _buildOneIndex(false, "gist",  table, col, "",
+                                             "gist_" ~ table ~ "_" ~ col);
+
+                static if (is(typeof(uda) == hashIndex))
+                    result ~= _buildOneIndex(false, "hash",  table, col, uda.where,
+                                             "hash_" ~ table ~ "_" ~ col);
+                else static if (is(uda == hashIndex))
+                    result ~= _buildOneIndex(false, "hash",  table, col, "",
+                                             "hash_" ~ table ~ "_" ~ col);
+            }}
         }
     }}
 
-    // Model-level @indexTogether!("col1", "col2", ...)
+    // Model-level: @indexTogether and @uniqueIndexTogether.
+    // Two branches per template: type-as-value (where="") and instance (where=uda.where).
     static foreach (uda; __traits(getAttributes, M)) {{
         static if (is(uda) && __traits(isSame, TemplateOf!uda, indexTogether)) {
-            string cols;
-            static foreach (col; uda.columns) {
-                if (cols.length) cols ~= ", ";
-                cols ~= col;
-            }
+            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= c; }
             enum _n = "idx_" ~ table ~ "_" ~ _joinUnderscore(uda.columns);
-            static assert(_n.length <= PG_MAX_IDENT,
-                "Generated index name \"" ~ _n ~ "\" is " ~ _n.length.stringof ~
-                " bytes, exceeding PostgreSQL's 63-byte limit. " ~
-                "Shorten the table or column names.");
-            result ~= "CREATE INDEX IF NOT EXISTS " ~ _n ~
-                      " ON " ~ table ~ " (" ~ cols ~ ");\n";
+            result ~= _buildOneIndex(false, "btree", table, _cols, "", _n);
+        }
+        static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
+                   __traits(isSame, TemplateOf!(typeof(uda)), indexTogether)) {
+            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= c; }
+            enum _n = "idx_" ~ table ~ "_" ~ _joinUnderscore(uda.columns);
+            result ~= _buildOneIndex(false, "btree", table, _cols, uda.where, _n);
+        }
+
+        static if (is(uda) && __traits(isSame, TemplateOf!uda, uniqueIndexTogether)) {
+            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= c; }
+            enum _n = "uniq_" ~ table ~ "_" ~ _joinUnderscore(uda.columns);
+            result ~= _buildOneIndex(true, "btree", table, _cols, "", _n);
+        }
+        static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
+                   __traits(isSame, TemplateOf!(typeof(uda)), uniqueIndexTogether)) {
+            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= c; }
+            enum _n = "uniq_" ~ table ~ "_" ~ _joinUnderscore(uda.columns);
+            result ~= _buildOneIndex(true, "btree", table, _cols, uda.where, _n);
         }
     }}
 

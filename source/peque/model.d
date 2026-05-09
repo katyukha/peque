@@ -348,40 +348,97 @@ struct checkConstraint {
     this(string n, string e) @safe pure nothrow { name = n; expr = e; }
 }
 
-/** Create a single-column index on this field in the generated DDL.
+/** Create a single-column btree index on this field in the generated DDL.
   *
-  * Emits: CREATE INDEX ON table (col);
+  * An optional WHERE clause turns it into a partial index.
+  *
+  * Examples:
+  * ---
+  * @index                          string email;   // CREATE INDEX ON table (email)
+  * @index(where: "active = true")  string email;   // CREATE INDEX … WHERE active = true
+  * ---
+  **/
+struct index { string where = ""; }
+
+/** Create a single-column unique btree index on this field in the generated DDL.
+  *
+  * Examples:
+  * ---
+  * @uniqueIndex                           string slug;
+  * @uniqueIndex(where: "deleted_at IS NULL") string slug;
+  * ---
+  **/
+struct uniqueIndex { string where = ""; }
+
+/** Create a single-column GIN index on this field in the generated DDL.
+  *
+  * GIN indexes are suited for array columns, tsvector full-text search, and JSONB.
+  * Emits: CREATE INDEX … USING gin (col) [WHERE cond]
   *
   * Example:
   * ---
-  * @index  string email;
+  * @ginIndex  string[] tags;
   * ---
   **/
-struct index {}
+struct ginIndex { string where = ""; }
 
-/** Create a single-column unique index on this field in the generated DDL.
+/** Create a single-column GiST index on this field in the generated DDL.
   *
-  * Emits: CREATE UNIQUE INDEX ON table (col);
-  *
-  * Example:
-  * ---
-  * @uniqueIndex  string slug;
-  * ---
+  * GiST indexes suit geometric types, range types, and full-text search.
+  * Emits: CREATE INDEX … USING gist (col) [WHERE cond]
   **/
-struct uniqueIndex {}
+struct gistIndex { string where = ""; }
 
-/** Create a multi-column index. Applied on the model struct.
+/** Create a single-column Hash index on this field in the generated DDL.
+  *
+  * Hash indexes only support equality lookups — no range scans.
+  * Emits: CREATE INDEX … USING hash (col) [WHERE cond]
+  **/
+struct hashIndex { string where = ""; }
+
+/** Create a multi-column btree index. Applied on the model struct.
   *
   * cols are SQL column names (snake_case).
-  * Emits: CREATE INDEX ON table (col1, col2, ...);
+  * An optional WHERE clause turns it into a partial index.
   *
-  * Example:
+  * Examples:
   * ---
   * @indexTogether!("partner_id", "status")
+  * @model("sale_order")
+  * struct Order { ... }
+  *
+  * // Partial multi-column index:
+  * @(indexTogether!("partner_id", "status")(where: "status != 'closed'"))
   * @model("sale_order")
   * struct Order { ... }
   * ---
   **/
 struct indexTogether(cols...) if (cols.length >= 2) {
     enum string[] columns = [cols];
+    string where = "";
+}
+
+/** Create a multi-column unique index. Applied on the model struct.
+  *
+  * Unlike @uniqueTogether (which is a table-level UNIQUE constraint inside
+  * CREATE TABLE), this emits a standalone CREATE UNIQUE INDEX statement,
+  * allowing an optional WHERE partial-index clause.
+  *
+  * cols are SQL column names (snake_case).
+  *
+  * Examples:
+  * ---
+  * @uniqueIndexTogether!("tenant_id", "email")
+  * @model("users")
+  * struct User { ... }
+  *
+  * // Partial unique index:
+  * @(uniqueIndexTogether!("tenant_id", "email")(where: "deleted_at IS NULL"))
+  * @model("users")
+  * struct User { ... }
+  * ---
+  **/
+struct uniqueIndexTogether(cols...) if (cols.length >= 2) {
+    enum string[] columns = [cols];
+    string where = "";
 }

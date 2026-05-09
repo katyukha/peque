@@ -14,14 +14,17 @@
   *  - @pgNotNull → NOT NULL on Nullable field
   *  - @uniqueTogether → table-level UNIQUE (col1, col2)
   *  - @checkConstraint → table-level CONSTRAINT name CHECK (expr)
-  *  - @index → CREATE INDEX ON table (col)
-  *  - @uniqueIndex → CREATE UNIQUE INDEX ON table (col)
-  *  - @indexTogether → CREATE INDEX ON table (col1, col2)
+  *  - @index / @index(where:) → CREATE INDEX, partial index
+  *  - @uniqueIndex / @uniqueIndex(where:) → CREATE UNIQUE INDEX, partial
+  *  - @ginIndex / @gistIndex / @hashIndex → USING gin/gist/hash
+  *  - @indexTogether / @uniqueIndexTogether → multi-column indexes
   *  - schemaSQL!Reg — all models concatenated
   *  - End-to-end: execute generated SQL, insert via ORM, verify round-trip
   **/
 module peque.orm.tests.schema;
 
+private import std.datetime: DateTime;
+private import std.json: JSONValue;
 private import std.process: environment;
 private import std.string: indexOf;
 private import std.typecons: Nullable;
@@ -30,7 +33,9 @@ private import peque.connection: Connection;
 private import peque.model:
     model, field, primaryKey, many2one, pgType, OnDelete,
     unique, check, pgDefault, pgNotNull,
-    uniqueTogether, checkConstraint, index, uniqueIndex, indexTogether;
+    uniqueTogether, checkConstraint,
+    index, uniqueIndex, ginIndex, gistIndex, hashIndex,
+    indexTogether, uniqueIndexTogether;
 private import peque.orm;
 
 
@@ -221,6 +226,89 @@ unittest {
 
     // @indexTogether!("category_id", "active") on model
     assert(ddl.contains("CREATE INDEX IF NOT EXISTS idx_schema_products_category_id_active ON schema_products (category_id, active);"));
+}
+
+
+// ---------------------------------------------------------------------------
+// Test models — index enhancements
+// ---------------------------------------------------------------------------
+
+@model("schema_posts")
+@uniqueIndexTogether!("author_id", "slug")
+@(indexTogether!("author_id", "published_at")(where: "published = true"))
+struct Post {
+    @primaryKey                                      int             id;
+    @field @index                                    int             authorId;
+    @field @index(where: "published = true")         string          slug;
+    @field @uniqueIndex                              string          externalId;
+    @field @uniqueIndex(where: "deleted_at IS NULL") string          code;
+    @field @ginIndex                                 JSONValue       metadata;
+    @field @hashIndex                                string          sessionToken;
+    @field                                           bool             published;
+    @field                                           Nullable!DateTime publishedAt;
+    @field                                           Nullable!string  deletedAt;
+}
+
+
+// ---------------------------------------------------------------------------
+// Index enhancements: DDL checks
+// ---------------------------------------------------------------------------
+
+unittest {
+    enum ddl = modelDDL!Post();
+
+    // @index (plain) — btree, no USING clause
+    assert(ddl.contains(
+        "CREATE INDEX IF NOT EXISTS idx_schema_posts_author_id ON schema_posts (author_id);"));
+
+    // @index(where:) — partial index
+    assert(ddl.contains(
+        "CREATE INDEX IF NOT EXISTS idx_schema_posts_slug ON schema_posts (slug) WHERE published = true;"));
+
+    // @uniqueIndex (plain)
+    assert(ddl.contains(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_posts_external_id ON schema_posts (external_id);"));
+
+    // @uniqueIndex(where:) — partial unique index
+    assert(ddl.contains(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_posts_code ON schema_posts (code) WHERE deleted_at IS NULL;"));
+
+    // @ginIndex — USING gin, no UNIQUE (on JSONB metadata column)
+    assert(ddl.contains(
+        "CREATE INDEX IF NOT EXISTS gin_schema_posts_metadata ON schema_posts USING gin (metadata);"));
+
+    // @hashIndex — USING hash
+    assert(ddl.contains(
+        "CREATE INDEX IF NOT EXISTS hash_schema_posts_session_token ON schema_posts USING hash (session_token);"));
+
+    // @uniqueIndexTogether — CREATE UNIQUE INDEX, multi-column
+    assert(ddl.contains(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_posts_author_id_slug ON schema_posts (author_id, slug);"));
+
+    // @indexTogether(where:) — partial multi-column index
+    assert(ddl.contains(
+        "CREATE INDEX IF NOT EXISTS idx_schema_posts_author_id_published_at ON schema_posts (author_id, published_at) WHERE published = true;"));
+}
+
+
+// ---------------------------------------------------------------------------
+// Index enhancements: end-to-end (PostgreSQL accepts generated SQL)
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    c.exec("DROP TABLE IF EXISTS schema_posts;");
+    enum sql = modelDDL!Post();
+    c.exec(sql);   // must not throw
+
+    auto repo = Repository!(Post, Connection)(&c);
+    import std.json: parseJSON;
+    auto p = Post(0, 1, "hello-world", "ext-001", "CODE-1",
+                  parseJSON(`{}`), "tok-x", false,
+                  Nullable!DateTime.init, Nullable!string.init);
+    auto inserted = repo.insert(p);
+    assert(inserted.id >= 1);
+    assert(inserted.slug == "hello-world");
 }
 
 
