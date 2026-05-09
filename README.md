@@ -243,6 +243,27 @@ repo.update(p);
 
 // Delete by primary key
 repo.deleteById(p.id);
+
+// Check existence without fetching the row
+bool here = repo.existsById(p.id);
+
+// Insert multiple records in a single round-trip
+auto many = repo.insertMany([
+    Partner(0, "Acme Corp", "info@acme.com", true),
+    Partner(0, "Beta Ltd",  "hi@beta.com",   true),
+]);
+
+// Upsert by primary key — plain INSERT when PK is 0/init, ON CONFLICT UPDATE otherwise
+auto saved = repo.upsert(p);
+
+// Upsert by natural key — conflict on any UNIQUE column(s)
+auto saved2 = repo.upsert!"email"(p);
+
+// Delete a record by value (extracts PK internally)
+repo.deleteByRec(p);
+
+// Bulk delete — single IN-clause round-trip; returns count deleted
+long n = repo.deleteByRec(many);
 ```
 
 ### QuerySet
@@ -278,6 +299,16 @@ long updated = repo.query()
     .where!"active"(false)
     .set!"name"("Archived")
     .update();
+
+// none() — force empty result (useful when building conditional filters)
+auto qs = allowedIds.empty ? repo.query().none()
+                           : repo.query().whereIn!"id"(allowedIds);
+
+// select!DTO() — project into a different struct
+struct PartnerSummary { int id; string name; }
+PartnerSummary[] summaries = repo.query()
+    .where!"active"(true)
+    .select!PartnerSummary();
 ```
 
 ### Type-safe predicates
@@ -366,6 +397,29 @@ partnerRepo.query()
 
 Note: single-level `exists!()` only. Nested `exists!()` calls conflict on the
 `_sq` alias and throw `PequeException` at serialisation time.
+
+### IN subqueries
+
+`asSubquery!"field"()` captures a QuerySet as a single-column subquery atom
+without hitting the database. Pass it to `F!(M,"field").inSubquery()` for
+`IN (SELECT …)`, or negate with `~` for `NOT IN`.
+
+```d
+// IDs of active categories — no DB call yet
+auto activeCatIds = catRepo.query()
+    .where!"active"(true)
+    .asSubquery!"id"();
+
+// Products whose category is in that set
+auto products = prodRepo.query()
+    .where(F!(Product, "categoryId").inSubquery(activeCatIds))
+    .all();
+
+// Products whose category is NOT in that set
+auto rest = prodRepo.query()
+    .where(~F!(Product, "categoryId").inSubquery(activeCatIds))
+    .all();
+```
 
 ---
 
@@ -460,12 +514,20 @@ import peque;
 import peque.vibe;
 
 // Single connection with fiber-aware I/O
-auto conn = Connection(..., VibeWS());
+auto conn = Connection(params, VibeWaitStrategy());
 
-// Connection pool — hands out connections to fibers, queues waiters
-auto pool = VibeConnectionPool(5, () => Connection(..., VibeWS()));
-auto c = pool.acquire();
-scope(exit) pool.release(c);
+// Connection pool — makeVibePool injects VibeWaitStrategy and non-blocking mode
+auto pool = makeVibePool(8, [
+    "dbname": "myapp",
+    "user":   "app",
+    "host":   "localhost",
+    "port":   "5432",
+]);
+
+// Borrow a connection for the duration of a delegate; returned automatically
+auto result = pool.borrow((ref Connection conn) {
+    return conn.execParams("SELECT name FROM users WHERE id = $1", userId);
+});
 ```
 
 ---
@@ -577,8 +639,8 @@ dub test --config=unittestStatic
 Sub-package tests:
 
 ```sh
-cd subPackages/orm     && dub test --config=unittestStatic
-cd subPackages/migrate && dub test --config=unittestStatic
+dub test :orm     --config=unittestStatic
+dub test :migrate --config=unittestStatic
 ```
 
 ## License
