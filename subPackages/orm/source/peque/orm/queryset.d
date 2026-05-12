@@ -120,13 +120,13 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
             // ---- @one2many -----------------------------------------------
             static foreach (uda; __traits(getAttributes, __traits(getMember, M, memberName))) {{
                 static if (is(uda) && is(uda == one2many!(TargetM, invField), TargetM, string invField)) {
-                    // Collect PKs from main rows
+                    // Collect unique PKs from main rows (O(n) via seen-set).
                     alias PkType = typeof(__traits(getMember, M, ormPkFieldName!M()));
                     PkType[] pks;
+                    bool[PkType] pkSeen;
                     foreach (ref r; rows) {
-                        bool dup = false;
-                        foreach (p; pks) if (p == __traits(getMember, r, ormPkFieldName!M())) { dup = true; break; }
-                        if (!dup) pks ~= __traits(getMember, r, ormPkFieldName!M());
+                        auto pk = __traits(getMember, r, ormPkFieldName!M());
+                        if (pk !in pkSeen) { pkSeen[pk] = true; pks ~= pk; }
                     }
                     if (pks.length == 0) return;
 
@@ -176,10 +176,10 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                 static if (is(uda) && is(uda == many2many!(TargetM, jt, sk, tk), TargetM, string jt, string sk, string tk)) {
                     alias PkType = typeof(__traits(getMember, M, ormPkFieldName!M()));
                     PkType[] pks;
+                    bool[PkType] pkSeen;
                     foreach (ref r; rows) {
-                        bool dup = false;
-                        foreach (p; pks) if (p == __traits(getMember, r, ormPkFieldName!M())) { dup = true; break; }
-                        if (!dup) pks ~= __traits(getMember, r, ormPkFieldName!M());
+                        auto pk = __traits(getMember, r, ormPkFieldName!M());
+                        if (pk !in pkSeen) { pkSeen[pk] = true; pks ~= pk; }
                     }
                     if (pks.length == 0) return;
 
