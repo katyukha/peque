@@ -153,6 +153,24 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// F!(M,"field").ilike()
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(WtItem, Connection)(&c);
+
+    auto r = repo.query().where(F!(WtItem, "name").ilike("g%")).all();
+    assert(r.length == 1);
+    assert(r[0].name == "Gamma");
+
+    auto r2 = repo.query().where(F!(WtItem, "name").ilike("%A%")).all();
+    assert(r2.length == 4);  // Alpha, Beta, Gamma, Delta (all contain 'a'/'A')
+}
+
+
+// ---------------------------------------------------------------------------
 // F!(M,"field").isNull — no NULLable fields in WtItem, so test NOT isNull
 // ---------------------------------------------------------------------------
 

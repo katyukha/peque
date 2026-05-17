@@ -86,6 +86,12 @@ struct FieldBuilder(string colExpr) {
         return Predicate(OpNode(colExpr, "LIKE", convertToPG(pattern)));
     }
 
+    /// ILIKE (case-insensitive LIKE): F!(M, "field").ilike("%pattern%")
+    Predicate ilike(string pattern) const {
+        import peque.converter: convertToPG;
+        return Predicate(OpNode(colExpr, "ILIKE", convertToPG(pattern)));
+    }
+
     /** Set membership: F!(M, "field").contains(values)
       *
       * .contains() is used instead of .in() because 'in' is a D keyword.
@@ -294,6 +300,11 @@ struct PathBuilder(string path) {
     /// LIKE pattern
     Predicate like(string pat) const {
         return Predicate(PathNode(path, "LIKE", [convertToPG(pat)], ""));
+    }
+
+    /// ILIKE (case-insensitive LIKE) pattern
+    Predicate ilike(string pat) const {
+        return Predicate(PathNode(path, "ILIKE", [convertToPG(pat)], ""));
     }
 
     /// IN (set membership)
