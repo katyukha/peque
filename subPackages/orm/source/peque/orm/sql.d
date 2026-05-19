@@ -87,18 +87,20 @@ string buildInsertColList(M)() {
 }
 
 /// INSERT placeholders: "$1, $2, $3"
-string buildInsertPlaceholders(M)() {
-    int n = 0;
+/// When withPk is true, $1 is reserved for the PK (placed first) and
+/// non-PK fields follow as $2, $3, …
+string buildInsertPlaceholders(M, bool withPk = false)() {
+    string result;
+    static if (withPk) result = "$1";
+    int n = withPk ? 1 : 0;
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
-        static if (!hasUDA!(F, primaryKey) && _isColField!F)
+        static if (!hasUDA!(F, primaryKey) && _isColField!F) {
             n++;
+            if (result.length) result ~= ", ";
+            result ~= "$" ~ n.to!string;
+        }
     }}
-    string result;
-    foreach (i; 1 .. n + 1) {
-        if (result.length) result ~= ", ";
-        result ~= "$" ~ i.to!string;
-    }
     return result;
 }
 
@@ -119,8 +121,17 @@ string buildUpdateSetClause(M)() {
 
 /// D expression for non-PK field values used in INSERT mixin:
 /// "record.name, record.code, record.partnerId"
-string buildInsertValueExpr(M)() {
+/// When withPk is true, the PK field is prepended:
+/// "record.id, record.name, record.code, record.partnerId"
+string buildInsertValueExpr(M, bool withPk = false)() {
     string result;
+    static if (withPk) {
+        static foreach (memberName; FieldNameTuple!M) {{
+            alias F = __traits(getMember, M, memberName);
+            static if (hasUDA!(F, primaryKey))
+                result = "record." ~ memberName;
+        }}
+    }
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
         static if (!hasUDA!(F, primaryKey) && _isColField!F) {
@@ -180,54 +191,6 @@ string buildMultiRowPlaceholders(size_t nFields, size_t nRows) pure {
         }
         result ~= ")";
     }
-    return result;
-}
-
-/** Internal — used by CRUDMixin.upsert. INSERT column list including the PK (PK first): "id, name, email_address". **/
-string _buildInsertColListWithPk(M)() {
-    string result;
-    static foreach (memberName; FieldNameTuple!M) {{
-        alias F = __traits(getMember, M, memberName);
-        static if (hasUDA!(F, primaryKey))
-            result = _colName!(F, memberName);
-    }}
-    static foreach (memberName; FieldNameTuple!M) {{
-        alias F = __traits(getMember, M, memberName);
-        static if (!hasUDA!(F, primaryKey) && _isColField!F)
-            result ~= ", " ~ _colName!(F, memberName);
-    }}
-    return result;
-}
-
-/** Internal — used by CRUDMixin.upsert. INSERT placeholders including PK ($1 for PK): "$1, $2, $3". **/
-string _buildInsertPlaceholdersWithPk(M)() {
-    string result = "$1";
-    int n = 1;
-    static foreach (memberName; FieldNameTuple!M) {{
-        alias F = __traits(getMember, M, memberName);
-        static if (!hasUDA!(F, primaryKey) && _isColField!F) {
-            n++;
-            result ~= ", $" ~ n.to!string;
-        }
-    }}
-    return result;
-}
-
-/** Internal — used by CRUDMixin.upsert. D mixin expression for INSERT values including PK (PK first).
-  * Example output: "record.id, record.name, record.emailAddress"
-  **/
-string _buildInsertValueExprWithPk(M)() {
-    string result;
-    static foreach (memberName; FieldNameTuple!M) {{
-        alias F = __traits(getMember, M, memberName);
-        static if (hasUDA!(F, primaryKey))
-            result = "record." ~ memberName;
-    }}
-    static foreach (memberName; FieldNameTuple!M) {{
-        alias F = __traits(getMember, M, memberName);
-        static if (!hasUDA!(F, primaryKey) && _isColField!F)
-            result ~= ", record." ~ memberName;
-    }}
     return result;
 }
 

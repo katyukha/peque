@@ -275,6 +275,22 @@ private string _buildOneIndex(
     return s ~ ";\n";
 }
 
+// Emit one CREATE INDEX statement if `uda` matches UDAType (instance or type-value form).
+// Instance form: @UDAType(where: "cond") → typeof(uda) == UDAType, reads uda.where.
+// Type-value form: @UDAType (no parens)  → is(uda == UDAType),      where defaults to "".
+private string _tryBuildFieldIndex(alias uda, UDAType,
+                                   bool isUnique, string using_, string prefix,
+                                   string table, string col)() {
+    static if (is(typeof(uda) == UDAType))
+        return _buildOneIndex(isUnique, using_, table, col, uda.where,
+                              prefix ~ table ~ "_" ~ col);
+    else static if (is(uda == UDAType))
+        return _buildOneIndex(isUnique, using_, table, col, "",
+                              prefix ~ table ~ "_" ~ col);
+    else
+        return "";
+}
+
 // Build all CREATE INDEX statements for model M.
 // Handles field-level: @index, @uniqueIndex, @ginIndex, @gistIndex, @hashIndex
 //          model-level: @indexTogether, @uniqueIndexTogether
@@ -284,49 +300,17 @@ private string _buildIndexSQL(M)() {
     string result;
     enum table = ormTableName!M;
 
-    // Field-level: iterate each column field and inspect its UDAs.
-    // Each UDA type has two branches:
-    //   instance  (@index(where: "cond")) — typeof(uda) == T, read uda.where
-    //   type-value (@index, no parens)    — is(uda == T),     where defaults to ""
+    // Field-level: for each UDA on a column field, try each known index type.
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
         static if (_isColField!F) {
             enum col = _colName!(F, memberName);
             static foreach (uda; __traits(getAttributes, F)) {{
-                static if (is(typeof(uda) == index))
-                    result ~= _buildOneIndex(false, "btree", table, col, uda.where,
-                                             "idx_"  ~ table ~ "_" ~ col);
-                else static if (is(uda == index))
-                    result ~= _buildOneIndex(false, "btree", table, col, "",
-                                             "idx_"  ~ table ~ "_" ~ col);
-
-                static if (is(typeof(uda) == uniqueIndex))
-                    result ~= _buildOneIndex(true,  "btree", table, col, uda.where,
-                                             "uniq_" ~ table ~ "_" ~ col);
-                else static if (is(uda == uniqueIndex))
-                    result ~= _buildOneIndex(true,  "btree", table, col, "",
-                                             "uniq_" ~ table ~ "_" ~ col);
-
-                static if (is(typeof(uda) == ginIndex))
-                    result ~= _buildOneIndex(false, "gin",   table, col, uda.where,
-                                             "gin_"  ~ table ~ "_" ~ col);
-                else static if (is(uda == ginIndex))
-                    result ~= _buildOneIndex(false, "gin",   table, col, "",
-                                             "gin_"  ~ table ~ "_" ~ col);
-
-                static if (is(typeof(uda) == gistIndex))
-                    result ~= _buildOneIndex(false, "gist",  table, col, uda.where,
-                                             "gist_" ~ table ~ "_" ~ col);
-                else static if (is(uda == gistIndex))
-                    result ~= _buildOneIndex(false, "gist",  table, col, "",
-                                             "gist_" ~ table ~ "_" ~ col);
-
-                static if (is(typeof(uda) == hashIndex))
-                    result ~= _buildOneIndex(false, "hash",  table, col, uda.where,
-                                             "hash_" ~ table ~ "_" ~ col);
-                else static if (is(uda == hashIndex))
-                    result ~= _buildOneIndex(false, "hash",  table, col, "",
-                                             "hash_" ~ table ~ "_" ~ col);
+                result ~= _tryBuildFieldIndex!(uda, index,       false, "btree", "idx_",  table, col)();
+                result ~= _tryBuildFieldIndex!(uda, uniqueIndex, true,  "btree", "uniq_", table, col)();
+                result ~= _tryBuildFieldIndex!(uda, ginIndex,    false, "gin",   "gin_",  table, col)();
+                result ~= _tryBuildFieldIndex!(uda, gistIndex,   false, "gist",  "gist_", table, col)();
+                result ~= _tryBuildFieldIndex!(uda, hashIndex,   false, "hash",  "hash_", table, col)();
             }}
         }
     }}

@@ -918,25 +918,12 @@ if (isModel!M && isQueryContext!Ctx) {
         PGValue[] params;
         _buildWhereFromArray(resolved, whereSQL, params);
 
-        static if (JoinFields.length == 0) {
-            // No hydration joins — may still have filter joins
-            // Use _m. prefix to avoid column ambiguity when filter joins are present
-            enum _mainSelNoJoin = _prefixedSelectList!(M, "_m")();
-            string sql = "SELECT " ~ _mainSelNoJoin ~
-                         " FROM " ~ ormTableName!M ~ " _m";
-            sql ~= _filterJoinSQL(fjoins);
-            sql ~= whereSQL;
-            if (orderBySql.length) sql ~= " ORDER BY " ~ orderBySql;
-            if (_limitVal  >= 0) sql ~= " LIMIT "  ~ to!string(_limitVal);
-            if (_offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_offsetVal);
+        // Build SELECT — main model columns (always prefixed with _m.)
+        enum _mainSel = _prefixedSelectList!(M, "_m")();
+        string sql = "SELECT " ~ _mainSel;
 
-            auto rows = _ctx.execParams(sql, params).as!(M[]);
-            foreach (fn; _prefetches) fn(rows, _ctx);
-            return rows;
-
-        } else {
-            // Hydration joins — aliased SELECT + LEFT JOINs
-            enum _mainSel = _prefixedSelectList!(M, "_m")();
+        // Append aliased columns for each hydration join
+        static if (JoinFields.length > 0) {
             string joinExtras;
             static foreach (idx, jf; JoinFields) {{
                 alias RelType = _innerRelType!(M, jf);
@@ -946,11 +933,13 @@ if (isModel!M && isQueryContext!Ctx) {
                 if (joinExtras.length) joinExtras ~= ", ";
                 joinExtras ~= _extras;
             }}
-
-            string sql = "SELECT " ~ _mainSel;
             if (joinExtras.length) sql ~= ", " ~ joinExtras;
-            sql ~= " FROM " ~ ormTableName!M ~ " _m";
+        }
 
+        sql ~= " FROM " ~ ormTableName!M ~ " _m";
+
+        // Append LEFT JOINs for hydration joins
+        static if (JoinFields.length > 0) {
             static foreach (idx, jf; JoinFields) {{
                 alias RelType = _innerRelType!(M, jf);
                 enum _jAlias = "j" ~ to!string(idx);
@@ -962,12 +951,21 @@ if (isModel!M && isQueryContext!Ctx) {
                 sql ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _jAlias ~
                        " ON " ~ _jAlias ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
             }}
-            sql ~= _filterJoinSQL(fjoins);
-            sql ~= whereSQL;
-            if (orderBySql.length) sql ~= " ORDER BY " ~ orderBySql;
-            if (_limitVal  >= 0) sql ~= " LIMIT "  ~ to!string(_limitVal);
-            if (_offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_offsetVal);
+        }
 
+        sql ~= _filterJoinSQL(fjoins);
+        sql ~= whereSQL;
+        if (orderBySql.length) sql ~= " ORDER BY " ~ orderBySql;
+        if (_limitVal  >= 0) sql ~= " LIMIT "  ~ to!string(_limitVal);
+        if (_offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_offsetVal);
+
+        static if (JoinFields.length == 0) {
+            // No hydration joins — Result.as handles bulk hydration
+            auto rows = _ctx.execParams(sql, params).as!(M[]);
+            foreach (fn; _prefetches) fn(rows, _ctx);
+            return rows;
+        } else {
+            // Hydration joins — manual loop to fill joined fields after hydration
             auto result = _ctx.execParams(sql, params);
             M[] rows;
             rows.length = result.ntuples;

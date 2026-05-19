@@ -108,7 +108,7 @@ if (isModel!M && isQueryContext!Ctx) {
     private enum _crudUpsertByPkSQL =
         "INSERT INTO " ~ _crudTable ~
         " (" ~ _crudPk ~ ", " ~ buildInsertColList!M() ~ ")" ~
-        " VALUES (" ~ _buildInsertPlaceholdersWithPk!M() ~ ")" ~
+        " VALUES (" ~ buildInsertPlaceholders!(M, true)() ~ ")" ~
         " ON CONFLICT (" ~ _crudPk ~ ") DO UPDATE SET " ~
         _buildExcludedSetClause!M() ~
         " RETURNING " ~ _crudSel;
@@ -227,7 +227,7 @@ if (isModel!M && isQueryContext!Ctx) {
         if (pkVal == typeof(pkVal).init)
             return insert(record);
         return mixin(
-            `_ctx.execParams(_crudUpsertByPkSQL, ` ~ _buildInsertValueExprWithPk!M() ~ `)`
+            `_ctx.execParams(_crudUpsertByPkSQL, ` ~ buildInsertValueExpr!(M, true)() ~ `)`
         ).getRow(0).as!M;
     }
 
@@ -287,12 +287,12 @@ if (isModel!M && isQueryContext!Ctx) {
             // PK set — include in INSERT; never overwrite existing PK on conflict
             enum _sqlPk = "INSERT INTO " ~ _crudTable ~
                           " (" ~ _crudPk ~ ", " ~ buildInsertColList!M() ~ ")" ~
-                          " VALUES (" ~ _buildInsertPlaceholdersWithPk!M() ~ ")" ~
+                          " VALUES (" ~ buildInsertPlaceholders!(M, true)() ~ ")" ~
                           " ON CONFLICT (" ~ _conflictCols ~ ") DO UPDATE SET " ~
                           _setCl ~
                           " RETURNING " ~ _crudSel;
             return mixin(
-                `_ctx.execParams(_sqlPk, ` ~ _buildInsertValueExprWithPk!M() ~ `)`
+                `_ctx.execParams(_sqlPk, ` ~ buildInsertValueExpr!(M, true)() ~ `)`
             ).getRow(0).as!M;
         }
     }
