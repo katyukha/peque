@@ -27,7 +27,7 @@
   **/
 module peque.orm.registry;
 
-private import std.meta: AliasSeq, Filter;
+private import std.meta: AliasSeq;
 
 private import peque.query_context: isQueryContext;
 private import peque.orm.repository: isModel, CRUDMixin;
@@ -105,25 +105,43 @@ struct Registry(Bindings...) {
   * ---
   **/
 template RegistryRepoFor(Reg, M) if (isModel!M) {
-    private template _matchesModel(alias B) {
-        static if (is(B == Bind!(BM, RepoTpl), BM, alias RepoTpl))
-            enum bool _matchesModel = is(BM == M);
-        else
-            enum bool _matchesModel = false;
+    // CTFE AA lookup: avoids recursive template instantiation that Filter! would cause.
+    // Build a mangleof→index map in one static foreach pass, then do an O(1) AA lookup.
+    private size_t _findIndex() {
+        size_t[string] lookup;
+        static foreach (i, B; Reg._bindings) {{
+            static if (is(B == Bind!(BM, RepoTpl), BM, alias RepoTpl))
+                lookup[BM.mangleof] = i;
+        }}
+        auto p = M.mangleof in lookup;
+        return p ? *p : size_t.max;
     }
 
-    private alias _matches = Filter!(_matchesModel, Reg._bindings);
+    // Duplicate detection: count occurrences of M across all bindings.
+    private size_t _countMatches() {
+        size_t n = 0;
+        static foreach (i, B; Reg._bindings) {{
+            static if (is(B == Bind!(BM, RepoTpl), BM, alias RepoTpl))
+                if (BM.mangleof == M.mangleof) n++;
+        }}
+        return n;
+    }
 
-    static assert(_matches.length >= 1,
+    enum _idx = _findIndex();
+    enum _cnt = _countMatches();
+
+    static assert(_cnt >= 1,
         "No binding found for " ~ M.stringof ~ " in " ~ Reg.stringof ~
         ". Add Bind!(" ~ M.stringof ~ ", ...) to the registry.");
-    static assert(_matches.length == 1,
+    static assert(_cnt == 1,
         "Duplicate binding for " ~ M.stringof ~ " in " ~ Reg.stringof ~ ".");
 
-    static if (is(_matches[0] == Bind!(BM, RepoTpl), BM, alias RepoTpl))
-        alias RegistryRepoFor = RepoTpl;
-    else
-        static assert(false, "Internal registry error");
+    static if (_cnt == 1) {
+        static if (is(Reg._bindings[_idx] == Bind!(BM, RepoTpl), BM, alias RepoTpl))
+            alias RegistryRepoFor = RepoTpl;
+        else
+            static assert(false, "Internal registry error");
+    }
 }
 
 
