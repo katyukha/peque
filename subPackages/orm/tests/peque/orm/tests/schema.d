@@ -28,6 +28,7 @@ private import std.json: JSONValue;
 private import std.process: environment;
 private import std.string: indexOf;
 private import std.typecons: Nullable;
+private import std.uuid: UUID;
 
 private import peque.connection: Connection;
 private import peque.model:
@@ -399,4 +400,51 @@ unittest {
     // ON DELETE CASCADE: deleting category must cascade to products
     catRepo.deleteById(cat.id);
     assert(prodRepo.findById(inserted.id).isNull);
+}
+
+
+// ---------------------------------------------------------------------------
+// UUID primary key
+// ---------------------------------------------------------------------------
+
+@model("schema_tokens")
+struct Token {
+    @primaryKey UUID   id;
+    @field      string name;
+}
+
+alias TokenReg = Registry!(Bind!(Token, ModelRepo!Token));
+
+unittest {
+    enum ddl = modelDDL!Token();
+
+    assert(ddl.contains("CREATE TABLE IF NOT EXISTS schema_tokens"));
+    assert(ddl.contains("id UUID PRIMARY KEY DEFAULT gen_random_uuid()"));
+    assert(ddl.contains("name TEXT NOT NULL"));
+}
+
+unittest {
+    auto c = makeConn();
+    c.exec("DROP TABLE IF EXISTS schema_tokens;");
+    enum sql = schemaSQL!TokenReg();
+    c.exec(sql);
+
+    auto repo = Repository!(Token, Connection)(&c);
+
+    // Insert with zero UUID — DB assigns gen_random_uuid()
+    auto t = Token(UUID.init, "session");
+    auto inserted = repo.insert(t);
+    assert(inserted.id != UUID.init);
+    assert(inserted.name == "session");
+
+    // findById with the returned UUID must work
+    auto found = repo.findById(inserted.id).get;
+    assert(found.name == "session");
+
+    // upsert with explicit UUID — must honour caller-provided PK
+    auto explicit = UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    auto t2 = Token(explicit, "fixed");
+    auto ups = repo.upsert(t2);
+    assert(ups.id == explicit);
+    assert(ups.name == "fixed");
 }

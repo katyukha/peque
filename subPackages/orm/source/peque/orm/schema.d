@@ -85,6 +85,7 @@ private import std.traits: FieldNameTuple, hasUDA, getUDAs, TemplateOf;
 private import std.typecons: Nullable;
 private import std.json: JSONValue;
 private import std.datetime: SysTime, DateTime, Date;
+private import std.uuid: UUID;
 
 private import peque.model:
     model, field, primaryKey, pgType,
@@ -123,6 +124,8 @@ private string _pgBaseType(T)() {
         return "TEXT";
     else static if (is(T == JSONValue))
         return "JSONB";
+    else static if (is(T == UUID))
+        return "UUID";
     else static if (is(T == SysTime))
         return "TIMESTAMPTZ";
     else static if (is(T == DateTime))
@@ -172,6 +175,8 @@ private string _buildColDef(M, string memberName)() {
             typeName = "SERIAL";
         else static if (is(FType == long) || is(FType == ulong))
             typeName = "BIGSERIAL";
+        else static if (is(FType == UUID))
+            typeName = "UUID";
         else
             typeName = _pgBaseType!FType();
     } else {
@@ -190,6 +195,8 @@ private string _buildColDef(M, string memberName)() {
     }
 
     // --- DEFAULT ---
+    static if (hasUDA!(F, primaryKey) && is(FType == UUID) && !hasUDA!(F, pgDefault))
+        result ~= " DEFAULT gen_random_uuid()";
     static foreach (uda; __traits(getAttributes, F)) {{
         static if (is(typeof(uda) == pgDefault))
             result ~= " DEFAULT " ~ uda.expr;
