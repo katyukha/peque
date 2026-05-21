@@ -177,11 +177,19 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** Insert record into the DB and return the inserted row.
       *
+      * If M defines `void applyDefaults()`, it is called on `record` before
+      * the INSERT so runtime-computed defaults (timestamps, tokens, …) are
+      * applied.  Static field defaults (e.g. `bool active = true`) are
+      * already carried by the struct and need no special handling.
+      *
       * Uses INSERT ... RETURNING so the returned M has the generated PK and
       * any server-side defaults filled in.  The original `record` is not
-      * modified.
+      * modified by the RETURNING result, but `applyDefaults` mutates it
+      * in place before sending.
       **/
     M insert(ref M record) {
+        static if (__traits(hasMember, M, "applyDefaults"))
+            record.applyDefaults();
         return mixin(
             `_ctx.execParams(_crudInsSQL, ` ~ buildInsertValueExpr!M() ~ `)`
         ).getRow(0).as!M;
