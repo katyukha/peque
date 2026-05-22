@@ -114,6 +114,32 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// applyDefaults called by insertMany
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    // reuse table from previous tests (already created above)
+    auto repo = Repository!(Event, Connection)(&c);
+
+    auto batch = [
+        Event(0, "BatchA", "", SysTime.init),
+        Event(0, "BatchB", "running", SysTime.init),
+        Event(0, "BatchC", "", SysTime.init),
+    ];
+    auto inserted = repo.insertMany(batch);
+
+    assert(inserted.length == 3);
+    // applyDefaults must have been called on each record
+    assert(inserted[0].status == "pending");   // was ""   → filled
+    assert(inserted[1].status == "running");   // was set  → preserved
+    assert(inserted[2].status == "pending");   // was ""   → filled
+    foreach (r; inserted)
+        assert(r.createdAt != SysTime.init, "createdAt must be set by applyDefaults");
+}
+
+
+// ---------------------------------------------------------------------------
 // D struct field defaults — no applyDefaults needed
 // ---------------------------------------------------------------------------
 

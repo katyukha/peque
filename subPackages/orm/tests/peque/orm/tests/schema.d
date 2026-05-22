@@ -138,6 +138,23 @@ unittest {
     assert(!ddl.contains("bio TEXT NOT NULL"));
 }
 
+
+// ---------------------------------------------------------------------------
+// BIGSERIAL primary key (long field)
+// ---------------------------------------------------------------------------
+
+@model("schema_counters")
+struct Counter {
+    @primaryKey long   id;
+    @field      string label;
+}
+
+unittest {
+    enum ddl = modelDDL!Counter();
+    assert(ddl.contains("id BIGSERIAL PRIMARY KEY"));
+    assert(ddl.contains("label TEXT NOT NULL"));
+}
+
 unittest {
     enum ddl = modelDDL!Article();
 

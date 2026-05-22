@@ -112,6 +112,36 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// F!(M,"field").contains() — typed IN predicate
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(WtItem, Connection)(&c);
+
+    // string field IN list
+    auto r = repo.query()
+        .where(F!(WtItem, "status").contains(["active", "inactive"]))
+        .all();
+    assert(r.length == 3);   // Alpha, Gamma, Delta
+    foreach (ri; r) assert(ri.status != "pending");
+
+    // int field IN list
+    auto r2 = repo.query()
+        .where(F!(WtItem, "score").contains([10, 50]))
+        .all();
+    assert(r2.length == 2);
+
+    // empty list → always-false, no rows
+    auto r3 = repo.query()
+        .where(F!(WtItem, "status").contains(cast(string[])[]))
+        .all();
+    assert(r3.length == 0);
+}
+
+
+// ---------------------------------------------------------------------------
 // F!(M,"field") comparison operators
 // ---------------------------------------------------------------------------
 

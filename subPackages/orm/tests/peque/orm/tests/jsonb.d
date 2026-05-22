@@ -228,3 +228,62 @@ unittest {
         .all();
     assert(byFree.length == 2);
 }
+
+
+// ---------------------------------------------------------------------------
+// get("key") on missing key — PostgreSQL returns NULL
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    setup(c);
+    auto repo = Repository!(JbEvent, Connection)(&c);
+
+    auto ea = JbEvent(0, "a", parseJSON(`{"type": "click"}`));
+    auto eb = JbEvent(0, "b", parseJSON(`{"type": "view", "extra": "yes"}`));
+    repo.insert(ea); repo.insert(eb);
+
+    // Missing key → NULL in DB → equality with any value yields no rows
+    auto r = repo.query()
+        .where(F!(JbEvent, "payload").get("extra")("yes"))
+        .all();
+    assert(r.length == 1);
+    assert(r[0].name == "b");
+
+    // isNull on missing key matches all rows where the key is absent
+    auto missing = repo.query()
+        .where(F!(JbEvent, "payload").get("extra").isNull)
+        .all();
+    assert(missing.length == 1);
+    assert(missing[0].name == "a");
+}
+
+
+// ---------------------------------------------------------------------------
+// get("key") on non-object JSON — PostgreSQL returns NULL
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    setup(c);
+    auto repo = Repository!(JbEvent, Connection)(&c);
+
+    // array and scalar JSON values produce NULL for ->>'key'
+    auto ea = JbEvent(0, "arr",    parseJSON(`[1, 2, 3]`));
+    auto eb = JbEvent(0, "scalar", parseJSON(`"hello"`));
+    auto ec = JbEvent(0, "obj",    parseJSON(`{"k": "v"}`));
+    repo.insert(ea); repo.insert(eb); repo.insert(ec);
+
+    // ->>'k' on array or scalar is NULL → matched by isNull
+    auto nulls = repo.query()
+        .where(F!(JbEvent, "payload").get("k").isNull)
+        .all();
+    assert(nulls.length == 2);
+
+    // only the object row has a non-null value for key "k"
+    auto found = repo.query()
+        .where(F!(JbEvent, "payload").get("k")("v"))
+        .all();
+    assert(found.length == 1);
+    assert(found[0].name == "obj");
+}

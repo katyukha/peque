@@ -204,6 +204,9 @@ if (isModel!M && isQueryContext!Ctx) {
     M[] insertMany(M[] records) {
         if (records.length == 0) return [];
 
+        static if (__traits(hasMember, M, "applyDefaults"))
+            foreach (ref r; records) r.applyDefaults();
+
         enum _nf = countNonPkFields!M();
         auto params = buildInsertParamsMany!M(records);
         string sql = "INSERT INTO " ~ _crudTable ~

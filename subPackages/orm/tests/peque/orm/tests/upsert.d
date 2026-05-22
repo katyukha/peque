@@ -194,6 +194,13 @@ unittest {
     assert(result.name == "Zeta-New");
     assert(result.score == 8);
     assert(repo.query().count() == 1);
+
+    // Verify in DB: original PK has the updated fields, attempt PK does not exist
+    auto inDb = repo.findById(ins.id).get;
+    assert(inDb.name  == "Zeta-New");
+    assert(inDb.score == 8);
+    assert(repo.findById(ins.id + 1000).isNull,
+        "spurious row with attempt PK must not exist in DB");
 }
 
 
