@@ -48,6 +48,73 @@ private import peque.orm.sql: _fieldColName, ormTableName;
 private import peque.hydration: camelToSnake;
 
 
+// ---------------------------------------------------------------------------
+// JsonFieldBuilder — returned by FieldBuilder.get("key")
+// ---------------------------------------------------------------------------
+
+private bool _hasQuote(string s) pure nothrow @safe @nogc {
+    foreach (c; s) if (c == '\'') return true;
+    return false;
+}
+
+/** Predicate builder for a JSONB text-extracted value: `(col)->>'key'`.
+  *
+  * Produced by FieldBuilder.get("key") — do not construct directly.
+  * key is embedded in the SQL expression; it must be a trusted, hardcoded
+  * string (no user input).
+  *
+  * All comparison operators work on the extracted text value:
+  * ---
+  * repo.query().where(F!(Post, "meta").get("lang")("en"))
+  * // → WHERE (_m.meta)->>'lang' = $1
+  *
+  * repo.query().where(F!(Post, "meta").get("score").gte("90"))
+  * // → WHERE (_m.meta)->>'score' >= $1
+  * ---
+  **/
+struct JsonFieldBuilder {
+    private string _expr;   // e.g. "(_m.payload)->>'type'"
+
+    this(string colExpr, string key) pure @safe {
+        assert(!_hasQuote(key), "JSONB key must not contain single quotes");
+        _expr = "(" ~ colExpr ~ ")->>'" ~ key ~ "'";
+    }
+
+    /// Equality: .get("key")("value")
+    Predicate opCall(V)(V val) const {
+        return Predicate(EqNode(_expr, convertToPG(val)));
+    }
+
+    /// Comparisons: .gt .gte .lt .lte .ne
+    Predicate gt(V)(V val)  const { return Predicate(OpNode(_expr, ">",  convertToPG(val))); }
+    /// ditto
+    Predicate gte(V)(V val) const { return Predicate(OpNode(_expr, ">=", convertToPG(val))); }
+    /// ditto
+    Predicate lt(V)(V val)  const { return Predicate(OpNode(_expr, "<",  convertToPG(val))); }
+    /// ditto
+    Predicate lte(V)(V val) const { return Predicate(OpNode(_expr, "<=", convertToPG(val))); }
+    /// ditto
+    Predicate ne(V)(V val)  const { return Predicate(OpNode(_expr, "!=", convertToPG(val))); }
+
+    /// LIKE pattern
+    Predicate like(string pat)  const { return Predicate(OpNode(_expr, "LIKE",  convertToPG(pat))); }
+
+    /// ILIKE (case-insensitive LIKE) pattern
+    Predicate ilike(string pat) const { return Predicate(OpNode(_expr, "ILIKE", convertToPG(pat))); }
+
+    /// IN (set membership): .get("key").contains(["a", "b"])
+    Predicate contains(V)(V[] vals) const {
+        if (vals.length == 0) return Predicate.none;
+        PGValue[] pgVals;
+        foreach (v; vals) pgVals ~= convertToPG(v);
+        return Predicate(InNode(_expr, pgVals));
+    }
+
+    /// IS NULL
+    @property Predicate isNull() const { return Predicate(NullNode(_expr)); }
+}
+
+
 /** Compile-time field reference builder.
   *
   * colExpr is the resolved SQL expression (e.g. "_m.status_col").
@@ -122,6 +189,28 @@ struct FieldBuilder(string colExpr) {
       **/
     Predicate inSubquery(T)(SubQuery!T sub) const {
         return Predicate(InSubqueryNode(colExpr, sub.sql, sub.params));
+    }
+
+    /** JSONB text-extraction accessor: col->>'key'.
+      *
+      * Returns a JsonFieldBuilder whose operators generate `(col)->>'key' OP $N`
+      * predicates.  Covers the common case of querying into a JSONValue field
+      * by a known key (locale, attribute name, …).
+      *
+      * key is embedded directly in the SQL expression — pass only trusted,
+      * hardcoded strings, never user input.
+      *
+      * Example:
+      * ---
+      * // WHERE (_m.name)->>'en' = $1
+      * repo.query().where(F!(Product, "name").get("en")("Widget"))
+      *
+      * // WHERE (_m.meta)->>'score' >= $1
+      * repo.query().where(F!(Post, "meta").get("score").gte("90"))
+      * ---
+      **/
+    JsonFieldBuilder get(string key) const {
+        return JsonFieldBuilder(colExpr, key);
     }
 }
 

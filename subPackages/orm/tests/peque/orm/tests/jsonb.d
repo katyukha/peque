@@ -17,6 +17,7 @@ private import std.typecons: Nullable, nullable;
 private import peque.connection: Connection;
 private import peque.model: model, field, primaryKey, pgType;
 private import peque.orm;
+private import peque.orm.field: F;
 
 
 // ---------------------------------------------------------------------------
@@ -170,4 +171,60 @@ unittest {
     auto r = repo.query().where!"name"("e1").all();
     assert(r.length == 1);
     assert(r[0].payload["type"].str == "click");
+}
+
+
+// ---------------------------------------------------------------------------
+// F!(M, "field").get("key") — JSONB text-extraction predicate
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    setup(c);
+    auto repo = Repository!(JbEvent, Connection)(&c);
+
+    auto ea = JbEvent(0, "a", parseJSON(`{"type": "click", "score": "42"}`));
+    auto eb = JbEvent(0, "b", parseJSON(`{"type": "view",  "score": "10"}`));
+    auto ec = JbEvent(0, "c", parseJSON(`{"type": "click", "score": "99"}`));
+    repo.insert(ea); repo.insert(eb); repo.insert(ec);
+
+    // equality
+    auto clicks = repo.query()
+        .where(F!(JbEvent, "payload").get("type")("click"))
+        .all();
+    assert(clicks.length == 2);
+
+    // ne
+    auto notClicks = repo.query()
+        .where(F!(JbEvent, "payload").get("type").ne("click"))
+        .all();
+    assert(notClicks.length == 1);
+    assert(notClicks[0].name == "b");
+
+    // contains (IN)
+    auto multi = repo.query()
+        .where(F!(JbEvent, "payload").get("type").contains(["click", "view"]))
+        .all();
+    assert(multi.length == 3);
+
+    // gte on extracted text (lexicographic — good enough for numeric strings here)
+    auto highScore = repo.query()
+        .where(F!(JbEvent, "payload").get("score").gte("90"))
+        .all();
+    assert(highScore.length == 1);
+    assert(highScore[0].name == "c");
+
+    // runtime key variable works (key is not a compile-time constant)
+    string lang = "type";
+    auto byVar = repo.query()
+        .where(F!(JbEvent, "payload").get(lang)("view"))
+        .all();
+    assert(byVar.length == 1);
+    assert(byVar[0].name == "b");
+
+    // type-free F!"field".get("key") also works
+    auto byFree = repo.query()
+        .where(F!"payload".get("type")("click"))
+        .all();
+    assert(byFree.length == 2);
 }
