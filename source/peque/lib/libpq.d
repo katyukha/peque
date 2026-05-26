@@ -1,5 +1,10 @@
-/* This file is result of translation of zip.h file of libzip to D,
- * using BindBC to be able to load library dynamically.
+/* D bindings for libpq (PostgreSQL client library).
+ * Translated from the PostgreSQL libpq C headers using BindBC codegen
+ * for dynamic loading support.
+ *
+ * PostgreSQL is Copyright © 1996-2024 The PostgreSQL Global Development Group.
+ * PostgreSQL is licensed under the PostgreSQL License
+ * (see https://www.postgresql.org/about/licence/).
  */
 module peque.lib.libpq;
 
