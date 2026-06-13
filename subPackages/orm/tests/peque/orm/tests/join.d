@@ -318,3 +318,60 @@ unittest {
     assert(dtos[2].name == "INV-003");
     assert(dtos[2].partnerName == "Globex");
 }
+
+
+// ---------------------------------------------------------------------------
+// orderBy(F!"partner.name") — join-path ordering registers an implicit LEFT
+// JOIN, no explicit joinOne! required. Shared resolver works for all() …
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    setupJoinTables(c);
+    auto repo = Repository!(JtInvoice, Connection)(&c);
+
+    // ORDER BY partner.name ASC, then invoice name. NULL partner sorts last (ASC).
+    auto invoices = repo.query()
+                        .orderBy(F!"partner.name", F!"name")
+                        .all();
+
+    assert(invoices.length == 4);
+    assert(invoices[0].name == "INV-001");   // Acme Corp
+    assert(invoices[1].name == "INV-002");   // Acme Corp
+    assert(invoices[2].name == "INV-003");   // Globex
+    assert(invoices[3].name == "INV-NULL");  // NULL partner → last
+}
+
+// … and the same join-path ordering through select!DTO (joins added to FROM).
+unittest {
+    auto c = makeConn();
+    setupJoinTables(c);
+    auto repo = Repository!(JtInvoice, Connection)(&c);
+
+    auto dtos = repo.query()
+                    .joinOne!("partner")
+                    .whereRaw("_m.name != $1", "INV-NULL")
+                    .orderBy(F!"partner.name".desc, F!"name")
+                    .select!InvoicePartnerDTO();
+
+    assert(dtos.length == 3);
+    assert(dtos[0].partnerName == "Globex");    // DESC: Globex first
+    assert(dtos[1].partnerName == "Acme Corp");
+    assert(dtos[2].partnerName == "Acme Corp");
+}
+
+// Compile-time-validated orderBy!("rel.leaf") — the relation segment AND the
+// leaf column on the related model are both validated at compile time.
+unittest {
+    auto c = makeConn();
+    setupJoinTables(c);
+    auto repo = Repository!(JtInvoice, Connection)(&c);
+
+    auto invoices = repo.query().orderBy!("partner.name", "-name").all();
+    assert(invoices.length == 4);
+    assert(invoices[$-1].name == "INV-NULL");   // NULL partner sorts last (ASC)
+
+    // A bad relation segment and a bad leaf field both fail to compile.
+    static assert(!__traits(compiles, repo.query().orderBy!("nosuchrel.name")));
+    static assert(!__traits(compiles, repo.query().orderBy!("partner.nosuchcol")));
+}

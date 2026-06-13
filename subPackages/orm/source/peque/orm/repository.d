@@ -89,7 +89,6 @@ if (isModel!M && isQueryContext!Ctx) {
     private enum _crudSel   = buildSelectList!M();
     private enum _crudPk    = ormPkColName!M();
 
-    private enum _crudSelAllSQL  = "SELECT " ~ _crudSel ~ " FROM " ~ _crudTable;
     private enum _crudSelByIdSQL = "SELECT " ~ _crudSel ~ " FROM " ~ _crudTable ~
                                    " WHERE " ~ _crudPk ~ " = $1";
     private enum _crudExistsByIdSQL = "SELECT 1 FROM " ~ _crudTable ~
@@ -121,40 +120,17 @@ if (isModel!M && isQueryContext!Ctx) {
       *  3. Neither — no ORDER BY, undefined DB order.
       **/
     M[] findAll() {
-        import std.traits: hasUDA;
-        import peque.model: defaultOrder;
-
-        // Compute ORDER BY clause entirely at compile time.
-        // We inline the logic here because mixin template symbols are resolved
-        // at the instantiation site, so module-level helpers from repository.d
-        // would not be visible when the mixin is used in other modules.
-        enum _order = () {
-            // 1. Per-repo override: host struct has `enum string defaultOrder`
-            static if (__traits(hasMember, typeof(this), "defaultOrder") &&
-                       is(typeof(typeof(this).defaultOrder) == string))
-                return " ORDER BY " ~ typeof(this).defaultOrder;
-            // 2. Model-level @defaultOrder UDA
-            else static if (hasUDA!(M, defaultOrder)) {
-                static foreach (uda; __traits(getAttributes, M)) {{
-                    static if (is(uda) && is(uda == defaultOrder!fields, fields...)) {
-                        string result;
-                        bool first = true;
-                        static foreach (f; fields) {
-                            if (!first) result ~= ", ";
-                            result ~= f;
-                            first = false;
-                        }
-                        return " ORDER BY " ~ result;
-                    }
-                }}
-                return "";  // unreachable but satisfies return-type inference
-            }
-            // 3. No ordering
-            else
-                return "";
-        }();
-
-        return _ctx.exec(_crudSelAllSQL ~ _order).as!(M[]);
+        // Delegate to the QuerySet so ordering goes through one shared resolver
+        // (raw strings, F! field terms, and join paths all behave identically
+        // here and in query()). Precedence:
+        //  1. Per-repo override: host struct has `enum string defaultOrder`.
+        //  2. Model-level @defaultOrder UDA (applied by QuerySet automatically).
+        //  3. Neither — no ORDER BY, undefined DB order.
+        static if (__traits(hasMember, typeof(this), "defaultOrder") &&
+                   is(typeof(typeof(this).defaultOrder) == string))
+            return query().orderBy(typeof(this).defaultOrder).all();
+        else
+            return query().all();
     }
 
     /** Return true if a row with the given primary-key value exists.

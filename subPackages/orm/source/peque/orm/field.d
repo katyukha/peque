@@ -45,6 +45,7 @@ private import peque.converter: PGValue, convertToPG;
 private import peque.orm.predicate;
 private import peque.orm.subquery: SubQuery;
 private import peque.orm.sql: _fieldColName, ormTableName;
+private import peque.orm.ordering: Ordering, OrderKind;
 private import peque.hydration: camelToSnake;
 
 
@@ -212,6 +213,19 @@ struct FieldBuilder(string colExpr) {
     JsonFieldBuilder get(string key) const {
         return JsonFieldBuilder(colExpr, key);
     }
+
+    /** ORDER BY term for this column.
+      *
+      * `F!"name"` (or `F!(M,"name")`) used directly in `orderBy()` sorts
+      * ascending; `.desc` sorts descending.  Chain `.nullsFirst`/`.nullsLast`
+      * on the result for explicit NULLS placement.
+      * ---
+      * repo.query().orderBy(F!"createdAt".desc, F!"name")
+      * ---
+      **/
+    @property Ordering asc()  const { return Ordering(OrderKind.column, colExpr); }
+    /// ditto
+    @property Ordering desc() const { return Ordering(OrderKind.column, colExpr).desc; }
 }
 
 
@@ -358,8 +372,8 @@ template SF(string fieldName) {
   * All operator methods produce PathNode predicates that the QuerySet resolves
   * against the model type at SQL-build time, adding implicit LEFT JOINs.
   *
-  * Also supports `PathBuilder ~ string` for use in orderBy():
-  *   .orderBy(F!"partner.name" ~ " ASC")
+  * Also produces ORDER BY terms via `.asc`/`.desc` for use in orderBy():
+  *   .orderBy(F!"partner.name", F!"partner.rating".desc)
   **/
 struct PathBuilder(string path) {
     /// Equality
@@ -421,6 +435,28 @@ struct PathBuilder(string path) {
         return Predicate(PathNode(path, "IN_SUB", sub.params, sub.sql));
     }
 
-    /// For use in orderBy: F!"partner.name" ~ " ASC" → "partner.name ASC"
-    string opBinary(string op : "~")(string suffix) const { return path ~ suffix; }
+    /** ORDER BY term for this join path.
+      *
+      * The path is resolved against the model (adding LEFT JOINs as needed) at
+      * query-build time, then the direction is applied.
+      * ---
+      * repo.query().orderBy(F!"partner.name", F!"partner.rating".desc)
+      * ---
+      **/
+    @property Ordering asc()  const { return Ordering(OrderKind.path, path); }
+    /// ditto
+    @property Ordering desc() const { return Ordering(OrderKind.path, path).desc; }
+}
+
+/** Normalize an order spec to an `Ordering`.
+  *
+  * Accepts a raw SQL `string` (→ verbatim term), an `F` builder
+  * (`FieldBuilder`/`PathBuilder`, → ascending field term), or an existing
+  * `Ordering` (returned unchanged).  Used by `QuerySet.orderBy` and the
+  * `@defaultOrder` reader.
+  **/
+package(peque.orm) Ordering toOrdering(T)(T spec) {
+    static if (is(T == Ordering))    return spec;
+    else static if (is(T == string)) return Ordering(OrderKind.raw, spec);
+    else                             return spec.asc;   // FieldBuilder / PathBuilder
 }

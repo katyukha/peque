@@ -234,16 +234,30 @@ struct pgType {
   * UDA is present and neither the host repository nor an explicit QuerySet
   * ordering overrides it.
   *
-  * Single field (ascending implied):
+  * Each argument is normalized to an order term:
+  *  - a raw SQL `string` — emitted verbatim (you write the real column/SQL);
+  *  - an `F` builder (from `peque.orm`) — a field reference resolved against
+  *    the model (camelCase → column, implicit LEFT JOIN for join paths), with
+  *    optional `.desc` / `.nullsLast`.
+  *
+  * Raw SQL string (ascending implied):
   * ---
   * @defaultOrder!"name"
   * @model("res_partner")
   * struct Partner { ... }
   * ---
   *
-  * Multiple fields with explicit direction:
+  * Multiple raw fields with explicit direction:
   * ---
   * @defaultOrder!("date DESC", "id DESC")
+  * @model("sale_order")
+  * struct Order { ... }
+  * ---
+  *
+  * Typed field references (resolved like query().orderBy):
+  * ---
+  * @defaultOrder!(F!"createdAt".desc)              // → created_at DESC
+  * @defaultOrder!(F!"partner.name", F!"id".desc)   // join path + direction
   * @model("sale_order")
   * struct Order { ... }
   * ---

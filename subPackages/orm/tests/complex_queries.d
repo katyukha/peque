@@ -761,7 +761,7 @@ unittest {
     // Sort by partner name ascending — implicit join on partner
     auto results = f.orders().query()
         .where(F!"status"("confirmed"))
-        .orderBy(F!"partner.name" ~ " ASC")
+        .orderBy(F!"partner.name")
         .all();
 
     assert(results.length == 2);

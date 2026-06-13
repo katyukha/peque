@@ -39,7 +39,7 @@ module peque.orm.queryset;
 private import std.typecons: Nullable, nullable;
 private import std.conv: to;
 private import std.traits: hasUDA, FieldNameTuple, Fields;
-private import std.string: indexOf, strip, split;
+private import std.string: indexOf;
 private import std.exception: enforce;
 private import peque.exception: PequeException;
 
@@ -50,7 +50,8 @@ private import peque.query_context: isQueryContext;
 private import peque.orm.repository: isModel;
 private import peque.orm.sql;
 private import peque.orm.predicate;
-private import peque.orm.field: FieldBuilder, PathBuilder, F;
+private import peque.orm.field: FieldBuilder, PathBuilder, F, toOrdering;
+private import peque.orm.ordering: Ordering, OrderKind, OrderDir, OrderNulls;
 private import peque.orm.predicate: PathNode, LiteralNode, InSubqueryNode;
 private import peque.orm.subquery: SubQuery;
 private import std.sumtype: match;
@@ -60,25 +61,24 @@ private import std.sumtype: match;
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-// Extract the ORDER BY clause from @defaultOrder UDA on M, or "".
+// Extract the default ORDER BY terms from the @defaultOrder UDA on M, or [].
+// Each UDA argument is normalized via toOrdering: a string becomes a raw term,
+// an F builder / Ordering becomes a managed field term.
 private template _modelDefaultOrder(M) {
     static if (hasUDA!(M, defaultOrder)) {
-        private static string _compute() {
+        private static Ordering[] _compute() {
+            Ordering[] terms;
             static foreach (uda; __traits(getAttributes, M)) {{
                 static if (is(uda) && is(uda == defaultOrder!fields, fields...)) {
-                    string r;
-                    static foreach (f; fields) {
-                        if (r.length) r ~= ", ";
-                        r ~= f;
-                    }
-                    return r;
+                    static foreach (f; fields)
+                        terms ~= toOrdering(f);
                 }
             }}
-            return "";
+            return terms;
         }
-        enum string _modelDefaultOrder = _compute();
+        enum Ordering[] _modelDefaultOrder = _compute();
     } else {
-        enum string _modelDefaultOrder = "";
+        enum Ordering[] _modelDefaultOrder = [];
     }
 }
 
@@ -99,6 +99,49 @@ private template _m2oRelType(M, string memberName) {
             alias _m2oRelType = _U;
         }
     }
+}
+
+// Related model type for a relation-field name on M (whether @related or
+// @many2one), or `void` if relName is not a relation field. Used for
+// compile-time validation of join-path order specs.
+private template _pathRelType(M, string relName) {
+    private template _scan(size_t i) {
+        static if (i >= FieldNameTuple!M.length)
+            alias _scan = void;
+        else {
+            private enum  _mn  = FieldNameTuple!M[i];
+            private alias _Mem = __traits(getMember, M, _mn);
+            static if (_mn == relName && hasUDA!(_Mem, related))
+                alias _scan = _innerRelType!(M, _mn);
+            else static if (_mn == relName && hasMany2OneUDA!_Mem)
+                alias _scan = _m2oRelType!(M, _mn);
+            else
+                alias _scan = _scan!(i + 1);
+        }
+    }
+    alias _pathRelType = _scan!0;
+}
+
+// FK column on M used to join to a relation field's target table: a @related
+// field resolves to its backing FK column; a @many2one field is itself the FK
+// column. Returns "" if relName is not a relation field. Single source of truth
+// for the FK-column half of join-path resolution (paired with _pathRelType).
+private template _pathFkCol(M, string relName) {
+    private template _scan(size_t i) {
+        static if (i >= FieldNameTuple!M.length)
+            enum string _scan = "";
+        else {
+            private enum  _mn  = FieldNameTuple!M[i];
+            private alias _Mem = __traits(getMember, M, _mn);
+            static if (_mn == relName && hasUDA!(_Mem, related))
+                enum string _scan = _fkColForRelatedField!(M, _mn, _innerRelType!(M, _mn))();
+            else static if (_mn == relName && hasMany2OneUDA!_Mem)
+                enum string _scan = _colName!(_Mem, _mn);
+            else
+                enum string _scan = _scan!(i + 1);
+        }
+    }
+    enum string _pathFkCol = _scan!0;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,33 +319,20 @@ private string _resolveOneLevel(M, JoinFields...)(
         }
     }
 
-    // 3 — create a new filter join
+    // 3 — create a new filter join (via @related or @many2one — same shape,
+    //     differing only in target type / FK column, both from the helpers)
     static foreach (memberName; FieldNameTuple!M) {{
         alias Mem = __traits(getMember, M, memberName);
-        // 3a — via @related field
-        static if (hasUDA!(Mem, related)) {
+        static if (hasUDA!(Mem, related) || hasMany2OneUDA!Mem) {
             if (memberName == relName && !result.length) {
-                alias RelType = _innerRelType!(M, memberName);
-                enum relTable = ormTableName!RelType;
-                enum relPkCol = ormPkColName!RelType();
-                enum fkCol    = _fkColForRelatedField!(M, memberName, RelType)();
+                alias RelType = _pathRelType!(M, memberName);
+                enum  fkCol    = _pathFkCol!(M, memberName);
+                enum  relTable = ormTableName!RelType;
+                enum  relPkCol = ormPkColName!RelType();
                 string jAlias = "fj" ~ to!string(idx);
                 fjoins ~= _FilterJoin(relName, jAlias, relTable, relPkCol, "_m", fkCol);
                 idx++;
                 result = jAlias ~ "." ~ _fieldColNameRuntime!RelType(fieldName);
-            }
-        }
-        // 3b — via direct @many2one FK field (field name is the path key)
-        static if (hasMany2OneUDA!Mem) {
-            if (memberName == relName && !result.length) {
-                alias RelTypeM2O = _m2oRelType!(M, memberName);
-                enum relTableM2O = ormTableName!RelTypeM2O;
-                enum relPkColM2O = ormPkColName!RelTypeM2O();
-                enum fkColM2O    = _colName!(Mem, memberName);
-                string jAliasM2O = "fj" ~ to!string(idx);
-                fjoins ~= _FilterJoin(relName, jAliasM2O, relTableM2O, relPkColM2O, "_m", fkColM2O);
-                idx++;
-                result = jAliasM2O ~ "." ~ _fieldColNameRuntime!RelTypeM2O(fieldName);
             }
         }
     }}
@@ -317,43 +347,41 @@ private string _resolveTwoLevel(M, JoinFields...)(
     string rel1, string rel2, string fieldName,
     ref _FilterJoin[] fjoins, ref int idx)
 {
-    import peque.model: related;
     string result;
 
-    // Helper: given a known RelType1 and a1, resolve level-2
-    // Defined as a mixin-style macro via a lambda to avoid code duplication.
+    // Level-1: find rel1 on M (via @related or @many2one — unified through the
+    // _pathRelType / _pathFkCol helpers), reusing a hydration (JoinFields) or
+    // existing filter join, else creating one.
     static foreach (m1; FieldNameTuple!M) {{
         alias Mem1 = __traits(getMember, M, m1);
-
-        // Level-1 via @related
-        static if (hasUDA!(Mem1, related)) {
+        static if (hasUDA!(Mem1, related) || hasMany2OneUDA!Mem1) {
             if (m1 == rel1 && !result.length) {
-                alias RelType1 = _innerRelType!(M, m1);
-                enum t1  = ormTableName!RelType1;
-                enum pk1 = ormPkColName!RelType1();
-                enum fk1 = _fkColForRelatedField!(M, m1, RelType1)();
+                alias RelType1 = _pathRelType!(M, m1);
+                enum  t1  = ormTableName!RelType1;
+                enum  pk1 = ormPkColName!RelType1();
+                enum  fk1 = _pathFkCol!(M, m1);
 
                 string a1;
                 static foreach (jfIdx, jf; JoinFields) {
                     if (jf == rel1 && !a1.length) a1 = "j" ~ to!string(jfIdx);
                 }
-                if (!a1.length) {
+                if (!a1.length)
                     foreach (ref fj; fjoins) if (fj.path == rel1) { a1 = fj.alias_; break; }
-                }
                 if (!a1.length) {
                     a1 = "fj" ~ to!string(idx);
                     fjoins ~= _FilterJoin(rel1, a1, t1, pk1, "_m", fk1);
                     idx++;
                 }
 
+                // Level-2: find rel2 on RelType1, chaining off a1.
                 static foreach (m2; FieldNameTuple!RelType1) {{
                     alias Mem2 = __traits(getMember, RelType1, m2);
-                    static if (hasUDA!(Mem2, related)) {
+                    static if (hasUDA!(Mem2, related) || hasMany2OneUDA!Mem2) {
                         if (m2 == rel2 && !result.length) {
-                            alias RelType2 = _innerRelType!(RelType1, m2);
-                            enum t2   = ormTableName!RelType2;
-                            enum pk2  = ormPkColName!RelType2();
-                            enum fk2  = _fkColForRelatedField!(RelType1, m2, RelType2)();
+                            alias RelType2 = _pathRelType!(RelType1, m2);
+                            enum  t2  = ormTableName!RelType2;
+                            enum  pk2 = ormPkColName!RelType2();
+                            enum  fk2 = _pathFkCol!(RelType1, m2);
                             string path2 = rel1 ~ "." ~ rel2;
                             string a2;
                             foreach (ref fj; fjoins) if (fj.path == path2) { a2 = fj.alias_; break; }
@@ -363,81 +391,6 @@ private string _resolveTwoLevel(M, JoinFields...)(
                                 idx++;
                             }
                             result = a2 ~ "." ~ _fieldColNameRuntime!RelType2(fieldName);
-                        }
-                    }
-                    static if (hasMany2OneUDA!Mem2) {
-                        if (m2 == rel2 && !result.length) {
-                            alias RelType2M = _m2oRelType!(RelType1, m2);
-                            enum t2m   = ormTableName!RelType2M;
-                            enum pk2m  = ormPkColName!RelType2M();
-                            enum fk2m  = _colName!(Mem2, m2);
-                            string path2m = rel1 ~ "." ~ rel2;
-                            string a2m;
-                            foreach (ref fj; fjoins) if (fj.path == path2m) { a2m = fj.alias_; break; }
-                            if (!a2m.length) {
-                                a2m = "fj" ~ to!string(idx);
-                                fjoins ~= _FilterJoin(path2m, a2m, t2m, pk2m, a1, fk2m);
-                                idx++;
-                            }
-                            result = a2m ~ "." ~ _fieldColNameRuntime!RelType2M(fieldName);
-                        }
-                    }
-                }}
-            }
-        }
-
-        // Level-1 via direct @many2one FK field
-        static if (hasMany2OneUDA!Mem1) {
-            if (m1 == rel1 && !result.length) {
-                alias RelType1M = _m2oRelType!(M, m1);
-                enum t1m  = ormTableName!RelType1M;
-                enum pk1m = ormPkColName!RelType1M();
-                enum fk1m = _colName!(Mem1, m1);
-
-                string a1m;
-                if (!a1m.length) {
-                    foreach (ref fj; fjoins) if (fj.path == rel1) { a1m = fj.alias_; break; }
-                }
-                if (!a1m.length) {
-                    a1m = "fj" ~ to!string(idx);
-                    fjoins ~= _FilterJoin(rel1, a1m, t1m, pk1m, "_m", fk1m);
-                    idx++;
-                }
-
-                static foreach (m2; FieldNameTuple!RelType1M) {{
-                    alias Mem2M = __traits(getMember, RelType1M, m2);
-                    static if (hasUDA!(Mem2M, related)) {
-                        if (m2 == rel2 && !result.length) {
-                            alias RelType2 = _innerRelType!(RelType1M, m2);
-                            enum t2r   = ormTableName!RelType2;
-                            enum pk2r  = ormPkColName!RelType2();
-                            enum fk2r  = _fkColForRelatedField!(RelType1M, m2, RelType2)();
-                            string path2r = rel1 ~ "." ~ rel2;
-                            string a2r;
-                            foreach (ref fj; fjoins) if (fj.path == path2r) { a2r = fj.alias_; break; }
-                            if (!a2r.length) {
-                                a2r = "fj" ~ to!string(idx);
-                                fjoins ~= _FilterJoin(path2r, a2r, t2r, pk2r, a1m, fk2r);
-                                idx++;
-                            }
-                            result = a2r ~ "." ~ _fieldColNameRuntime!RelType2(fieldName);
-                        }
-                    }
-                    static if (hasMany2OneUDA!Mem2M) {
-                        if (m2 == rel2 && !result.length) {
-                            alias RelType2M = _m2oRelType!(RelType1M, m2);
-                            enum t2mm   = ormTableName!RelType2M;
-                            enum pk2mm  = ormPkColName!RelType2M();
-                            enum fk2mm  = _colName!(Mem2M, m2);
-                            string path2mm = rel1 ~ "." ~ rel2;
-                            string a2mm;
-                            foreach (ref fj; fjoins) if (fj.path == path2mm) { a2mm = fj.alias_; break; }
-                            if (!a2mm.length) {
-                                a2mm = "fj" ~ to!string(idx);
-                                fjoins ~= _FilterJoin(path2mm, a2mm, t2mm, pk2mm, a1m, fk2mm);
-                                idx++;
-                            }
-                            result = a2mm ~ "." ~ _fieldColNameRuntime!RelType2M(fieldName);
                         }
                     }
                 }}
@@ -510,30 +463,101 @@ private Predicate _resolvePred(M, JoinFields...)(
     );
 }
 
-// Parse an orderBy clause and resolve any join-path tokens (e.g. "partner.name ASC").
-// Uses the same fjoins/idx as where-predicate resolution so joins are deduplicated.
-private string _resolveOrderClause(M, JoinFields...)(
-    string clause, ref _FilterJoin[] fjoins, ref int idx)
+// Build the " DESC"/" NULLS …" suffix for a column/path order term.
+private string _orderSuffix(in Ordering ord) {
+    string s;
+    if (ord.dir == OrderDir.desc) s ~= " DESC";
+    final switch (ord.nulls) {
+        case OrderNulls.unspecified: break;
+        case OrderNulls.first: s ~= " NULLS FIRST"; break;
+        case OrderNulls.last:  s ~= " NULLS LAST";  break;
+    }
+    return s;
+}
+
+// Resolve a single Ordering term to a SQL fragment, registering join(s) for
+// `path` terms via the same fjoins/idx used by where-predicate resolution.
+private string _resolveOrdering(M, JoinFields...)(
+    in Ordering ord, ref _FilterJoin[] fjoins, ref int idx)
 {
-    if (!clause.length) return clause;
+    final switch (ord.kind) {
+        case OrderKind.raw:    return ord.expr;
+        case OrderKind.column: return ord.expr ~ _orderSuffix(ord);
+        case OrderKind.path:
+            return _resolvePathToCol!(M, JoinFields)(ord.expr, fjoins, idx) ~ _orderSuffix(ord);
+    }
+}
+
+// Resolve a list of Ordering terms into a comma-separated ORDER BY body.
+// Empty/blank fragments are dropped so a single raw "" term suppresses ordering.
+private string _resolveOrderTerms(M, JoinFields...)(
+    in Ordering[] terms, ref _FilterJoin[] fjoins, ref int idx)
+{
     string result;
-    foreach (i, part; clause.split(",")) {
-        if (i > 0) result ~= ", ";
-        string trimmed = part.strip;
-        auto spIdx = indexOf(trimmed, ' ');
-        string fieldPart = spIdx >= 0 ? trimmed[0 .. spIdx]  : trimmed;
-        string suffix    = spIdx >= 0 ? trimmed[spIdx .. $]   : "";
-        // Resolve if it looks like a join path (contains dot, first segment is a @related field)
-        if (indexOf(fieldPart, '.') >= 0) {
-            auto dotAt = indexOf(fieldPart, '.');
-            if (_isKnownRelField!M(fieldPart[0 .. dotAt])) {
-                result ~= _resolvePathToCol!(M, JoinFields)(fieldPart, fjoins, idx) ~ suffix;
-                continue;
-            }
-        }
-        result ~= trimmed;
+    foreach (ref ord; terms) {
+        auto frag = _resolveOrdering!(M, JoinFields)(ord, fjoins, idx);
+        if (!frag.length) continue;
+        if (result.length) result ~= ", ";
+        result ~= frag;
     }
     return result;
+}
+
+// Compile-time-validated order spec → Ordering. A leading '-' means descending.
+// Field references (not raw SQL — use orderBy(string) for raw), validated against
+// the model end to end: plain names against M's columns; join paths validate every
+// relation segment and the final leaf column on the target model.
+private Ordering _ctOrderSpec(M, string spec)() {
+    static assert(spec.length > 0, "empty orderBy! spec on " ~ M.stringof);
+    enum bool   _desc = spec[0] == '-';
+    enum string _name = _desc ? spec[1 .. $] : spec;
+    enum OrderDir _dir = _desc ? OrderDir.desc : OrderDir.asc;
+    static assert(_name.length > 0,
+        "orderBy!(\"" ~ spec ~ "\") has no field name after '-'");
+    static assert(indexOf(_name, ' ') < 0,
+        "orderBy!(\"" ~ spec ~ "\") must be a bare field name or join path (no spaces"
+        ~ " or SQL). Use orderBy(\"...\") for raw SQL.");
+    static if (indexOf(_name, '.') >= 0) {
+        static assert(_assertOrderPath!(M, spec, _name));
+        return Ordering(OrderKind.path, _name, _dir);
+    } else {
+        enum _col = _fieldColName!(M, _name)();
+        static assert(_col.length > 0,
+            "'" ~ _name ~ "' in orderBy!(\"" ~ spec ~ "\") is not a DB column field on "
+            ~ M.stringof);
+        return Ordering(OrderKind.column, "_m." ~ _col, _dir);
+    }
+}
+
+// Validate a 1- or 2-level join path (e.g. "partner.name" / "partner.company.rate")
+// against M: each relation segment must be a @related/@many2one field, and the leaf
+// must be a DB column on the target model. `spec` is the original token (with any
+// leading '-') used only for the diagnostic message.
+private template _assertOrderPath(M, string spec, string path) {
+    enum   _d1   = indexOf(path, '.');
+    enum   _rel1 = path[0 .. _d1];
+    enum   _rest = path[_d1 + 1 .. $];
+    static assert(_isKnownRelField!M(_rel1),
+        "'" ~ _rel1 ~ "' in orderBy!(\"" ~ spec ~ "\") is not a @related/@many2one field on "
+        ~ M.stringof);
+    alias _Rel1 = _pathRelType!(M, _rel1);
+    enum   _d2 = indexOf(_rest, '.');
+    static if (_d2 < 0) {
+        static assert(_fieldColName!(_Rel1, _rest)().length > 0,
+            "'" ~ _rest ~ "' in orderBy!(\"" ~ spec ~ "\") is not a DB column field on "
+            ~ _Rel1.stringof);
+    } else {
+        enum _rel2 = _rest[0 .. _d2];
+        enum _leaf = _rest[_d2 + 1 .. $];
+        static assert(_isKnownRelField!_Rel1(_rel2),
+            "'" ~ _rel2 ~ "' in orderBy!(\"" ~ spec ~ "\") is not a @related/@many2one field on "
+            ~ _Rel1.stringof);
+        alias _Rel2 = _pathRelType!(_Rel1, _rel2);
+        static assert(_fieldColName!(_Rel2, _leaf)().length > 0,
+            "'" ~ _leaf ~ "' in orderBy!(\"" ~ spec ~ "\") is not a DB column field on "
+            ~ _Rel2.stringof);
+    }
+    enum bool _assertOrderPath = true;
 }
 
 // Build JOIN SQL fragment from a _FilterJoin[].
@@ -632,7 +656,7 @@ if (isModel!M && isQueryContext!Ctx) {
     private Ctx*         _ctx;
     private Predicate[]  _wheres;
     private _QSSet[]     _sets;
-    private string       _orderByClause;
+    private Ordering[]   _orderByTerms;
     private long         _limitVal  = -1;
     private long         _offsetVal = -1;
     private PrefetchFn[] _prefetches;
@@ -728,18 +752,71 @@ if (isModel!M && isQueryContext!Ctx) {
         return where(Predicate(RawNode(sqlFrag, pgParams)));
     }
 
-    /** Override the ORDER BY clause.
+    // There are two `orderBy` overloads, disambiguated by HOW they are called,
+    // not by a template constraint:
+    //  - the RUNTIME form below, `orderBy(values…)`, takes ordinary call
+    //    arguments and matches `orderBy(F!"x".desc)`, `orderBy("raw")`, etc.
+    //  - the COMPILE-TIME form, `orderBy!("field"…)`, takes explicit template
+    //    value arguments and no runtime arguments.
+    // `orderBy!("x")` cannot bind the runtime overload (a string value can't be
+    // used where a type parameter is expected), and `orderBy("x")` cannot bind
+    // the compile-time overload (it has no runtime parameter to receive the
+    // argument), so each call form resolves to exactly one overload.
+
+    /** Override the ORDER BY clause with one or more terms.
       *
-      * If never called, the model's @defaultOrder UDA is used (if present).
-      * Pass "" to suppress all ordering.
+      * Each argument is one of:
+      *  - a raw SQL `string` — passed through verbatim (escape hatch);
+      *  - an `F` builder — `F!"field"` / `F!"partner.name"` (ascending), or
+      *    `.desc`, optionally chained `.nullsFirst`/`.nullsLast`;
+      *  - an `Ordering` value.
       *
-      * Security: clause is embedded in the query verbatim — never pass
-      * user-controlled input here.  Use a compile-time constant or a
-      * whitelist-validated string.
+      * Field references via `F` are resolved against the model (camelCase →
+      * column, implicit LEFT JOINs for join paths). Raw strings are NOT parsed
+      * or resolved — they are emitted as-is.
+      *
+      * Pass a single `""` to suppress all ordering (overrides @defaultOrder).
+      *
+      * Security: a raw `string` is embedded verbatim — never pass
+      * user-controlled input. For compile-time-validated field ordering see the
+      * `orderBy!("field", "-other")` form below.
+      *
+      * ---
+      * repo.query().orderBy(F!"createdAt".desc, F!"name")
+      * repo.query().orderBy("priority DESC NULLS LAST")        // raw
+      * repo.query().orderBy(F!"partner.name")                  // join path
+      * ---
       **/
-    QuerySet!(M, Ctx, JoinFields) orderBy(string clause) {
+    QuerySet!(M, Ctx, JoinFields) orderBy(Specs...)(Specs specs)
+    if (Specs.length >= 1) {
         auto qs = this;
-        qs._orderByClause = clause;
+        qs._orderByTerms = [];
+        static foreach (i; 0 .. Specs.length)
+            qs._orderByTerms ~= toOrdering(specs[i]);
+        return qs;
+    }
+
+    /** Compile-time-validated ORDER BY by field name(s).
+      *
+      * Each spec is a model field name (or join path), validated against M at
+      * compile time. A leading `-` means descending (Django-style):
+      * ---
+      * repo.query().orderBy!("createdAt")          // ASC, validated
+      * repo.query().orderBy!("-createdAt", "name")  // createdAt DESC, name ASC
+      * repo.query().orderBy!("partner.name")        // join path, fully validated
+      * ---
+      * For raw SQL or NULLS placement, use the runtime `orderBy(...)` form.
+      **/
+    QuerySet!(M, Ctx, JoinFields) orderBy(specs...)()
+    if (specs.length >= 1) {
+        static foreach (s; specs)
+            static assert(is(typeof(s) == string),
+                "orderBy!(...) takes field-name string literals (e.g. \"-createdAt\")."
+                ~ " For F! terms or Ordering values use the runtime orderBy(...) form.");
+        auto qs = this;
+        qs._orderByTerms = [];
+        static foreach (s; specs)
+            qs._orderByTerms ~= _ctOrderSpec!(M, s);
         return qs;
     }
 
@@ -819,7 +896,7 @@ if (isModel!M && isQueryContext!Ctx) {
         qs2._ctx            = _ctx;
         qs2._wheres         = _wheres;
         qs2._sets           = _sets;
-        qs2._orderByClause  = _orderByClause;
+        qs2._orderByTerms   = _orderByTerms;
         qs2._limitVal       = _limitVal;
         qs2._offsetVal      = _offsetVal;
         qs2._prefetches     = _prefetches;
@@ -892,6 +969,16 @@ if (isModel!M && isQueryContext!Ctx) {
         _buildWhereFromArray(_wheres, whereSQL, params, startOffset);
     }
 
+    // Resolve the effective ORDER BY body — explicit terms if set, otherwise the
+    // model's @defaultOrder — registering any LEFT JOIN a join-path term needs
+    // into fjoins/idx. Returns "" when there is nothing to order by. Shared by
+    // all() and select!DTO so the two paths cannot diverge.
+    private string _resolveOrderBySql(ref _FilterJoin[] fjoins, ref int idx) {
+        enum Ordering[] _defTerms = _modelDefaultOrder!M;
+        Ordering[] terms = _orderByTerms.length ? _orderByTerms : _defTerms;
+        return _resolveOrderTerms!(M, JoinFields)(terms, fjoins, idx);
+    }
+
     // -----------------------------------------------------------------------
     // Terminal methods
     // -----------------------------------------------------------------------
@@ -909,10 +996,8 @@ if (isModel!M && isQueryContext!Ctx) {
         foreach (ref p; _wheres)
             resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
 
-        // Resolve orderBy clause (may add more filter joins)
-        enum _defOrder = _modelDefaultOrder!M;
-        string rawOrder = _orderByClause.length ? _orderByClause : _defOrder;
-        string orderBySql = _resolveOrderClause!(M, JoinFields)(rawOrder, fjoins, fjIdx);
+        // Resolve orderBy terms (may add more filter joins)
+        string orderBySql = _resolveOrderBySql(fjoins, fjIdx);
 
         string whereSQL;
         PGValue[] params;
@@ -1200,6 +1285,10 @@ if (isModel!M && isQueryContext!Ctx) {
         foreach (ref p; _wheres)
             resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
 
+        // Resolve orderBy terms now — before filter joins are emitted below —
+        // so any join a `path` term needs is included in the FROM clause.
+        string orderBySql = _resolveOrderBySql(fjoins, fjIdx);
+
         // Compute implicit DTO-driven relation names at compile time
         enum neededRelNames = _neededRelsCTFE!(M, DTO)();
         enum nRels = neededRelNames.length;
@@ -1288,9 +1377,7 @@ if (isModel!M && isQueryContext!Ctx) {
 
         string sql = "SELECT " ~ selList ~ fromClause ~ whereSQL;
 
-        enum _defOrder = _modelDefaultOrder!M;
-        string rawOrder = _orderByClause.length ? _orderByClause : _defOrder;
-        if (rawOrder.length) sql ~= " ORDER BY " ~ rawOrder;
+        if (orderBySql.length) sql ~= " ORDER BY " ~ orderBySql;
 
         if (_limitVal  >= 0) sql ~= " LIMIT "  ~ to!string(_limitVal);
         if (_offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_offsetVal);
