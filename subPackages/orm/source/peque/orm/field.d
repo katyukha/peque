@@ -41,12 +41,20 @@
   **/
 module peque.orm.field;
 
+private import std.traits: isNumeric, isIntegral;
+private import std.typecons: Nullable;
+
 private import peque.converter: PGValue, convertToPG;
 private import peque.orm.predicate;
 private import peque.orm.subquery: SubQuery;
 private import peque.orm.sql: _fieldColName, ormTableName;
 private import peque.orm.ordering: Ordering, OrderKind;
 private import peque.hydration: camelToSnake;
+
+
+/// true if T is a FieldBuilder instantiation — used to keep the generic
+/// value overloads (opCall/ne) from competing with the column-to-column ones.
+private enum _isFieldBuilderType(T) = is(T == FieldBuilder!(e, FT), string e, FT);
 
 
 // ---------------------------------------------------------------------------
@@ -120,10 +128,16 @@ struct JsonFieldBuilder {
   *
   * colExpr is the resolved SQL expression (e.g. "_m.status_col").
   * All runtime data is in the Predicate nodes produced by the operator methods.
+  *
+  * FieldT is the D type of the model field (set by the typed F!(M, "field")
+  * form; void for the type-free F!"field" form).  It drives the result-type
+  * inference of the aggregate builders (.sum/.avg/.min/.max/.count), which are
+  * therefore only available on typed field references.
   **/
-struct FieldBuilder(string colExpr) {
+struct FieldBuilder(string colExpr, FieldT = void) {
     /// Equality: F!(M, "field")(val)
-    Predicate opCall(V)(V val) const {
+    Predicate opCall(V)(V val) const
+    if (!_isFieldBuilderType!V) {
         import peque.converter: convertToPG;
         return Predicate(EqNode(colExpr, convertToPG(val)));
     }
@@ -133,7 +147,7 @@ struct FieldBuilder(string colExpr) {
       * Generates raw SQL `_sq.fk_col = _m.pk_col` with no bound parameters.
       * Used inside exists!() to correlate inner and outer tables.
       **/
-    Predicate opCall(string otherExpr)(FieldBuilder!otherExpr) const {
+    Predicate opCall(string otherExpr, OFT)(FieldBuilder!(otherExpr, OFT)) const {
         return Predicate(RawNode(colExpr ~ " = " ~ otherExpr, []));
     }
 
@@ -146,7 +160,10 @@ struct FieldBuilder(string colExpr) {
     /// ditto
     Predicate lte(V)(V val) const { return Predicate(OpNode(colExpr, "<=", convertToPG(val))); }
     /// ditto
-    Predicate ne(V)(V val)  const { return Predicate(OpNode(colExpr, "!=", convertToPG(val))); }
+    Predicate ne(V)(V val)  const
+    if (!_isFieldBuilderType!V) {
+        return Predicate(OpNode(colExpr, "!=", convertToPG(val)));
+    }
 
     /// LIKE: F!(M, "field").like("%pattern%")
     Predicate like(string pattern) const {
@@ -179,7 +196,7 @@ struct FieldBuilder(string colExpr) {
     }
 
     /// Column-to-column !=: F!(M, "a").ne(F!(M, "b")) or F!"a".ne(F!"b")
-    Predicate ne(string otherExpr)(FieldBuilder!otherExpr) const {
+    Predicate ne(string otherExpr, OFT)(FieldBuilder!(otherExpr, OFT)) const {
         return Predicate(RawNode(colExpr ~ " != " ~ otherExpr, []));
     }
 
@@ -226,7 +243,123 @@ struct FieldBuilder(string colExpr) {
     @property Ordering asc()  const { return Ordering(OrderKind.column, colExpr); }
     /// ditto
     @property Ordering desc() const { return Ordering(OrderKind.column, colExpr).desc; }
+
+    // -----------------------------------------------------------------------
+    // Aggregate builders — typed F!(M, "field") form only
+    // -----------------------------------------------------------------------
+
+    // The field's D type with Nullable stripped; void on type-free builders.
+    static if (is(FieldT == Nullable!U, U))
+        private alias _BaseT = U;
+    else
+        private alias _BaseT = FieldT;
+
+    // The aggregate properties must be plain (non-template) properties: a
+    // member-template property used in template-argument position — e.g.
+    // aggregate!(F!(M, "amount").sum) — binds as a symbol instead of being
+    // evaluated to a value.  Availability is therefore gated by
+    // declaration-level static ifs: '.sum' on a string field or on the
+    // type-free F!"field" form is "no such property" at compile time.
+    static if (!is(FieldT == void)) {
+
+        static if (isNumeric!_BaseT) {
+            /** SUM(col) aggregate.
+              *
+              * Result type: long for integral fields, double for floating
+              * fields.  Use in a scalar aggregate!() terminal, a HAVING
+              * predicate, or orderBy():
+              * ---
+              * repo.query().aggregate!(F!(Invoice, "amount").sum)  // Nullable!double
+              * .having(F!(Invoice, "amount").sum.gt(100.0))
+              * .orderBy(F!(Invoice, "amount").sum.desc)
+              * ---
+              **/
+            @property auto sum() const {
+                static if (isIntegral!_BaseT)
+                    return AggBuilder!("SUM(" ~ colExpr ~ ")", long).init;
+                else
+                    return AggBuilder!("SUM(" ~ colExpr ~ ")", double).init;
+            }
+
+            /** AVG(col) aggregate.  Result type is always double —
+              * PostgreSQL returns NUMERIC text (e.g. "500.0000000000000000"),
+              * which never parses as an integral type.
+              **/
+            @property auto avg() const {
+                return AggBuilder!("AVG(" ~ colExpr ~ ")", double).init;
+            }
+        }
+
+        /** MIN(col) aggregate.  Result type is the field's own D type, so it
+          * also works for strings, dates and timestamps.
+          **/
+        @property auto min() const {
+            return AggBuilder!("MIN(" ~ colExpr ~ ")", _BaseT).init;
+        }
+
+        /** MAX(col) aggregate.  Result type is the field's own D type. **/
+        @property auto max() const {
+            return AggBuilder!("MAX(" ~ colExpr ~ ")", _BaseT).init;
+        }
+
+        /** COUNT(col) aggregate — counts rows where col is not NULL.
+          * Result type: long.  (For COUNT(*) use QuerySet.count().)
+          **/
+        @property auto count() const {
+            return AggBuilder!("COUNT(" ~ colExpr ~ ")", long).init;
+        }
+    }
 }
+
+
+/** Compile-time aggregate expression builder — produced by the FieldBuilder
+  * .sum/.avg/.min/.max/.count properties.  Zero runtime state.
+  *
+  *   sqlExpr — the aggregate SQL expression, e.g. "SUM(_m.amount)"
+  *   DType   — the D result type (drives the aggregate!() terminal's
+  *             Nullable!DType return type)
+  *
+  * Consumed by:
+  *  - QuerySet.aggregate!(agg)          — scalar aggregate terminal
+  *  - GroupedQuerySet.annotate!(name, agg) — grouped SELECT column
+  *  - having(...) predicates via the comparison operators below
+  *  - orderBy(...) via .asc/.desc
+  **/
+struct AggBuilder(string sqlExpr, DType) {
+    /// The aggregate SQL expression — used verbatim by QuerySet SQL assembly.
+    enum expr = sqlExpr;
+    /// The D result type of the aggregate.
+    alias ResultType = DType;
+
+    /// Equality HAVING predicate: agg(val) → e.g. HAVING SUM(_m.amount) = $N
+    Predicate opCall(V)(V val) const {
+        return Predicate(EqNode(sqlExpr, convertToPG(val)));
+    }
+
+    /// Comparisons: .gt(v) > v, .gte(v) >= v, .lt(v) < v, .lte(v) <= v, .ne(v) != v
+    Predicate gt(V)(V val)  const { return Predicate(OpNode(sqlExpr, ">",  convertToPG(val))); }
+    /// ditto
+    Predicate gte(V)(V val) const { return Predicate(OpNode(sqlExpr, ">=", convertToPG(val))); }
+    /// ditto
+    Predicate lt(V)(V val)  const { return Predicate(OpNode(sqlExpr, "<",  convertToPG(val))); }
+    /// ditto
+    Predicate lte(V)(V val) const { return Predicate(OpNode(sqlExpr, "<=", convertToPG(val))); }
+    /// ditto
+    Predicate ne(V)(V val)  const { return Predicate(OpNode(sqlExpr, "!=", convertToPG(val))); }
+
+    /** ORDER BY term for this aggregate expression (emitted verbatim):
+      * ---
+      * .orderBy(F!(Invoice, "amount").sum.desc)   // ORDER BY SUM(_m.amount) DESC
+      * ---
+      **/
+    @property Ordering asc()  const { return Ordering(OrderKind.column, sqlExpr); }
+    /// ditto
+    @property Ordering desc() const { return Ordering(OrderKind.column, sqlExpr).desc; }
+}
+
+
+/// true if T is an AggBuilder instantiation.
+enum isAggBuilder(T) = is(T == AggBuilder!(e, D), string e, D);
 
 
 /** Build a compile-time field reference for model M, field fieldName.
@@ -242,7 +375,8 @@ template F(M, string fieldName) {
     static assert(_col.length > 0,
         "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof ~
         " (must have @field, @primaryKey, or @many2one UDA)");
-    enum FieldBuilder!("_m." ~ _col) F = FieldBuilder!("_m." ~ _col).init;
+    private alias _FT = typeof(__traits(getMember, M, fieldName));
+    enum FieldBuilder!("_m." ~ _col, _FT) F = FieldBuilder!("_m." ~ _col, _FT).init;
 }
 
 
@@ -266,7 +400,8 @@ template SF(M, string fieldName) {
     static assert(_col.length > 0,
         "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof ~
         " (must have @field, @primaryKey, or @many2one UDA)");
-    enum FieldBuilder!("_sq." ~ _col) SF = FieldBuilder!("_sq." ~ _col).init;
+    private alias _FT = typeof(__traits(getMember, M, fieldName));
+    enum FieldBuilder!("_sq." ~ _col, _FT) SF = FieldBuilder!("_sq." ~ _col, _FT).init;
 }
 
 

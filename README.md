@@ -346,6 +346,46 @@ PartnerSummary[] summaries = repo.query()
     .select!PartnerSummary();
 ```
 
+### Aggregation
+
+Scalar aggregates run through `aggregate!()` with a typed field builder.
+The result is `Nullable` — `SUM`/`AVG`/`MIN`/`MAX` over zero rows is SQL `NULL`:
+
+```d
+// SELECT SUM(_m.amount) FROM invoices _m WHERE (_m.status = $1)
+Nullable!double total = repo.query()
+    .where!"status"("open")
+    .aggregate!(F!(Invoice, "amount").sum);
+
+auto avgQty  = repo.query().aggregate!(F!(Invoice, "qty").avg);      // Nullable!double
+auto maxDate = repo.query().aggregate!(F!(Invoice, "createdAt").max); // field's own type
+```
+
+Grouped reports use `groupBy!` + `annotate!` + `select!DTO`. Every DTO member
+must be a group key or an annotation alias — checked at compile time, so
+PostgreSQL's "column must appear in the GROUP BY clause" is a build error, not
+a runtime one:
+
+```d
+@autoHydrate
+struct OrderTotalsDTO { int orderId; long invoiceCount; double totalAmount; }
+
+auto totals = invoiceRepo.query()
+    .where!"status"("open")
+    .groupBy!"orderId"
+    .annotate!("invoiceCount", F!(Invoice, "id").count)
+    .annotate!("totalAmount",  F!(Invoice, "amount").sum)
+    .having(F!(Invoice, "amount").sum.gt(100.0))       // filter groups
+    .orderBy(F!(Invoice, "amount").sum.desc)           // order by aggregate
+    .select!OrderTotalsDTO();
+
+// Raw-SQL annotation escape hatch (trusted, compile-time strings only):
+.annotate!("amountSpread", "MAX(_m.amount) - MIN(_m.amount)")
+```
+
+Group keys are main-table columns; aggregating across a one2many is done by
+querying from the "many" side (as above: invoices grouped by `orderId`).
+
 ### Type-safe predicates
 
 `F!(Model, "field")` builds a compile-time field reference. Unknown field names

@@ -795,10 +795,19 @@ unittest {
 // ---------------------------------------------------------------------------
 // 14. Aggregate reporting — total invoice amount per order.
 //
-//     Native aggregation (GROUP BY / SUM / COUNT) is not yet supported by
-//     the ORM.  This test documents the current workaround via whereRaw and
-//     serves as a placeholder for the feature gap.
+//     Native aggregation (groupBy! / annotate! / having / select!DTO) covers
+//     the per-group report when querying from the "many" side (invoices
+//     grouped by order_id).  Projecting columns of the "one" side (the order
+//     name) into the same grouped query still needs joinMany!, which does not
+//     exist yet — that flavor keeps the raw-SQL workaround below.
 // ---------------------------------------------------------------------------
+
+@autoHydrate
+struct InvoiceTotalsDTO {
+    int    orderId;
+    long   invoiceCount;
+    double totalAmount;
+}
 
 @autoHydrate
 struct OrderTotalsDTO {
@@ -821,17 +830,26 @@ unittest {
     irepo.insert(i0);
     irepo.insert(i1);
 
-    // Workaround: raw SQL until native aggregation is supported.
-    // Desired future API (not yet implemented):
-    //
-    //   orepo.query()
-    //       .annotate!"invoiceCount"("COUNT(inv.id)")
-    //       .annotate!"totalAmount"("SUM(inv.amount)")
-    //       .joinMany!("invoices", "inv")
-    //       .groupBy(F!"id")
-    //       .where(F!"id"(o.id))
-    //       .select!OrderTotalsDTO();
+    // Native aggregation — invoices grouped by order.
+    auto totals = irepo.query()
+        .where!"orderId"(o.id)
+        .groupBy!"orderId"
+        .annotate!("invoiceCount", F!(CqInvoice, "id").count)
+        .annotate!("totalAmount",  F!(CqInvoice, "amount").sum)
+        .select!InvoiceTotalsDTO();
+    assert(totals.length == 1);
+    assert(totals[0].orderId      == o.id);
+    assert(totals[0].invoiceCount == 2);
+    assert(totals[0].totalAmount  == 1000.0);
 
+    // Scalar aggregate over the same match set.
+    auto grandTotal = irepo.query()
+        .where!"orderId"(o.id)
+        .aggregate!(F!(CqInvoice, "amount").sum);
+    assert(grandTotal.get == 1000.0);
+
+    // Raw-SQL workaround for the order-side flavor (order columns + one2many
+    // aggregates in one row) — requires joinMany!, which is not implemented.
     auto result = f.conn.execParams(
         "SELECT o.id, o.name, COUNT(i.id) AS invoice_count, COALESCE(SUM(i.amount), 0) AS total_amount" ~
         " FROM cq_sale_orders o" ~

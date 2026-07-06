@@ -23,16 +23,24 @@
   *  - set!(fieldName)(val)    — accumulate a SET assignment (for update())
   *  - joinOne!(relField)      — LEFT JOIN a @related/@many2one field
   *  - prefetch!(relField)     — schedule a post-query SELECT for @one2many/@many2many
+  *  - groupBy!("field", …)    — switch to a GroupedQuerySet (GROUP BY / HAVING)
   *
   * Terminal methods:
   *  - all()                → M[]          — fetch all matching rows
   *  - first()              → Nullable!M   — fetch at most one row
   *  - count()              → long         — SELECT COUNT(*)
   *  - exists()             → bool         — SELECT 1 … LIMIT 1
+  *  - aggregate!(agg)()    → Nullable!T   — scalar SUM/AVG/MIN/MAX/COUNT via F!(M,"f").sum etc.
   *  - asSubquery!"f"()     → SubQuery!T   — capture as single-column subquery atom (no DB call)
   *  - delete_()            → long         — DELETE, returns rows deleted
   *  - update()             → long         — partial UPDATE using accumulated set!() calls
   *  - select!DTO()         → DTO[]        — project main + join columns into a DTO
+  *
+  * Grouped queries (GroupedQuerySet, produced by groupBy!):
+  *  - annotate!("alias", F!(M,"f").sum)   — typed aggregate SELECT column
+  *  - annotate!("alias", "RAW SQL")       — raw aggregate expression (trusted)
+  *  - having(Predicate)                   — filter groups (aggregate comparisons)
+  *  - select!DTO()                        — grouped projection, GROUP-BY-validated
   **/
 module peque.orm.queryset;
 
@@ -50,7 +58,7 @@ private import peque.query_context: isQueryContext;
 private import peque.orm.repository: isModel;
 private import peque.orm.sql;
 private import peque.orm.predicate;
-private import peque.orm.field: FieldBuilder, PathBuilder, F, toOrdering;
+private import peque.orm.field: FieldBuilder, PathBuilder, AggBuilder, isAggBuilder, F, toOrdering;
 private import peque.orm.ordering: Ordering, OrderKind, OrderDir, OrderNulls;
 private import peque.orm.predicate: PathNode, LiteralNode, InSubqueryNode;
 private import peque.orm.subquery: SubQuery;
@@ -944,17 +952,54 @@ if (isModel!M && isQueryContext!Ctx) {
         return qs;
     }
 
+    /** Group by one or more main-table fields — names validated at compile
+      * time.  Returns a GroupedQuerySet, which exposes annotate!/having/
+      * where/orderBy/limit/offset and a single terminal: the grouped
+      * select!DTO().  Row-returning terminals (all, first, update, delete_,
+      * asSubquery, …) do not exist on the grouped type.
+      *
+      * Restrictions: group keys must be DB-column fields of M (no join paths).
+      * joinOne!/load! must be applied before groupBy!.
+      *
+      * ---
+      * @autoHydrate
+      * struct TotalsDTO { int orderId; long invoiceCount; double totalAmount; }
+      *
+      * auto totals = invoiceRepo.query()
+      *     .where!"status"("open")
+      *     .groupBy!"orderId"
+      *     .annotate!("invoiceCount", F!(Invoice, "id").count)
+      *     .annotate!("totalAmount",  F!(Invoice, "amount").sum)
+      *     .having(F!(Invoice, "amount").sum.gt(100.0))
+      *     .select!TotalsDTO();
+      * ---
+      **/
+    auto groupBy(groupFields...)()
+    if (groupFields.length >= 1) {
+        static foreach (gf; groupFields) {
+            static if (!is(typeof(gf) == string)) {
+                static assert(false,
+                    "groupBy! takes field-name string literals, e.g. groupBy!(\"orderId\")");
+            } else {
+                static assert(_fieldColName!(M, gf)().length > 0,
+                    "'" ~ gf ~ "' in groupBy! is not a DB column field on " ~ M.stringof ~
+                    " (must have @field, @primaryKey, or @many2one UDA)");
+            }
+        }
+        return GroupedQuerySet!(typeof(this), groupFields)(this);
+    }
+
     // -----------------------------------------------------------------------
     // Internal — accumulate renumbered WHERE SQL and flat PGValue[].
     // -----------------------------------------------------------------------
 
     private static void _buildWhereFromArray(
             Predicate[] preds, out string whereSQL, out PGValue[] params,
-            int startOffset = 0) {
+            int startOffset = 0, string clause = " WHERE ") {
         whereSQL = "";
         params   = [];
         if (preds.length == 0) return;
-        whereSQL = " WHERE ";
+        whereSQL = clause;
         int offset = startOffset;
         foreach (i, ref p; preds) {
             auto s = serializePredicate(p, offset);
@@ -1100,6 +1145,49 @@ if (isModel!M && isQueryContext!Ctx) {
         sql ~= _filterJoinSQL(fjoins);
         sql ~= whereSQL;
         return _ctx.execParams(sql, params).getValue!long(0, 0);
+    }
+
+    /** Compute a single aggregate value over all matching rows.
+      *
+      * agg is an aggregate builder produced by the typed field form:
+      * F!(M, "field").sum / .avg / .min / .max / .count.
+      *
+      * Returns Nullable!(result type): SUM/AVG/MIN/MAX over zero rows is SQL
+      * NULL, which maps to .isNull.  Result types: sum → long (integral
+      * fields) or double (floating), avg → double, min/max → the field's own
+      * D type, count → long.
+      *
+      * Like count(), ignores orderBy/limit/offset — the aggregate always runs
+      * over the full match set.
+      *
+      * ---
+      * // SELECT SUM(_m.amount) FROM invoices _m WHERE (_m.active = $1)
+      * Nullable!double total = repo.query()
+      *     .where!"active"(true)
+      *     .aggregate!(F!(Invoice, "amount").sum);
+      *
+      * auto latest = repo.query().aggregate!(F!(Invoice, "createdAt").max);
+      * ---
+      **/
+    auto aggregate(aggSpec...)()
+    if (aggSpec.length == 1 && isAggBuilder!(typeof(aggSpec[0]))) {
+        alias AggT = typeof(aggSpec[0]);
+
+        _FilterJoin[] fjoins;
+        int fjIdx = 0;
+        Predicate[] resolved;
+        foreach (ref p; _wheres)
+            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
+
+        string whereSQL;
+        PGValue[] params;
+        _buildWhereFromArray(resolved, whereSQL, params);
+
+        string sql = "SELECT " ~ AggT.expr ~ " FROM " ~ ormTableName!M ~ " _m";
+        sql ~= _filterJoinSQL(fjoins);
+        sql ~= whereSQL;
+        return _ctx.execParams(sql, params)
+                   .getValue!(Nullable!(AggT.ResultType))(0, 0);
     }
 
     /** Return true if at least one matching row exists. **/
@@ -1383,5 +1471,286 @@ if (isModel!M && isQueryContext!Ctx) {
         if (_offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_offsetVal);
 
         return _ctx.execParams(sql, params).as!(DTO[]);
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// GroupedQuerySet — GROUP BY / HAVING / aggregate projection
+// ---------------------------------------------------------------------------
+
+/** Annotation marker pairing a SELECT alias with an aggregate builder or a
+  * raw SQL expression.  Appears only in GroupedQuerySet type parameters —
+  * never constructed at runtime.  Produced by GroupedQuerySet.annotate!.
+  **/
+struct Annot(string name, string expr) {
+    enum _name = name;   // DTO member name the annotation populates
+    enum _expr = expr;   // SQL expression, e.g. "SUM(_m.amount)"
+}
+
+
+/** GROUP BY query wrapper produced by QuerySet.groupBy!(...).
+  *
+  * Specs is a compile-time mix of:
+  *  - string values      — group-key field names (accumulated by groupBy!)
+  *  - Annot!(name, spec) — aggregate/raw SELECT annotations (annotate!)
+  *
+  * Builders: annotate!, having, where, whereRaw, orderBy, limit, offset.
+  * The only terminal is the grouped select!DTO() — every DTO member must be
+  * either a group key or an annotation alias (validated at compile time), so
+  * PostgreSQL's "column must appear in the GROUP BY clause" error is caught
+  * at build time.
+  *
+  * ---
+  * @autoHydrate
+  * struct TotalsDTO { int orderId; long invoiceCount; double totalAmount; }
+  *
+  * auto totals = invoiceRepo.query()
+  *     .where!"status"("open")
+  *     .groupBy!"orderId"
+  *     .annotate!("invoiceCount", F!(Invoice, "id").count)
+  *     .annotate!("totalAmount",  F!(Invoice, "amount").sum)
+  *     .having(F!(Invoice, "amount").sum.gt(100.0))
+  *     .orderBy(F!(Invoice, "amount").sum.desc)
+  *     .select!TotalsDTO();
+  * // SELECT _m.order_id AS order_id, COUNT(_m.id) AS invoice_count,
+  * //        SUM(_m.amount) AS total_amount
+  * // FROM invoices _m WHERE (_m.status = $1)
+  * // GROUP BY _m.order_id HAVING (SUM(_m.amount) > $2)
+  * // ORDER BY SUM(_m.amount) DESC
+  * ---
+  **/
+struct GroupedQuerySet(QS, Specs...)
+if (is(QS == QuerySet!Args, Args...)) {
+
+    static if (is(QS == QuerySet!Args, Args...)) {
+        private alias M          = Args[0];
+        private alias Ctx        = Args[1];
+        private alias JoinFields = Args[2 .. $];
+    }
+
+    private QS          _base;      // the QuerySet as of the groupBy! call
+    private Predicate[] _havings;
+
+    // Public for the same reason as QuerySet's constructor: template bodies
+    // are instantiated at the call site, which may be outside peque.orm.
+    this(QS base) { _base = base; }
+
+    // -----------------------------------------------------------------------
+    // Builder methods — each returns a copy, leaving this unchanged
+    // -----------------------------------------------------------------------
+
+    /** Register an aggregate annotation under a SELECT alias.
+      *
+      * spec is either:
+      *  - a typed aggregate builder:
+      *    annotate!("totalAmount", F!(Invoice, "amount").sum)
+      *  - a raw SQL expression (compile-time string literal):
+      *    annotate!("amountSpread", "MAX(_m.amount) - MIN(_m.amount)")
+      *
+      * The alias must equal the DTO member name it should populate in
+      * select!DTO (the SQL column alias is derived via camelToSnake for
+      * hydration).  Annotations not referenced by the DTO are not emitted.
+      *
+      * Security: a raw expression is embedded in the query verbatim — only
+      * trusted, hardcoded strings.  Bound parameters ($N) are not supported
+      * inside annotation expressions; runtime values belong in where()/
+      * having().
+      *
+      * Returns a new GroupedQuerySet type with the annotation appended.
+      **/
+    auto annotate(string name, spec...)()
+    if (spec.length == 1 &&
+        (isAggBuilder!(typeof(spec[0])) || is(typeof(spec[0]) == string))) {
+        static if (is(typeof(spec[0]) == string))
+            enum expr = spec[0];                 // raw SQL expression (trusted)
+        else
+            enum expr = typeof(spec[0]).expr;    // AggBuilder
+        auto g2 = GroupedQuerySet!(QS, Specs, Annot!(name, expr))(_base);
+        g2._havings = _havings;
+        return g2;
+    }
+
+    /** HAVING predicate — filters groups after aggregation.
+      *
+      * Build conditions from aggregate builders' comparison operators; they
+      * compose with &, | and ~ like any Predicate:
+      * ---
+      * .having(F!(Invoice, "amount").sum.gt(100.0))
+      * .having(F!(Invoice, "id").count.gte(2) | F!(Invoice, "amount").avg.lt(50.0))
+      * ---
+      **/
+    typeof(this) having(Predicate pred) {
+        auto g = this;
+        g._havings ~= pred;
+        return g;
+    }
+
+    /// Type-safe equality WHERE — applied before grouping (delegates to the base QuerySet).
+    typeof(this) where(string fieldName, V)(V val) {
+        auto g = this;
+        g._base = _base.where!(fieldName)(val);
+        return g;
+    }
+
+    /// Composable predicate WHERE — applied before grouping.
+    typeof(this) where(Predicate pred) {
+        auto g = this;
+        g._base = _base.where(pred);
+        return g;
+    }
+
+    /// Raw SQL WHERE escape hatch — applied before grouping (see QuerySet.whereRaw).
+    typeof(this) whereRaw(T...)(string sqlFrag, T args) {
+        auto g = this;
+        g._base = _base.whereRaw(sqlFrag, args);
+        return g;
+    }
+
+    /** ORDER BY — accepts the same terms as QuerySet.orderBy (raw strings,
+      * F builders, Ordering values) plus aggregate builders' .asc/.desc:
+      * ---
+      * .orderBy(F!(Invoice, "amount").sum.desc)
+      * ---
+      * There is no @defaultOrder fallback on grouped queries — the model's
+      * default order column is usually not in GROUP BY.
+      **/
+    typeof(this) orderBy(OSpecs...)(OSpecs specs)
+    if (OSpecs.length >= 1) {
+        auto g = this;
+        g._base = _base.orderBy(specs);
+        return g;
+    }
+
+    /// Limit the number of groups returned.
+    typeof(this) limit(long n) {
+        auto g = this;
+        g._base = _base.limit(n);
+        return g;
+    }
+
+    /// Skip the first n groups.
+    typeof(this) offset(long n) {
+        auto g = this;
+        g._base = _base.offset(n);
+        return g;
+    }
+
+    // -----------------------------------------------------------------------
+    // Terminal
+    // -----------------------------------------------------------------------
+
+    /** Project grouped rows into DTO[] — the only terminal on a grouped query.
+      *
+      * Each DTO member is matched by its D member name:
+      *  1. a groupBy! key           → emitted as _m.col AS member_name
+      *  2. an annotate! alias       → emitted as <expr> AS member_name
+      *  3. neither                  → compile error (GROUP-BY validation)
+      *
+      * The SQL column alias is camelToSnake(memberName), matching @autoHydrate
+      * convention hydration.  Aggregate DTO members should be long (count,
+      * integral sum), double (avg, floating sum), or Nullable!T where a group
+      * could aggregate over only-NULL values.
+      **/
+    DTO[] select(DTO)() {
+        import peque.hydration: camelToSnake;
+
+        // Compile-time SELECT list + GROUP-BY validation
+        string selList;
+        static foreach (dtoMemberName; FieldNameTuple!DTO) {{
+            enum expr = _groupedExprFor!(dtoMemberName)();
+            static assert(expr.length > 0,
+                "select!" ~ DTO.stringof ~ ": member '" ~ dtoMemberName ~
+                "' is neither a groupBy!(...) key nor an annotate!(...) alias." ~
+                " Non-aggregate DTO columns must appear in groupBy!;" ~
+                " aggregate columns must be registered via annotate!(\"" ~
+                dtoMemberName ~ "\", ...).");
+            if (selList.length) selList ~= ", ";
+            selList ~= expr ~ " AS " ~ camelToSnake(dtoMemberName);
+        }}
+
+        // Resolve WHERE / ORDER BY / HAVING predicates, collecting the filter
+        // joins they need — before the FROM clause is assembled below.
+        _FilterJoin[] fjoins;
+        int fjIdx = 0;
+        Predicate[] resolved;
+        foreach (ref p; _base._wheres)
+            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
+
+        // Only explicit orderBy terms — no @defaultOrder fallback here.
+        string orderBySql =
+            _resolveOrderTerms!(M, JoinFields)(_base._orderByTerms, fjoins, fjIdx);
+
+        Predicate[] resolvedHavings;
+        foreach (ref p; _havings)
+            resolvedHavings ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
+
+        // FROM + explicit JoinField JOINs (j0, j1, …) + runtime filter joins
+        string fromClause = " FROM " ~ ormTableName!M ~ " _m";
+        static foreach (jfIdx2, jf; JoinFields) {{
+            alias RelType = _innerRelType!(M, jf);
+            enum _jAlias = "j" ~ to!string(jfIdx2);
+            enum _relTbl = ormTableName!RelType;
+            enum _relPk  = ormPkColName!RelType();
+            enum _fkCol  = _fkColForRelatedField!(M, jf, RelType)();
+            fromClause ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _jAlias ~
+                          " ON " ~ _jAlias ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
+        }}
+        fromClause ~= _filterJoinSQL(fjoins);
+
+        // WHERE params first, HAVING params numbered after them
+        string whereSQL;
+        PGValue[] whereParams;
+        QS._buildWhereFromArray(resolved, whereSQL, whereParams);
+
+        string havingSQL;
+        PGValue[] havingParams;
+        QS._buildWhereFromArray(resolvedHavings, havingSQL, havingParams,
+                                cast(int) whereParams.length, " HAVING ");
+
+        enum gbClause = _groupByClause();
+        string sql = "SELECT " ~ selList ~ fromClause ~ whereSQL ~
+                     " GROUP BY " ~ gbClause ~ havingSQL;
+        if (orderBySql.length) sql ~= " ORDER BY " ~ orderBySql;
+        if (_base._limitVal  >= 0) sql ~= " LIMIT "  ~ to!string(_base._limitVal);
+        if (_base._offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_base._offsetVal);
+
+        return _base._ctx.execParams(sql, whereParams ~ havingParams).as!(DTO[]);
+    }
+
+    // -----------------------------------------------------------------------
+    // CTFE helpers
+    // -----------------------------------------------------------------------
+
+    // SQL SELECT expression for one DTO member — "_m.col" for a group key,
+    // the registered expression for an annotation, "" if unmatched.
+    private static string _groupedExprFor(string memberName)() {
+        string expr = "";
+        static foreach (S; Specs) {{
+            static if (is(typeof(S) == string)) {
+                static if (S == memberName) {
+                    if (expr.length == 0)
+                        expr = "_m." ~ _fieldColName!(M, S)();
+                }
+            } else {
+                static if (S._name == memberName) {
+                    if (expr.length == 0)
+                        expr = S._expr;
+                }
+            }
+        }}
+        return expr;
+    }
+
+    // Comma-separated GROUP BY column list from the group-key Specs.
+    private static string _groupByClause() {
+        string s;
+        static foreach (S; Specs) {{
+            static if (is(typeof(S) == string)) {
+                if (s.length) s ~= ", ";
+                s ~= "_m." ~ _fieldColName!(M, S)();
+            }
+        }}
+        return s;
     }
 }
