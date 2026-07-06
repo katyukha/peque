@@ -607,40 +607,6 @@ auto result = pool.borrow((ref Connection conn) {
 
 ---
 
-
-## vibe.d (`peque:vibe`)
-
-`peque:vibe` provides a fiber-aware wait strategy and connection pool for
-vibe.d applications. Instead of blocking the OS thread while waiting for
-PostgreSQL, control yields to the vibe.d event loop.
-
-```d
-dependency "peque:vibe" version="~>0.1.0"
-```
-
-```d
-import peque;
-import peque.vibe;
-
-// Single connection with fiber-aware I/O
-auto conn = Connection(params, VibeWaitStrategy());
-
-// Connection pool — makeVibePool injects VibeWaitStrategy and non-blocking mode
-auto pool = makeVibePool(8, [
-    "dbname": "myapp",
-    "user":   "app",
-    "host":   "localhost",
-    "port":   "5432",
-]);
-
-// Borrow a connection for the duration of a delegate; returned automatically
-auto result = pool.borrow((ref Connection conn) {
-    return conn.execParams("SELECT name FROM users WHERE id = $1", userId);
-});
-```
-
----
-
 ## LISTEN / NOTIFY
 
 peque exposes PostgreSQL's notification bus: `listen()`/`unlisten()` subscribe
