@@ -1024,6 +1024,50 @@ if (isModel!M && isQueryContext!Ctx) {
         return _resolveOrderTerms!(M, JoinFields)(terms, fjoins, idx);
     }
 
+    // LEFT JOIN fragment for the hydration joins (JoinFields) — compile-time.
+    private static string _hydrationJoinSQL() {
+        string s;
+        static foreach (idx, jf; JoinFields) {{
+            alias RelType = _innerRelType!(M, jf);
+            enum _jAlias = "j" ~ to!string(idx);
+            enum _relTbl = ormTableName!RelType;
+            enum _relPk  = ormPkColName!RelType();
+            enum _fkCol  = _fkColForRelatedField!(M, jf, RelType)();
+            static assert(_fkCol.length > 0,
+                "No @many2one!(" ~ RelType.stringof ~ ") field found on " ~ M.stringof);
+            s ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _jAlias ~
+                 " ON " ~ _jAlias ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
+        }}
+        return s;
+    }
+
+    /** Shared by every terminal: resolve where-predicates (and, when
+      * withOrder, orderBy terms) and assemble the FROM-clause join suffix —
+      * hydration (JoinFields) LEFT JOINs first, then the filter joins the
+      * predicates/order terms need.
+      *
+      * Predicate resolution may reference hydration-join aliases (j0, …), so
+      * any terminal that uses `resolved` must emit `joinsSQL` alongside it.
+      * All joins are LEFT JOINs on the target's unique PK, so they can never
+      * duplicate main-table rows — count()/aggregate() stay exact.
+      *
+      * Hydration joins are emitted even when nothing references them
+      * (deliberate simplicity-over-minimal-SQL trade: tracking per-terminal
+      * usage isn't worth it, and PostgreSQL's join removal drops unused
+      * unique-keyed LEFT JOINs from the plan anyway).
+      **/
+    private void _resolveQuery(bool withOrder = false)(
+            out Predicate[] resolved, out string joinsSQL, out string orderBySQL) {
+        _FilterJoin[] fjoins;
+        int fjIdx = 0;
+        foreach (ref p; _wheres)
+            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
+        static if (withOrder)
+            orderBySQL = _resolveOrderBySql(fjoins, fjIdx);
+        enum _hjSQL = _hydrationJoinSQL();
+        joinsSQL = _hjSQL ~ _filterJoinSQL(fjoins);
+    }
+
     // -----------------------------------------------------------------------
     // Terminal methods
     // -----------------------------------------------------------------------
@@ -1034,15 +1078,10 @@ if (isModel!M && isQueryContext!Ctx) {
     M[] all() {
         import peque.hydration: _hydrateAnnotated;
 
-        // Resolve path predicates, collect filter joins
-        _FilterJoin[] fjoins;
-        int fjIdx = 0;
+        // Resolve predicates/orderBy and the join suffix they need
         Predicate[] resolved;
-        foreach (ref p; _wheres)
-            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
-
-        // Resolve orderBy terms (may add more filter joins)
-        string orderBySql = _resolveOrderBySql(fjoins, fjIdx);
+        string joinsSQL, orderBySql;
+        _resolveQuery!true(resolved, joinsSQL, orderBySql);
 
         string whereSQL;
         PGValue[] params;
@@ -1066,25 +1105,7 @@ if (isModel!M && isQueryContext!Ctx) {
             if (joinExtras.length) sql ~= ", " ~ joinExtras;
         }
 
-        sql ~= " FROM " ~ ormTableName!M ~ " _m";
-
-        // Append LEFT JOINs for hydration joins
-        static if (JoinFields.length > 0) {
-            static foreach (idx, jf; JoinFields) {{
-                alias RelType = _innerRelType!(M, jf);
-                enum _jAlias = "j" ~ to!string(idx);
-                enum _relTbl = ormTableName!RelType;
-                enum _relPk  = ormPkColName!RelType();
-                enum _fkCol  = _fkColForRelatedField!(M, jf, RelType)();
-                static assert(_fkCol.length > 0,
-                    "No @many2one!(" ~ RelType.stringof ~ ") field found on " ~ M.stringof);
-                sql ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _jAlias ~
-                       " ON " ~ _jAlias ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
-            }}
-        }
-
-        sql ~= _filterJoinSQL(fjoins);
-        sql ~= whereSQL;
+        sql ~= " FROM " ~ ormTableName!M ~ " _m" ~ joinsSQL ~ whereSQL;
         if (orderBySql.length) sql ~= " ORDER BY " ~ orderBySql;
         if (_limitVal  >= 0) sql ~= " LIMIT "  ~ to!string(_limitVal);
         if (_offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_offsetVal);
@@ -1131,19 +1152,16 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** Return the number of matching rows (SELECT COUNT(*)). **/
     long count() {
-        _FilterJoin[] fjoins;
-        int fjIdx = 0;
         Predicate[] resolved;
-        foreach (ref p; _wheres)
-            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
+        string joinsSQL, orderBySql;
+        _resolveQuery(resolved, joinsSQL, orderBySql);
 
         string whereSQL;
         PGValue[] params;
         _buildWhereFromArray(resolved, whereSQL, params);
 
-        string sql = "SELECT COUNT(*) FROM " ~ ormTableName!M ~ " _m";
-        sql ~= _filterJoinSQL(fjoins);
-        sql ~= whereSQL;
+        string sql = "SELECT COUNT(*) FROM " ~ ormTableName!M ~ " _m"
+            ~ joinsSQL ~ whereSQL;
         return _ctx.execParams(sql, params).getValue!long(0, 0);
     }
 
@@ -1173,45 +1191,44 @@ if (isModel!M && isQueryContext!Ctx) {
     if (aggSpec.length == 1 && isAggBuilder!(typeof(aggSpec[0]))) {
         alias AggT = typeof(aggSpec[0]);
 
-        _FilterJoin[] fjoins;
-        int fjIdx = 0;
         Predicate[] resolved;
-        foreach (ref p; _wheres)
-            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
+        string joinsSQL, orderBySql;
+        _resolveQuery(resolved, joinsSQL, orderBySql);
 
         string whereSQL;
         PGValue[] params;
         _buildWhereFromArray(resolved, whereSQL, params);
 
-        string sql = "SELECT " ~ AggT.expr ~ " FROM " ~ ormTableName!M ~ " _m";
-        sql ~= _filterJoinSQL(fjoins);
-        sql ~= whereSQL;
+        string sql = "SELECT " ~ AggT.expr ~ " FROM " ~ ormTableName!M ~ " _m"
+            ~ joinsSQL ~ whereSQL;
         return _ctx.execParams(sql, params)
                    .getValue!(Nullable!(AggT.ResultType))(0, 0);
     }
 
     /** Return true if at least one matching row exists. **/
     bool exists() {
-        _FilterJoin[] fjoins;
-        int fjIdx = 0;
         Predicate[] resolved;
-        foreach (ref p; _wheres)
-            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
+        string joinsSQL, orderBySql;
+        _resolveQuery(resolved, joinsSQL, orderBySql);
 
         string whereSQL;
         PGValue[] params;
         _buildWhereFromArray(resolved, whereSQL, params);
 
-        string sql = "SELECT 1 FROM " ~ ormTableName!M ~ " _m";
-        sql ~= _filterJoinSQL(fjoins);
-        sql ~= whereSQL ~ " LIMIT 1";
+        string sql = "SELECT 1 FROM " ~ ormTableName!M ~ " _m"
+            ~ joinsSQL ~ whereSQL ~ " LIMIT 1";
         return _ctx.execParams(sql, params).ntuples > 0;
     }
 
     /** Capture this QuerySet as a single-column SQL subquery atom.
       *
       * No database call is made.  Returns a SubQuery!T carrying:
-      *   SELECT _m.colname FROM table _m [WHERE ...] [LIMIT ...] [OFFSET ...]
+      *   SELECT _m.colname FROM table _m [JOINs] [WHERE ...] [ORDER BY ...]
+      *   [LIMIT ...] [OFFSET ...]
+      *
+      * ORDER BY (explicit orderBy terms, or the model's @defaultOrder) is
+      * included so that limit()/offset() select the intended rows — "top N"
+      * subqueries would otherwise silently pick N arbitrary rows.
       *
       * fieldName must be a DB column field on M (compile-time check).
       * T is the D type of that field, inferred at compile time.
@@ -1236,19 +1253,17 @@ if (isModel!M && isQueryContext!Ctx) {
             "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof);
         alias _FieldType = typeof(__traits(getMember, M.init, fieldName));
 
-        _FilterJoin[] fjoins;
-        int fjIdx = 0;
         Predicate[] resolved;
-        foreach (ref p; _wheres)
-            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
+        string joinsSQL, orderBySql;
+        _resolveQuery!true(resolved, joinsSQL, orderBySql);
 
         string whereSQL;
         PGValue[] params;
         _buildWhereFromArray(resolved, whereSQL, params);
 
-        string sql = "SELECT _m." ~ _col ~ " FROM " ~ ormTableName!M ~ " _m";
-        sql ~= _filterJoinSQL(fjoins);
-        sql ~= whereSQL;
+        string sql = "SELECT _m." ~ _col ~ " FROM " ~ ormTableName!M ~ " _m"
+            ~ joinsSQL ~ whereSQL;
+        if (orderBySql.length) sql ~= " ORDER BY " ~ orderBySql;
         if (_limitVal  >= 0) sql ~= " LIMIT "  ~ to!string(_limitVal);
         if (_offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_offsetVal);
 
@@ -1257,44 +1272,42 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** Delete all matching rows and return the number of rows deleted.
       *
-      * When filter joins are required (F!"rel.field" in WHERE), PostgreSQL's
-      * USING clause is used with join conditions added to the WHERE clause.
+      * When the WHERE clause needs joins (F!"rel.field" predicates or a
+      * load!/joinOne! alias), matching rows are selected by primary key in a
+      * subquery that emits the same LEFT JOINs as all() — the deleted row set
+      * is always exactly what all() would return (including isNull predicates
+      * matching rows with a NULL FK, which inner-join rewrites would miss).
       **/
     long delete_() {
-        _FilterJoin[] fjoins;
-        int fjIdx = 0;
         Predicate[] resolved;
-        foreach (ref p; _wheres)
-            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
-
-        // If filter joins required, add their ON conditions to WHERE
-        Predicate[] allPreds = resolved.dup;
-        foreach (ref fj; fjoins)
-            allPreds ~= Predicate(RawNode(
-                fj.alias_ ~ "." ~ fj.pkCol ~ " = " ~ fj.parentAlias ~ "." ~ fj.fkCol, []));
+        string joinsSQL, orderBySql;
+        _resolveQuery(resolved, joinsSQL, orderBySql);
 
         string whereSQL;
         PGValue[] params;
-        _buildWhereFromArray(allPreds, whereSQL, params);
+        _buildWhereFromArray(resolved, whereSQL, params);
 
+        enum _table = ormTableName!M;
+        enum _pkCol = ormPkColName!M();
         string sql;
-        if (fjoins.length > 0) {
-            sql = "DELETE FROM " ~ ormTableName!M ~ " _m USING";
-            foreach (i, ref fj; fjoins) {
-                if (i > 0) sql ~= ",";
-                sql ~= " " ~ fj.table ~ " " ~ fj.alias_;
-            }
-        } else {
-            sql = "DELETE FROM " ~ ormTableName!M ~ " _m";
-        }
-        sql ~= whereSQL;
+        if (joinsSQL.length)
+            sql = "DELETE FROM " ~ _table ~
+                  " WHERE " ~ _pkCol ~ " IN (SELECT _m." ~ _pkCol ~
+                  " FROM " ~ _table ~ " _m" ~ joinsSQL ~ whereSQL ~ ")";
+        else
+            sql = "DELETE FROM " ~ _table ~ " _m" ~ whereSQL;
         return _ctx.execParams(sql, params).cmdTuples();
     }
 
     /** Execute a partial / bulk UPDATE using accumulated set!() assignments.
       *
-      * Builds: UPDATE table SET col1=$1, col2=$2 [FROM joins] WHERE (renumbered_where)
+      * Builds: UPDATE table SET col1=$1, col2=$2 WHERE (renumbered_where)
       * Set values are bound as $1..$N; WHERE params follow as $(N+1)..$(N+M).
+      *
+      * When the WHERE clause needs joins, matching rows are selected by
+      * primary key in a subquery emitting the same LEFT JOINs as all() — the
+      * updated row set is always exactly what all() would return (see
+      * delete_()).
       *
       * Returns the number of rows updated.
       *
@@ -1306,17 +1319,9 @@ if (isModel!M && isQueryContext!Ctx) {
     long update() {
         enforce!PequeException(_sets.length > 0, "update() called with no set!() assignments");
 
-        _FilterJoin[] fjoins;
-        int fjIdx = 0;
         Predicate[] resolved;
-        foreach (ref p; _wheres)
-            resolved ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
-
-        // Include join ON conditions in WHERE for filter joins
-        Predicate[] allPreds = resolved.dup;
-        foreach (ref fj; fjoins)
-            allPreds ~= Predicate(RawNode(
-                fj.alias_ ~ "." ~ fj.pkCol ~ " = " ~ fj.parentAlias ~ "." ~ fj.fkCol, []));
+        string joinsSQL, orderBySql;
+        _resolveQuery(resolved, joinsSQL, orderBySql);
 
         // Build SET clause: col1=$1, col2=$2, ...
         string setClause;
@@ -1329,17 +1334,17 @@ if (isModel!M && isQueryContext!Ctx) {
 
         string whereSQL;
         PGValue[] whereParams;
-        _buildWhereFromArray(allPreds, whereSQL, whereParams, cast(int)_sets.length);
+        _buildWhereFromArray(resolved, whereSQL, whereParams, cast(int)_sets.length);
 
-        string sql = "UPDATE " ~ ormTableName!M ~ " _m SET " ~ setClause;
-        if (fjoins.length > 0) {
-            sql ~= " FROM";
-            foreach (i, ref fj; fjoins) {
-                if (i > 0) sql ~= ",";
-                sql ~= " " ~ fj.table ~ " " ~ fj.alias_;
-            }
-        }
-        sql ~= whereSQL;
+        enum _table = ormTableName!M;
+        enum _pkCol = ormPkColName!M();
+        string sql;
+        if (joinsSQL.length)
+            sql = "UPDATE " ~ _table ~ " SET " ~ setClause ~
+                  " WHERE " ~ _pkCol ~ " IN (SELECT _m." ~ _pkCol ~
+                  " FROM " ~ _table ~ " _m" ~ joinsSQL ~ whereSQL ~ ")";
+        else
+            sql = "UPDATE " ~ _table ~ " _m SET " ~ setClause ~ whereSQL;
 
         return _ctx.execParams(sql, setParams ~ whereParams).cmdTuples();
     }

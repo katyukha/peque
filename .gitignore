@@ -15,6 +15,7 @@ subPackages/orm/orm-test-*
 subPackages/orm/peque-orm-test-*
 subPackages/migrate/migrate-test-*
 subPackages/migrate/peque-migrate-test-*
+subPackages/vibe/peque-vibe-test-*
 subPackages/migrate/dub.selections.json
 *.exe
 *.pdb
