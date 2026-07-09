@@ -45,6 +45,7 @@ private import std.traits: isNumeric, isIntegral;
 private import std.typecons: Nullable;
 
 private import peque.converter: PGValue, convertToPG;
+private import peque.exception: QueryEscapingError;
 private import peque.orm.predicate;
 private import peque.orm.subquery: SubQuery;
 private import peque.orm.sql: _fieldColName, ormTableName;
@@ -61,16 +62,20 @@ private enum _isFieldBuilderType(T) = is(T == FieldBuilder!(e, FT), string e, FT
 // JsonFieldBuilder — returned by FieldBuilder.get("key")
 // ---------------------------------------------------------------------------
 
-private bool _hasQuote(string s) pure nothrow @safe @nogc {
-    foreach (c; s) if (c == '\'') return true;
-    return false;
+private bool _isSafeJsonKey(string s) pure nothrow @safe @nogc {
+    // '\'' breaks out of the SQL literal; '\\' does too when the server runs
+    // with standard_conforming_strings = off; '\0' truncates the query string.
+    foreach (c; s)
+        if (c == '\'' || c == '\\' || c == '\0') return false;
+    return true;
 }
 
 /** Predicate builder for a JSONB text-extracted value: `(col)->>'key'`.
   *
   * Produced by FieldBuilder.get("key") — do not construct directly.
-  * key is embedded in the SQL expression; it must be a trusted, hardcoded
-  * string (no user input).
+  * key is embedded in the SQL expression; it should be a trusted, hardcoded
+  * string. Keys containing a single quote, backslash or NUL are rejected
+  * with QueryEscapingError.
   *
   * All comparison operators work on the extracted text value:
   * ---
@@ -85,7 +90,13 @@ struct JsonFieldBuilder {
     private string _expr;   // e.g. "(_m.payload)->>'type'"
 
     this(string colExpr, string key) pure @safe {
-        assert(!_hasQuote(key), "JSONB key must not contain single quotes");
+        import std.exception: enforce;
+        // The key is embedded in the SQL text, so this guard is the only
+        // barrier against injection — enforce, not assert: it must survive
+        // -release builds.
+        enforce!QueryEscapingError(
+            _isSafeJsonKey(key),
+            "JSONB key must not contain single quotes, backslashes or NUL bytes: " ~ key);
         _expr = "(" ~ colExpr ~ ")->>'" ~ key ~ "'";
     }
 

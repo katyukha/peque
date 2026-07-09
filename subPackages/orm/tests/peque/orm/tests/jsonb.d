@@ -287,3 +287,21 @@ unittest {
     assert(found.length == 1);
     assert(found[0].name == "obj");
 }
+
+
+// ---------------------------------------------------------------------------
+// get("key") injection guard — unsafe keys are rejected with
+// QueryEscapingError (a runtime enforce, so it also holds in -release builds)
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: QueryEscapingError;
+
+    F!(JbEvent, "payload").get("k' OR '1'='1").assertThrown!QueryEscapingError;
+    F!(JbEvent, "payload").get("k\\").assertThrown!QueryEscapingError;
+    F!(JbEvent, "payload").get("k\0y").assertThrown!QueryEscapingError;
+
+    // benign keys still work
+    auto p = F!(JbEvent, "payload").get("with space-and.dots")("v");
+}
