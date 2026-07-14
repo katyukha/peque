@@ -161,7 +161,7 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
     import std.conv: to;
     import std.array: join;
     import peque.orm.sql: buildSelectList, ormTableName, ormPkColName,
-        ormPkFieldName, _findM2OFKColFor;
+        ormPkFieldName, _findM2OFKColFor, _prefixedSelectList;
     import peque.hydration: _hydrateAnnotated;
 
     static foreach (memberName; FieldNameTuple!M) {{
@@ -241,8 +241,16 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                     }
 
                     enum targetPkCol = ormPkColName!TargetM();
+                    // Qualify target columns with alias `t`: the junction table
+                    // `j` commonly shares column names (e.g. `id`) with the
+                    // target, so an unqualified SELECT list would be ambiguous.
+                    // Alias the self-key to a fixed name distinct from any target
+                    // column so a self-referential m2m (junction key column name
+                    // colliding with a target column) still reads correctly.
+                    enum selfKeyAlias = "__peque_self_key";
                     string sql =
-                        "SELECT " ~ buildSelectList!TargetM() ~ ", j." ~ sk ~
+                        "SELECT " ~ _prefixedSelectList!(TargetM, "t")() ~
+                        ", j." ~ sk ~ " AS " ~ selfKeyAlias ~
                         " FROM " ~ ormTableName!TargetM ~ " t" ~
                         " JOIN " ~ jt ~ " j ON j." ~ tk ~ " = t." ~ targetPkCol ~
                         " WHERE j." ~ sk ~ " IN (" ~ placeholders ~ ")";
@@ -252,14 +260,13 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
 
                     auto result = ctx.execParams(sql, pgParams);
 
-                    // Decode target rows + selfKey column
-                    // The self-key column is the last column appended to the query
+                    // Decode target rows + selfKey column (read via its alias)
                     foreach (ref m; rows) {
                         alias ElemType = typeof(FieldType.init[0]);
                         ElemType[] arr;
                         foreach (i; 0 .. result.ntuples) {
                             auto row = result.getRow(i);
-                            auto selfKeyVal = row[sk].as!PkType;
+                            auto selfKeyVal = row[selfKeyAlias].as!PkType;
                             if (selfKeyVal == __traits(getMember, m, ormPkFieldName!M())) {
                                 arr ~= row.as!TargetM;
                             }
@@ -318,28 +325,29 @@ private string _resolveOneLevel(M, JoinFields...)(
     }}
     if (result.length) return result;
 
-    // 2 — reuse an existing filter join
-    foreach (ref fj; fjoins) {
-        if (fj.path == relName) {
-            // Use camelToSnake fallback since we can't get RelType here
-            import peque.hydration: camelToSnake;
-            return fj.alias_ ~ "." ~ camelToSnake(fieldName);
-        }
-    }
-
-    // 3 — create a new filter join (via @related or @many2one — same shape,
-    //     differing only in target type / FK column, both from the helpers)
+    // 2 — relName resolves via @related or @many2one on M. Resolve its RelType
+    //     first (so the leaf column honors @field("col") overrides), then reuse
+    //     an existing filter join for this path or create a new one. Resolving
+    //     RelType in both cases fixes the earlier camelToSnake fallback that
+    //     ignored @field on the reuse path.
     static foreach (memberName; FieldNameTuple!M) {{
         alias Mem = __traits(getMember, M, memberName);
         static if (hasUDA!(Mem, related) || hasMany2OneUDA!Mem) {
             if (memberName == relName && !result.length) {
                 alias RelType = _pathRelType!(M, memberName);
-                enum  fkCol    = _pathFkCol!(M, memberName);
-                enum  relTable = ormTableName!RelType;
-                enum  relPkCol = ormPkColName!RelType();
-                string jAlias = "fj" ~ to!string(idx);
-                fjoins ~= _FilterJoin(relName, jAlias, relTable, relPkCol, "_m", fkCol);
-                idx++;
+
+                string jAlias;
+                foreach (ref fj; fjoins)
+                    if (fj.path == relName) { jAlias = fj.alias_; break; }
+
+                if (!jAlias.length) {
+                    enum  fkCol    = _pathFkCol!(M, memberName);
+                    enum  relTable = ormTableName!RelType;
+                    enum  relPkCol = ormPkColName!RelType();
+                    jAlias = "fj" ~ to!string(idx);
+                    fjoins ~= _FilterJoin(relName, jAlias, relTable, relPkCol, "_m", fkCol);
+                    idx++;
+                }
                 result = jAlias ~ "." ~ _fieldColNameRuntime!RelType(fieldName);
             }
         }
@@ -593,10 +601,37 @@ private bool _isMainColCTFE(M, string colName)() {
     return false;
 }
 
+// The @related member on M whose derived column prefix (camelToSnake ~ "_") is
+// the LONGEST prefix of dtoColName, or "" if none matches. Longest-prefix-wins
+// disambiguates the case where one relation name is a prefix of another: with
+// relations `partner` and `partnerCompany`, the column `partner_company_name`
+// binds to `partnerCompany` (prefix `partner_company_`), not `partner` (prefix
+// `partner_`, which would leave a bogus `company_name` leaf column).
+// CTFE helper — both _neededRelsCTFE and select!DTO's SELECT-list builder use
+// it so the set of joined relations and the column resolution cannot diverge.
+private string _bestRelForColCTFE(M)(string dtoColName) {
+    import peque.model: related;
+    import peque.hydration: camelToSnake;
+    string best;
+    size_t bestLen = 0;
+    static foreach (relMemberName; FieldNameTuple!M) {{
+        alias RelMem = __traits(getMember, M, relMemberName);
+        static if (hasUDA!(RelMem, related)) {
+            enum relPrefix = camelToSnake(relMemberName) ~ "_";
+            if (dtoColName.length > relPrefix.length &&
+                dtoColName[0 .. relPrefix.length] == relPrefix &&
+                relPrefix.length > bestLen) {
+                best = relMemberName;
+                bestLen = relPrefix.length;
+            }
+        }
+    }}
+    return best;
+}
+
 // Returns a list of @related member names on M that are needed to satisfy DTO fields.
 // Called in CTFE context via enum.
 private string[] _neededRelsCTFE(M, DTO)() {
-    import peque.model: related;
     import peque.hydration: camelToSnake;
 
     string[] mainCols;
@@ -612,19 +647,12 @@ private string[] _neededRelsCTFE(M, DTO)() {
         bool isMain = false;
         foreach (c; mainCols) if (c == dtoColName) { isMain = true; break; }
         if (!isMain) {
-            static foreach (relMemberName; FieldNameTuple!M) {{
-                alias RelMem = __traits(getMember, M, relMemberName);
-                static if (hasUDA!(RelMem, related)) {
-                    enum relSnake  = camelToSnake(relMemberName);
-                    enum relPrefix = relSnake ~ "_";
-                    static if (dtoColName.length > relPrefix.length &&
-                               dtoColName[0 .. relPrefix.length] == relPrefix) {
-                        bool found = false;
-                        foreach (n; needed) if (n == relMemberName) { found = true; break; }
-                        if (!found) needed ~= relMemberName;
-                    }
-                }
-            }}
+            enum best = _bestRelForColCTFE!M(dtoColName);
+            static if (best.length) {
+                bool found = false;
+                foreach (n; needed) if (n == best) { found = true; break; }
+                if (!found) needed ~= best;
+            }
         }
     }}
     return needed;
@@ -858,7 +886,16 @@ if (isModel!M && isQueryContext!Ctx) {
         static assert(colName.length > 0,
             "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof);
         auto qs = this;
-        qs._sets ~= _QSSet(colName, convertToPG(value));
+        // Last write wins: drop any prior assignment to the same column so we
+        // never emit `col = $1, col = $2`, which PostgreSQL rejects with
+        // "multiple assignments to same column". Rebuild rather than mutate in
+        // place: _sets may be shared with the QuerySet we were copied from, and
+        // PGValue is const.
+        _QSSet[] merged;
+        foreach (ref s; qs._sets)
+            if (s.colName != colName) merged ~= s;
+        merged ~= _QSSet(colName, convertToPG(value));
+        qs._sets = merged;
         return qs;
     }
 
@@ -1411,14 +1448,17 @@ if (isModel!M && isQueryContext!Ctx) {
                     }
                 }}
 
-                // Check implicit DTO joins (dj0, dj1, …)
+                // Check implicit DTO joins (dj0, dj1, …). Bind to the relation
+                // with the LONGEST matching prefix (via the same helper as
+                // _neededRelsCTFE) so partner_company_name resolves against
+                // partnerCompany, not partner.
+                enum bestRel = _bestRelForColCTFE!M(dtoColName);
                 static foreach (ni; 0 .. nRels) {{
                     if (!matched) {
                         enum rn       = neededRelNames[ni];
                         enum rnSnake  = camelToSnake(rn);
                         enum rnPrefix = rnSnake ~ "_";
-                        static if (dtoColName.length > rnPrefix.length &&
-                                   dtoColName[0 .. rnPrefix.length] == rnPrefix) {
+                        static if (bestRel.length && rn == bestRel) {
                             selList ~= "dj" ~ to!string(ni) ~ "." ~
                                        dtoColName[rnPrefix.length .. $] ~ " AS " ~ dtoColName;
                             matched = true;

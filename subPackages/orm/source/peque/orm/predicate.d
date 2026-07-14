@@ -169,14 +169,24 @@ struct SerializedPred {
   **/
 package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset = 0) {
     return pred._inner.match!(
-        (ref EqNode n) => SerializedPred(
-            n.colExpr ~ " = $" ~ to!string(offset + 1),
-            [n.value],
-        ),
-        (ref OpNode n) => SerializedPred(
-            n.colExpr ~ " " ~ n.op ~ " $" ~ to!string(offset + 1),
-            [n.value],
-        ),
+        // A NULL-valued equality is `col = NULL` in raw SQL, which is always
+        // UNKNOWN and matches nothing. `where!"field"(nullable)` with an empty
+        // Nullable means "field IS NULL", so emit that (no bound parameter).
+        (ref EqNode n) => n.value.isNull
+            ? SerializedPred(n.colExpr ~ " IS NULL", [])
+            : SerializedPred(
+                n.colExpr ~ " = $" ~ to!string(offset + 1),
+                [n.value],
+            ),
+        // Likewise a NULL-valued `!=`/`<>` means "field IS NOT NULL". Other
+        // operators against NULL (<, >, LIKE, …) are genuinely meaningless, so
+        // they pass through unchanged.
+        (ref OpNode n) => n.value.isNull && (n.op == "!=" || n.op == "<>")
+            ? SerializedPred(n.colExpr ~ " IS NOT NULL", [])
+            : SerializedPred(
+                n.colExpr ~ " " ~ n.op ~ " $" ~ to!string(offset + 1),
+                [n.value],
+            ),
         (ref InNode n) {
             if (n.values.length == 0)
                 return SerializedPred("FALSE", []);

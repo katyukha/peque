@@ -51,11 +51,13 @@ template ormTableName(M) {
 }
 
 /// Primary-key column name for model M.
+/// Honors a `@field("col")` override on the primary-key member (mirrors
+/// buildSelectList / _fieldColName); falls back to camelToSnake otherwise.
 string ormPkColName(M)() {
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
         static if (hasUDA!(F, primaryKey))
-            return camelToSnake(memberName);
+            return _colName!(F, memberName);
     }}
     assert(false, "No @primaryKey field on " ~ M.stringof);
 }

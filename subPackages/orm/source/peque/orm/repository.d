@@ -290,6 +290,9 @@ if (isModel!M && isQueryContext!Ctx) {
       * write a custom method using execParams directly.
       **/
     void update(ref M record) {
+        static assert(buildUpdateSetClause!M().length > 0,
+            M.stringof ~ " has no non-PK column fields; update() would emit an " ~
+            "empty SET clause. Nothing to update — the PK alone identifies the row.");
         mixin(
             `_ctx.execParams(_crudUpdSQL, ` ~ buildUpdateValueExpr!M() ~ `);`
         );
