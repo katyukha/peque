@@ -140,3 +140,29 @@ unittest {
     });
     assert(codes == ["a", "b", "c"]);
 }
+
+
+/** close() must be a safe no-op on a default-constructed (never-connected)
+  * Connection — the state a pool slot is in when, under GC ownership, the
+  * Connection's own destructor runs before the pool's ~this reaches it.
+  * Regression: previously threw AssertError "uninitialized payload". **/
+unittest {
+    Connection c;      // default-init: SafeRefCounted store is uninitialized
+    c.close();         // must not throw
+    c.close();         // idempotent
+}
+
+
+/** A GC-owned pool: ~ConnectionPool runs as a finalizer and closes each slot.
+  * With close() safe on a finalized slot, teardown under the GC is safe. This
+  * mirrors a web-framework TestClient that stores the pool in a GC object and
+  * churns create/destroy across many requests. **/
+unittest {
+    import core.memory: GC;
+    foreach (cycle; 0 .. 12) {
+        auto poolPtr = new ThreadConnectionPool(2, makeFactory());
+        poolPtr.borrow((ref Connection conn) => conn.exec("SELECT 1"));
+        poolPtr = null;   // drop the only root
+        GC.collect();     // finalize the pool + its connections
+    }
+}

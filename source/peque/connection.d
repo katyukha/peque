@@ -388,13 +388,19 @@ struct Connection {
 
     /** Close the connection immediately, releasing the underlying PGconn.
       *
-      * Idempotent — safe to call on an already-closed connection.
+      * Idempotent and safe on a default-constructed (never-connected) or
+      * already-finalized handle: if the refcounted payload was never
+      * initialized — or was already destroyed — there is nothing to release
+      * and close() is a no-op.
+      *
       * If multiple handles share the same SafeRefCounted payload (e.g. a
       * Transaction borrows the connection), the PGconn is finalized as soon
       * as this handle closes it, regardless of other holders' refcounts.
       * Only call close() when you are the sole owner (pool slots always are).
       **/
     void close() @trusted {
+        if (!_connection.refCountedStore.isInitialized)
+            return;
         _connection.borrow!((auto ref conn) @trusted { conn.close(); });
     }
 
