@@ -72,3 +72,6 @@ jobs:
 
       - name: Run tests
         run: dub test -b unittest-cov -c "unittest${{ matrix.buildConf }}"
+
+      - name: Run tests (vibe)
+        run: dub test :vibe -c "unittest${{ matrix.buildConf }}"
