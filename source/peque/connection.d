@@ -4,9 +4,8 @@ private import std.typecons;
 private import std.exception: enforce;
 private import std.format: format;
 private import std.string: toStringz, fromStringz;
-private import std.algorithm: canFind;
+private import std.algorithm: canFind, map;
 private import std.array: array;
-private import std.algorithm: map;
 
 private import versioned: Version;
 
@@ -16,7 +15,7 @@ private import peque.pg_type;
 private import peque.pg_format;
 private import peque.result;
 private import peque.wait_strategy;
-private import peque.converter: PGValue;
+private import peque.converter: PGValue, convertToPG;
 
 
 /** Controls what happens at the end of a successful transaction() call.
@@ -216,7 +215,6 @@ struct Connection {
       *     Escaped string value, but without surrounding single quotes.
       **/
     string escapeString(in string value) {
-        import std.algorithm: canFind;
         enforce!QueryEscapingError(
             !value.canFind('\0'),
             "escapeString: value contains a null byte, which would silently truncate the SQL string");
@@ -433,7 +431,6 @@ struct Connection {
     /// ditto
     auto execParams(T...)(in string query, T params) {
         import std.conv: to;
-        import peque.converter;
 
         PGValue[T.length] values = mixin(() {
             string r = "[";
@@ -704,8 +701,6 @@ struct PreparedStatement {
       * Uses the same async path as execParams (PQsendQueryPrepared + flush/consume loop).
       **/
     auto exec(T...)(T params) {
-        import peque.converter;
-
         static if (T.length == 0) {
             _conn._connection.borrow!((auto ref conn) @trusted {
                 enforce!QueryError(
