@@ -7,7 +7,7 @@ copyright "Copyright © 2023, Dmytro Katyukha"
 license "MPL-2"
 target "library"
 
-/*dflags "-preview=dip1000" "-preview=in"*/
+/* dflags "-preview=dip1000" */
 
 dependency "versioned" version=">=0.1.0"
 dependency "bindbc-common" version=">=1.0.5"

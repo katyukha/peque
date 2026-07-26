@@ -32,11 +32,11 @@ private struct ResultInternalData {
         }
     }
 
-    // Must not be copiable
+    // Must not be copiable — opAssign is intentionally left enabled so that
+    // SafeRefCounted can move-initialise the payload via std.algorithm.mutation.move.
+    // move() resets the source to T.init (null pointer) before the destructor runs,
+    // so there is no double-free risk.
     @disable this(this);
-
-    // Must not be assignable
-    @disable void opAssign(typeof(this));
 }
 
 /// Ref-counted connection to postgres
