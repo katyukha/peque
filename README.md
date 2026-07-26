@@ -326,7 +326,9 @@ bool any = repo.query().where!"active"(true).exists();
 // First match — returns Nullable!Partner
 auto first = repo.query().where!"name"("Acme Ltd").first();
 
-// Delete matching rows — returns count deleted
+// Delete matching rows — returns count deleted.
+// delete_()/update() affect exactly the rows all() would return, including
+// relation-path predicates like F!"partner.name".isNull (LEFT JOIN semantics).
 long deleted = repo.query().where!"active"(false).delete_();
 
 // Partial update — set only named fields
@@ -477,7 +479,10 @@ Note: single-level `exists!()` only. Nested `exists!()` calls conflict on the
 
 `asSubquery!"field"()` captures a QuerySet as a single-column subquery atom
 without hitting the database. Pass it to `F!(M,"field").inSubquery()` for
-`IN (SELECT …)`, or negate with `~` for `NOT IN`.
+`IN (SELECT …)`, or negate with `~` for `NOT IN`. The subquery keeps the
+QuerySet's ORDER BY (explicit or `@defaultOrder`), so
+`orderBy(F!"amount".desc).limit(5).asSubquery!"id"()` really is "ids of the
+top 5 by amount", not 5 arbitrary rows.
 
 ```d
 // IDs of active categories — no DB call yet
