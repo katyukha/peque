@@ -515,9 +515,12 @@ struct Connection {
       * Returns: PreparedStatement handle
       **/
     auto prepare(in string name, in string query) {
-        import std.regex: matchFirst;
+        import std.ascii: isAlpha, isAlphaNum;
+        import std.algorithm: all;
         enforce!QueryError(
-            !matchFirst(name, `^[A-Za-z_][A-Za-z0-9_]*$`).empty,
+            name.length > 0 &&
+            (name[0] == '_' || isAlpha(name[0])) &&
+            name[1 .. $].all!(c => c == '_' || isAlphaNum(c)),
             "PreparedStatement name must be alphanumeric+underscore, got: " ~ name);
 
         _connection.borrow!((auto ref conn) @trusted {
