@@ -353,6 +353,31 @@ unittest {
 }
 
 
+// ---------------------------------------------------------------------------
+// Arrays: empty-string elements must not crash the parser
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // A leading empty-string element triggers &tmp_value[0] when tmp_value
+    // is empty because the quoted value "" produces no characters.
+    auto res = c.exec("SELECT ARRAY['', 'b', '']::text[]").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == ["", "b", ""],
+        "array with empty-string elements must decode correctly");
+
+    // Single empty element — smallest reproducer.
+    res = c.exec("SELECT ARRAY['']::text[]").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == [""]);
+}
+
+
 // Separate case to test things that are not allowed in safe code
 @system unittest {
     import std.datetime;

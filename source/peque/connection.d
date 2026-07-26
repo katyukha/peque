@@ -301,11 +301,12 @@ struct Connection {
         });
     }
 
-    /** Collect the last result and clear any intermediate ones.
+    /** Collect the last result and discard any intermediate ones.
       *
-      * PQsendQuery can produce multiple results (multi-statement strings).
+      * PQsendQuery can produce multiple results for multi-statement strings.
       * We return the last one (matching PQexec behaviour) and PQclear all
       * earlier ones. Caller must call ensureQueryOk() on the returned Result.
+      * Use _collectAllResults() when all results are needed.
       **/
     private Result _collectResult() @trusted {
         return _connection.borrow!((auto ref conn) @trusted {
@@ -322,18 +323,49 @@ struct Connection {
         });
     }
 
+    /** Collect every result produced by a multi-statement query.
+      *
+      * Returns one Result per statement in order. Caller must call
+      * ensureQueryOk() on each result (execMulti() does this automatically).
+      *
+      * Implementation note: raw PGresult* pointers are collected first, then
+      * wrapped into Result via moveEmplace. This avoids growing a Result[]
+      * inside a non-pure @trusted context, which would instantiate
+      * core.internal.lifetime.__doPostblit!Result with non-pure attributes and
+      * cause a linker symbol mismatch when the library is linked against code
+      * compiled with -allinst (e.g. the migrate subpackage tests).
+      **/
+    private Result[] _collectAllResults() @trusted {
+        auto ptrs = _connection.borrow!((auto ref conn) @trusted {
+            PGresult*[] acc;
+            PGresult* cur;
+            while ((cur = PQgetResult(conn._pg_conn)) !is null)
+                acc ~= cur;
+            return acc;
+        });
+        Result[] results;
+        results.length = ptrs.length;
+        foreach (i, p; ptrs) {
+            import core.lifetime: moveEmplace;
+            auto r = Result(p);
+            moveEmplace(r, results[i]);
+        }
+        return results;
+    }
+
     // --- Public query API ---
 
     /** Execute query as raw SQL (async path via PQsendQuery).
       *
       * Supports multi-statement strings (separated by semicolons).
-      * Only the result of the first statement is returned.
+      * The LAST result is returned (matching PQexec behaviour). Use execMulti()
+      * when you need all results from a multi-statement string.
       *
       * This method is NOT safe for user-supplied input — use execParams instead.
       *
       * Params:
       *     query = SQL query string (hardcoded/trusted SQL only)
-      * Returns: Result of the first statement
+      * Returns: Result of the last statement
       **/
     auto exec(in string query) {
         _connection.borrow!((auto ref conn) @trusted {
@@ -345,6 +377,31 @@ struct Connection {
         _waitForResult();
         auto r = _collectResult();
         return r.ensureQueryOk();
+    }
+
+    /** Execute a multi-statement SQL string and return every result.
+      *
+      * Like exec(), but collects all results instead of only the last one.
+      * Each result is validated with ensureQueryOk() — any statement that
+      * fails causes a QueryError to be thrown immediately.
+      *
+      * This method is NOT safe for user-supplied input — use execParams instead.
+      *
+      * Params:
+      *     query = SQL query string with one or more semicolon-separated statements
+      * Returns: Array of Result, one per statement, in execution order
+      **/
+    auto execMulti(in string query) {
+        _connection.borrow!((auto ref conn) @trusted {
+            enforce!QueryError(
+                PQsendQuery(conn._pg_conn, query.toStringz) == 1,
+                "PQsendQuery failed: " ~ errorMessage);
+        });
+        _flushLoop();
+        _waitForResult();
+        auto results = _collectAllResults();
+        foreach (ref r; results) r.ensureQueryOk();
+        return results;
     }
 
     /** Execute query with parameters (async path via PQsendQueryParams).

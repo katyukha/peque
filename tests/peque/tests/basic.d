@@ -131,6 +131,28 @@ unittest {
     assert(res.nfields == 0);
 }
 
+// execMulti — returns every result from a multi-statement string
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    auto results = c.execMulti("SELECT 1; SELECT 2; SELECT 3");
+    assert(results.length == 3, "execMulti must return one Result per statement");
+    assert(results[0].getValue!int(0, 0) == 1);
+    assert(results[1].getValue!int(0, 0) == 2);
+    assert(results[2].getValue!int(0, 0) == 3);
+
+    // exec returns the LAST result (matching PQexec behaviour)
+    auto last = c.exec("SELECT 1; SELECT 2; SELECT 3");
+    assert(last.getValue!int(0, 0) == 3, "exec must return the last result");
+}
+
+
 // Test connection.serverVersion
 unittest {
     import std.typecons;

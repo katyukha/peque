@@ -91,11 +91,15 @@ T convertTextTypeToD(T)(
         in int length,
         in PGType pg_type)
 pure @trusted if (is(T == DateTime)) {
-        import std.datetime.timezone;
+    import std.datetime.timezone;
     switch(pg_type) {
         case PGType.GUESS:
         case PGType.TIMESTAMP:
         case PGType.TIMESTAMPTZ:
+            enforce!ConversionError(
+                length >= 19,
+                "Cannot parse DateTime '%s' from postgres: value is too short".format(
+                    data[0 .. length]));
             return DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]);
         default:
             assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
@@ -214,7 +218,7 @@ T convertTextTypeToD(T)(
                             // add it
                             tmp_value ~= data[ts .. pos - 1];
 
-                        result ~= convertTextTypeToD!(ElementType!T)(&tmp_value[0], cast(int)tmp_value.length, PGType.GUESS);
+                        result ~= convertTextTypeToD!(ElementType!T)(tmp_value.ptr, cast(int)tmp_value.length, PGType.GUESS);
                         quoted_value = false;
                     } else {
                         result ~= convertTextTypeToD!(ElementType!T)(&data[start], pos-start, PGType.GUESS);
@@ -228,4 +232,15 @@ T convertTextTypeToD(T)(
         }
     }
     return result;
+}
+
+
+// DateTime: value shorter than 19 bytes must throw ConversionError, not slice OOB.
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: ConversionError;
+    immutable(char)* p = "2023-07-17".ptr;
+    convertTextTypeToD!DateTime(p, 10, PGType.TIMESTAMP).assertThrown!ConversionError;
+    convertTextTypeToD!DateTime(p, 10, PGType.TIMESTAMPTZ).assertThrown!ConversionError;
+    convertTextTypeToD!DateTime(p, 10, PGType.GUESS).assertThrown!ConversionError;
 }
