@@ -281,6 +281,44 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// Out-of-range column index on a row must throw ColNotExistsError, not read
+// silently as NULL (PQgetisnull returns 1 for out-of-range indices).
+// ---------------------------------------------------------------------------
+
+unittest {
+    import peque.exception: ColNotExistsError;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    auto res = c.execParams("SELECT 1, 2");  // two columns: valid indices 0, 1
+    res.ensureQueryOk;
+    auto row = res[0];
+
+    assert(row.nfields == 2, "ResultRow.nfields must report the column count");
+    assert(row[0].as!int == 1);
+    assert(row[1].as!int == 2);
+
+    // nfields enables iterating a row's columns by index.
+    int sum = 0;
+    foreach (i; 0 .. row.nfields) sum += row[i].as!int;
+    assert(sum == 3);
+
+    // Out-of-range and negative indices must both throw, mirroring the
+    // string-name overload and Result.getValue.
+    assert(collectException!ColNotExistsError(row[2]) !is null,
+        "column index past the last field must throw ColNotExistsError");
+    assert(collectException!ColNotExistsError(row[-1]) !is null,
+        "negative column index must throw ColNotExistsError");
+}
+
+
+// ---------------------------------------------------------------------------
 // Connection failure: bad credentials / unreachable host throws ConnectionError
 // ---------------------------------------------------------------------------
 

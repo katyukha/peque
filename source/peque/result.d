@@ -153,7 +153,18 @@ struct ResultRow {
         _row_number = row_number;
     }
 
+    /// Number of columns (fields) in this row.
+    /// Mirrors Result.nfields; enables iterating a row's columns by index.
+    int nfields() @trusted {
+        return _result.borrow!((auto ref res) @trusted {
+            return PQnfields(res._pg_result);
+        });
+    }
+
     auto opIndex(in int col_number) {
+        enforce!ColNotExistsError(
+            col_number >= 0 && col_number < nfields,
+            "Column %s does not exists in result!".format(col_number));
         return ResultValue(_result, _row_number, col_number);
     }
 
