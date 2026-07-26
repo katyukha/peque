@@ -4,6 +4,74 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **LISTEN/NOTIFY** support via `Connection.listen`/`unlisten`.
+- **Connection pool** (`peque.pool`) — Connection pool implementation.
+- **Prepared statements** — `Connection.prepare(name, sql)` registers a
+  server-side prepared statement and returns a move-only `PreparedStatement`
+  handle; its destructor issues `DEALLOCATE` automatically.
+- **`Connection.execMulti`** — execute multiple `;`-separated statements in a
+  single call, checking each result.
+- **`escapeIdentifier`** — safe quoting of SQL identifiers (also used
+  internally by `listen`/`unlisten`).
+- **`UUID` support** — `std.uuid.UUID` values round-trip as PostgreSQL `uuid`.
+- **`Nullable!U[]` array conversion** — 1-D arrays with `Nullable!U` elements
+  now round-trip; SQL NULL elements decode to empty `Nullable`s.
+- **`ResultRow.nfields`** — column count on a row (mirrors `Result.nfields`).
+- **`peque:vibe`** — vibe.d fiber-aware integration.
+
+### Fixed
+
+- **`Connection.close()` under GC finalization** — `close()` on a
+  never-connected or already-finalized handle is now a safe no-op instead of
+  throwing `AssertError` (hit when a GC-owned `ConnectionPool` was finalized).
+- **Float parameter precision** — float parameters are serialized with
+  round-trip-exact significant digits (`%g`-style); fixed-point `%.20f` used
+  to zero magnitudes below ~5e-21 and truncate small values.
+- **Native parameter OIDs** — integer and float parameters are declared as
+  `INT2`/`INT4`/`INT8`/`FLOAT4`/`FLOAT8` instead of `NUMERIC` (`ulong` and
+  `real` stay `NUMERIC`), so indexed comparisons like `WHERE id = $1` use
+  btree indexes again. Arrays inherit the native OIDs.
+- **Release-mode safety guards** — the NUL-byte check on string parameters is
+  now a runtime `enforce` (`ConversionError`) instead of an `assert` that
+  vanished in `-release` builds.
+- **Result conversion errors survive `-release`** — data-driven `assert(0)`s
+  in `convertTextTypeToD` (bad boolean text, pg type unmappable to the
+  requested date/JSON type) now throw `ConversionError` instead of being
+  compiled out.
+- **Wide-string result conversion** — text columns read into `wstring` /
+  `dstring` are now transcoded instead of byte-cast (which yielded garbage).
+- **Array NULL elements** — an unquoted `NULL` in an array is a SQL NULL:
+  empty element in `Nullable!U[]`, `ConversionError` for non-nullable element
+  types. A quoted `"NULL"` stays the literal string.
+- **COPY no longer hangs the connection** — `COPY ... TO/FROM STDOUT/STDIN`
+  is rejected with `QueryError` instead of spinning at 100% CPU; the
+  connection stays usable.
+- **Non-blocking protocol edge cases** — the `PQflush` retry loop now waits
+  readable-or-writable and consumes input (write-only wait could deadlock),
+  and multi-statement `exec` no longer blocks inside `PQgetResult` after the
+  first statement.
+- **`serverVersion` on PostgreSQL 10.x** — 10.5 was reported as 10.0.5
+  (off-by-one in the two-/three-part format cutoff).
+- **Float special values** — `NaN`, `Infinity`, and `-Infinity` now round-trip
+  correctly through `execParams` and result deserialization.
+- **`escapeString`** — empty string no longer panics; null bytes are now
+  rejected with `QueryEscapingError` before reaching `PQescapeStringConn`.
+- **Row column bounds check** — `row[intIndex]` with an out-of-range index now
+  throws `ColNotExistsError`, matching the `row["name"]` overload; previously
+  it read silently as NULL.
+
+### Changed
+
+- **Async-only query path** — Use postgresql async infrastructure under the hood.
+- **JSON parameters are sent as `jsonb`** — `JSONValue` parameters are now
+  declared with the `JSONB` OID instead of `JSON`.
+
+---
+
 ## [0.1.0] - 2026-02-22
 
 ### Added

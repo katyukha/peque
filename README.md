@@ -87,6 +87,23 @@ if (!maybeQty.isNull)
     writeln(maybeQty.get);
 ```
 
+## Prepared statements
+
+`Connection.prepare()` registers a server-side prepared statement and returns a
+move-only `PreparedStatement` handle. Its destructor issues `DEALLOCATE`
+automatically when it goes out of scope.
+
+```d
+auto stmt = conn.prepare("find_user",
+    "SELECT id, name FROM users WHERE id = $1");
+
+auto result = stmt.exec(42);
+// stmt goes out of scope → DEALLOCATE find_user sent automatically
+```
+
+Useful when the same query runs many times in the same connection session — the
+server parses and plans it once.
+
 ## Transactions
 
 `Connection.transaction()` runs a delegate inside a `BEGIN`/`COMMIT` block.
@@ -194,6 +211,40 @@ c.transaction!(OnSuccess.commit, IsolationLevel.serverDefault)((ref tx) { ... })
 | `repeatableRead` | `BEGIN ISOLATION LEVEL REPEATABLE READ` | |
 | `serializable` | `BEGIN ISOLATION LEVEL SERIALIZABLE` | May abort; application must retry |
 | `serverDefault` | `BEGIN` | Respects server/role/database configuration |
+
+
+## vibe.d (`peque:vibe`)
+
+`peque:vibe` provides a fiber-aware wait strategy and connection pool for
+vibe.d applications. Instead of blocking the OS thread while waiting for
+PostgreSQL, control yields to the vibe.d event loop.
+
+```d
+dependency "peque:vibe" version="~>0.1.0"
+```
+
+```d
+import peque;
+import peque.vibe;
+
+// Single connection with fiber-aware I/O
+auto conn = Connection(params, VibeWaitStrategy());
+
+// Connection pool — makeVibePool injects VibeWaitStrategy and non-blocking mode
+auto pool = makeVibePool(8, [
+    "dbname": "myapp",
+    "user":   "app",
+    "host":   "localhost",
+    "port":   "5432",
+]);
+
+// Borrow a connection for the duration of a delegate; returned automatically
+auto result = pool.borrow((ref Connection conn) {
+    return conn.execParams("SELECT name FROM users WHERE id = $1", userId);
+});
+```
+
+---
 
 ## LISTEN / NOTIFY
 
