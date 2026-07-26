@@ -6,6 +6,7 @@ private import std.format: format;
 private import std.string: toStringz, fromStringz;
 private import std.algorithm: canFind, map;
 private import std.array: array;
+private import core.time: Duration;
 
 private import versioned: Version;
 
@@ -48,14 +49,33 @@ enum IsolationLevel {
 }
 
 
-/** Type-erased pair of wait delegates stored in every Connection.
+/** Type-erased trio of wait delegates stored in every Connection.
   *
   * Set once at construction from a WaitStrategy value; never mutated afterwards.
   * Read-only during query dispatch — trivially thread-safe without atomics.
+  *
+  * The first two slots are required (isWaitStrategy).  The third is optional:
+  * it is null when the strategy does not provide the timed
+  * `bool waitReadable(int fd, Duration)` overload (hasTimedWaitReadable), and
+  * only waitNotifications depends on it.
   **/
 private struct RuntimeWaitStrategy {
     void delegate(int fd) @safe waitReadable;
     void delegate(int fd) @safe waitWritable;
+    /// Optional timed wait; null when the strategy lacks the timeout overload.
+    bool delegate(int fd, Duration timeout) @safe waitReadableTimeout;
+}
+
+
+/** A NOTIFY message received from the server on a LISTENed channel.
+  *
+  * All strings are GC-owned copies — safe to retain after the call that
+  * produced them (the underlying libpq memory is released immediately).
+  **/
+struct Notification {
+    string channel;    /// channel name the notification was sent on
+    string payload;    /// payload string (empty when NOTIFY had no payload)
+    int backendPid;    /// PID of the notifying server backend
 }
 
 
@@ -166,6 +186,9 @@ struct Connection {
         _asyncHooks = RuntimeWaitStrategy(
             (int fd) @trusted { ws.waitReadable(fd); },
             (int fd) @trusted { ws.waitWritable(fd); });
+        static if (hasTimedWaitReadable!WS)
+            _asyncHooks.waitReadableTimeout =
+                (int fd, Duration timeout) @trusted => ws.waitReadable(fd, timeout);
     }
 
     auto serverVersion() {
@@ -236,6 +259,116 @@ struct Connection {
             // size bytes were written (not counting terminating NUL)
             return buf[0 .. size].idup;
         });
+    }
+
+    /** Escape a string for use as an SQL identifier (channel, table or
+      * column name).
+      *
+      * Returns:
+      *     The identifier wrapped in double quotes, with internal double
+      *     quotes doubled — safe to splice into SQL where an identifier is
+      *     expected (e.g. LISTEN, which cannot take $1 parameters).
+      **/
+    string escapeIdentifier(in string value) {
+        enforce!QueryEscapingError(
+            !value.canFind('\0'),
+            "escapeIdentifier: value contains a null byte, which would silently truncate the identifier");
+        return _connection.borrow!((auto ref conn) @trusted {
+            char* res = PQescapeIdentifier(
+                conn._pg_conn,
+                value.length ? value.ptr : "".ptr,
+                value.length);
+            enforce!QueryEscapingError(
+                res !is null,
+                "Cannot escape identifier %s: %s".format(value, errorMessage));
+            scope(exit) PQfreemem(res);
+            return res.fromStringz.idup;
+        });
+    }
+
+    // --- LISTEN / NOTIFY ---
+
+    /** Subscribe this connection to a notification channel (plain LISTEN;
+      * the channel name is identifier-quoted).
+      *
+      * Notifications are delivered by the server only between transactions —
+      * keep the listening connection autocommit and out of any pool, owned by
+      * a single consumer.  Subscriptions do NOT survive reconnect: after
+      * constructing a fresh Connection, re-issue listen() for every channel.
+      **/
+    void listen(in string channel) {
+        exec("LISTEN " ~ escapeIdentifier(channel));
+    }
+
+    /// Unsubscribe this connection from a notification channel.
+    void unlisten(in string channel) {
+        exec("UNLISTEN " ~ escapeIdentifier(channel));
+    }
+
+    /** Return all notifications buffered for this connection — non-blocking.
+      *
+      * Consumes pending socket input once, then drains libpq's notification
+      * queue.  Returns an empty array when nothing is pending; never waits.
+      **/
+    Notification[] getNotifications() {
+        return _connection.borrow!((auto ref conn) @trusted {
+            enforce!ConnectionError(
+                PQconsumeInput(conn._pg_conn) == 1,
+                "PQconsumeInput failed while checking notifications: " ~ errorMessage);
+            return _drainNotifications(conn._pg_conn);
+        });
+    }
+
+    /** Wait up to `timeout` for notifications on LISTENed channels.
+      *
+      * Drain-first: notifications libpq buffered during earlier traffic are
+      * returned immediately without waiting on the socket — libpq may hold
+      * queued notifications while the socket shows nothing new, so waiting
+      * first would stall on already-delivered messages.
+      *
+      * A zero (or negative) timeout is a drain-only, non-blocking check.
+      *
+      * Returns:
+      *     Buffered or newly-arrived notifications; an empty array on
+      *     timeout.  An empty result after a readable wake-up is also normal
+      *     (spurious readable — e.g. keepalive traffic).
+      * Throws:
+      *     PequeException when this Connection's WaitStrategy lacks the timed
+      *     `bool waitReadable(int fd, Duration)` overload.
+      **/
+    Notification[] waitNotifications(Duration timeout) {
+        enforce!PequeException(
+            _asyncHooks.waitReadableTimeout !is null,
+            "waitNotifications requires a WaitStrategy providing "
+            ~ "`bool waitReadable(int fd, Duration timeout)`; the strategy used "
+            ~ "to construct this Connection does not provide it "
+            ~ "(PollWaitStrategy and VibeWaitStrategy both do).");
+
+        // (a) Drain first — libpq may hold notifications while the socket is idle.
+        auto pending = getNotifications();
+        if (pending.length > 0)
+            return pending;
+
+        // (b) Bounded wait for new socket data.
+        if (!_asyncHooks.waitReadableTimeout(_socket(), timeout))
+            return null;                     // timed out
+
+        // (c) Consume and drain whatever arrived (may legitimately be empty).
+        return getNotifications();
+    }
+
+    /// Drain libpq's already-buffered notification queue (no socket I/O).
+    private static Notification[] _drainNotifications(PGconn* pg) @trusted {
+        Notification[] result;
+        PGnotify* n;
+        while ((n = PQnotifies(pg)) !is null) {
+            scope(exit) PQfreemem(n);
+            result ~= Notification(
+                n.relname.fromStringz.idup,
+                n.extra.fromStringz.idup,
+                n.be_pid);
+        }
+        return result;
     }
 
     // --- Private async loop helpers ---

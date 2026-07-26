@@ -13,8 +13,11 @@
 module peque.vibe.wait_strategy;
 
 private import core.sys.posix.unistd : dup;
+private import core.time : Duration;
 
 private import vibe.core.core : createFileDescriptorEvent, FileDescriptorEvent;
+
+private import peque.wait_strategy : isWaitStrategy, hasTimedWaitReadable;
 
 
 /** WaitStrategy that yields the current vibe.d fiber until the libpq socket
@@ -47,6 +50,21 @@ struct VibeWaitStrategy {
         evt.wait(FileDescriptorEvent.Trigger.read);
     }
 
+    /** Yield the current fiber until the socket is readable or timeout elapses.
+      *
+      * Returns: true = readable, false = timed out.
+      *
+      * Same dup(2) rationale as the untimed overload.  The dup + event are
+      * deliberately created per call (not cached): the fd may change across a
+      * reconnect, and the call frequency is one per hub heartbeat interval, so
+      * the churn is negligible.
+      **/
+    bool waitReadable(int fd, Duration timeout) @trusted {
+        auto dupFd = dup(fd);
+        auto evt = createFileDescriptorEvent(dupFd, FileDescriptorEvent.Trigger.read);
+        return evt.wait(timeout, FileDescriptorEvent.Trigger.read);
+    }
+
     /** Yield the current fiber once to let the event loop drain the OS send buffer.
       *
       * PQflush returning 1 is transient and the retry loop in _flushLoop
@@ -57,3 +75,7 @@ struct VibeWaitStrategy {
         yield();
     }
 }
+
+
+static assert(isWaitStrategy!VibeWaitStrategy);
+static assert(hasTimedWaitReadable!VibeWaitStrategy);

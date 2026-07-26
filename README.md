@@ -195,6 +195,62 @@ c.transaction!(OnSuccess.commit, IsolationLevel.serverDefault)((ref tx) { ... })
 | `serializable` | `BEGIN ISOLATION LEVEL SERIALIZABLE` | May abort; application must retry |
 | `serverDefault` | `BEGIN` | Respects server/role/database configuration |
 
+## LISTEN / NOTIFY
+
+peque exposes PostgreSQL's notification bus: `listen()`/`unlisten()` subscribe
+a connection to channels, and `waitNotifications(Duration)` delivers
+`Notification { channel, payload, backendPid }` values with a bounded wait —
+the shape a server-sent-events hub or cache invalidator needs.
+
+```d
+import core.time: seconds;
+import peque;
+
+// The listening connection must be DEDICATED: autocommit (no open
+// transactions — the server delivers notifications only between
+// transactions), never pooled, owned by a single consumer loop.
+auto conn = Connection(params);            // or Connection(params, VibeWaitStrategy())
+conn.listen("events");                     // channel name is identifier-quoted
+
+bool running = true;
+while (running) {
+    // Bounded wait doubles as the heartbeat tick: empty result on timeout.
+    foreach (n; conn.waitNotifications(30.seconds))
+        dispatch(n.channel, n.payload);
+    // ...check stop flag, send SSE heartbeat, verify conn.status() here...
+}
+```
+
+Publishing needs no dedicated API — `pg_notify` is a regular parameterized
+query, and NOTIFY is transactional (delivered on COMMIT, discarded on
+ROLLBACK):
+
+```d
+conn.execParams("SELECT pg_notify($1, $2)", "events", payload);
+```
+
+`getNotifications()` is the non-blocking variant (drain only, never waits).
+`waitNotifications` drains libpq's buffer *before* waiting, so notifications
+that arrived during earlier traffic are returned immediately; a zero timeout
+makes it a pure non-blocking check.
+
+Caveats worth knowing:
+
+- **Delivery happens only between transactions** — keep the listening
+  connection out of transactions and out of pools.
+- **Subscriptions do not survive reconnect.** On a dead connection
+  (`conn.status() != CONNECTION_OK`), build a fresh `Connection` and re-issue
+  `listen()` for every channel (peque deliberately has no `PQreset` wrapper).
+- The server **deduplicates identical `(channel, payload)`** notifications
+  sent within one transaction.
+- Payloads are limited to **~8000 bytes** — send an ID, not a document.
+- `waitNotifications` requires the connection's `WaitStrategy` to provide the
+  optional timed overload `bool waitReadable(int fd, Duration timeout)`.
+  `PollWaitStrategy` (default) and `VibeWaitStrategy` both do; a custom
+  strategy without it keeps working for queries and `getNotifications()`.
+
+---
+
 ## Running tests
 
 Integration tests require a running PostgreSQL instance. Configure via

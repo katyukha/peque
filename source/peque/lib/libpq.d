@@ -56,6 +56,20 @@ struct pg_result;
 alias pg_conn PGconn;
 alias pg_result PGresult;
 
+/* PGnotify — notification message received via LISTEN/NOTIFY.
+ * Layout must match libpq-fe.h exactly, including the internal `next` field.
+ * Instances are heap-allocated by libpq (returned by PQnotifies) and must be
+ * released with PQfreemem.
+ */
+struct pgNotify {
+    char* relname;      // notification channel name
+    int   be_pid;       // process ID of the notifying server backend
+    char* extra;        // notification payload string
+    // Field below is private to libpq; never touch it.
+    pgNotify* next;     // list link (libpq internal)
+}
+alias pgNotify PGnotify;
+
 
 enum staticBinding = (){
 	version(BindBC_Static)      return true;
@@ -96,6 +110,8 @@ mixin(joinFnBinds!staticBinding((){
 
 
         {q{size_t}, q{PQescapeStringConn}, q{PGconn* conn, char* to, const(char)* from, size_t length, int* error}},
+        // Returns a libpq-malloc'd buffer (must be released with PQfreemem), or null on error
+        {q{char*}, q{PQescapeIdentifier}, q{PGconn* conn, const(char)* str, size_t length}},
 
         // Async send — return 1=ok, 0=fail
         {q{int}, q{PQsendQuery},              q{PGconn* conn, const(char)* query}},
@@ -107,6 +123,11 @@ mixin(joinFnBinds!staticBinding((){
         {q{int},       q{PQconsumeInput},     q{PGconn* conn}},         // 1=ok, 0=error
         {q{int},       q{PQisBusy},           q{PGconn* conn}},         // 1=busy, 0=result ready
         {q{PGresult*}, q{PQgetResult},        q{PGconn* conn}},
+
+        // LISTEN/NOTIFY — PQnotifies pops one buffered notification (null when drained);
+        // each returned PGnotify* must be released with PQfreemem
+        {q{PGnotify*}, q{PQnotifies},         q{PGconn* conn}},
+        {q{void},      q{PQfreemem},          q{void* ptr}},
 
         // Non-blocking mode
         {q{int}, q{PQsetnonblocking},         q{PGconn* conn, int arg}},
