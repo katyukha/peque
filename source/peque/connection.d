@@ -216,14 +216,19 @@ struct Connection {
       *     Escaped string value, but without surrounding single quotes.
       **/
     string escapeString(in string value) {
+        import std.algorithm: canFind;
+        enforce!QueryEscapingError(
+            !value.canFind('\0'),
+            "escapeString: value contains a null byte, which would silently truncate the SQL string");
+        if (value.length == 0) return "";
         return _connection.borrow!((auto ref conn) @trusted {
             int error;
             // allocate space for terminating NUL: 2*len + 1
             char[] buf = new char[value.length * 2 + 1];
             auto size = PQescapeStringConn(
                 conn._pg_conn,
-                &buf[0],      // to
-                &value[0],   // from
+                &buf[0],        // to
+                value.ptr,      // from (value.length > 0 guaranteed above)
                 value.length,
                 &error);
             enforce!QueryEscapingError(
