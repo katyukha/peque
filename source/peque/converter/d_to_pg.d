@@ -266,12 +266,17 @@ unittest {
 // Test that float serialization is round-trip exact for tiny and precise
 // magnitudes (fixed-point "%.20f" used to zero anything below ~5e-21).
 unittest {
+    import std.math: nextUp;
+
     static string pgText(T)(T v) {
         return convertToPG(v).value[0 .. $ - 1].idup;
     }
 
     assert(pgText(1.5e-25).to!double == 1.5e-25);
-    assert(pgText(-4.9e-324).to!double == -4.9e-324);  // smallest subnormal double
+    // smallest subnormal double — spelled via nextUp(0.0) because ldc2's
+    // lexer rejects the 4.9e-324 literal as "not representable"
+    immutable minSub = nextUp(0.0);
+    assert(pgText(-minSub).to!double == -minSub);
     assert(pgText(1.2345678901234567e-10).to!double == 1.2345678901234567e-10);
     assert(pgText(double.max).to!double == double.max);
     assert(pgText(1.5f).to!float == 1.5f);

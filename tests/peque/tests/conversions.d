@@ -334,8 +334,12 @@ unittest {
     auto res = c.execParams("SELECT $1::float8", 1.5e-25).ensureQueryOk;
     assert(res[0][0].get!double == 1.5e-25);
 
-    res = c.execParams("SELECT $1::float8", -4.9e-324).ensureQueryOk;
-    assert(res[0][0].get!double == -4.9e-324);
+    // smallest subnormal double — spelled via nextUp(0.0) because ldc2's
+    // lexer rejects the 4.9e-324 literal as "not representable"
+    import std.math: nextUp;
+    immutable minSub = nextUp(0.0);
+    res = c.execParams("SELECT $1::float8", -minSub).ensureQueryOk;
+    assert(res[0][0].get!double == -minSub);
 
     // Full 17-significant-digit precision must survive the round-trip
     res = c.execParams("SELECT $1::float8", 1.2345678901234567e-10).ensureQueryOk;
