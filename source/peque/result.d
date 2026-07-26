@@ -21,7 +21,8 @@ package(peque) enum ColFormat: int {
 
 /// Refcounted wrapper for PGresult to be used as ResultInternal.
 private struct ResultInternalData {
-    PGresult* _pg_result;
+    PGresult*           _pg_result;
+    private int[string] _colCache;   // name → column index, populated on demand
 
     this(PGresult* pg_result) { _pg_result = pg_result; }
 
@@ -37,6 +38,18 @@ private struct ResultInternalData {
     // move() resets the source to T.init (null pointer) before the destructor runs,
     // so there is no double-free risk.
     @disable this(this);
+
+    // Return the column index for name.
+    // Delegates to PQfnumber on the first access per distinct name (O(F)),
+    // then serves subsequent accesses for that name from the cache (O(1)).
+    // PQfnumber handles identifier case-folding, so this matches its semantics
+    // exactly without any custom lowercasing logic.
+    package int _colIdx(in string name) @trusted {
+        if (auto p = name in _colCache) return *p;
+        immutable idx = PQfnumber(_pg_result, name.toStringz);
+        _colCache[name] = idx;
+        return idx;
+    }
 }
 
 /// Ref-counted connection to postgres
@@ -145,10 +158,7 @@ struct ResultRow {
     }
 
     auto opIndex(in string col_name) {
-        // TODO: Maybe move to ResultInternal and dynamically create mapping to avoid frequent calls to PQfnumber?
-        int col_number = _result.borrow!((auto ref res) @trusted {
-            return PQfnumber(res._pg_result, col_name.toStringz);
-        });
+        int col_number = _fieldIndex(col_name);
         enforce!ColNotExistsError(
             col_number >= 0,
             "Column %s does not exists in result!".format(col_name));
@@ -156,10 +166,13 @@ struct ResultRow {
     }
 
     /** Return the column index for the given name, or -1 if not found.
+      *
+      * Uses a per-result name→index map built on first call (O(F) once, O(1)
+      * thereafter), replacing the previous per-call PQfnumber linear scan.
       **/
     package(peque) int _fieldIndex(in string name) @trusted {
         return _result.borrow!((auto ref res) @trusted {
-            return PQfnumber(res._pg_result, name.toStringz);
+            return res._colIdx(name);
         });
     }
 }
