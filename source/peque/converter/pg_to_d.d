@@ -43,8 +43,15 @@ T convertTextTypeToD(T)(
         in PGType pg_type)
 pure @trusted if (isScalarType!T) {
     // We have to take into account postgres types here
-    static if (isIntegral!T || isFloatingPoint!T)
+    static if (isIntegral!T)
         return data[0 .. length].to!T;
+    else static if (isFloatingPoint!T) {
+        auto s = data[0 .. length];
+        if (s == "NaN")       return T.nan;
+        if (s == "Infinity")  return T.infinity;
+        if (s == "-Infinity") return -T.infinity;
+        return s.to!T;
+    }
     else static if (isBoolean!T)
         switch (data[0 .. length]) {
             case "t":

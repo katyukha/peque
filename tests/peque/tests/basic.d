@@ -1,11 +1,13 @@
 module peque.tests.basic;
 
 private import std.process: environment;
+private import std.exception: collectException;
 
 private import versioned: Version;
 
 private import peque.connection: Connection;
 private import peque.result: Result;
+private import peque.exception: ConnectionError;
 
 
 unittest {
@@ -207,5 +209,78 @@ unittest {
     foreach(row; res) res_arr_3 ~= row["code"].as!string;
     assert(res_arr_3 == ["t1", "t2"]);
     assert(res.map!((row) => row["code"].as!string).array == ["t1", "t2"]);
+}
+
+
+// ---------------------------------------------------------------------------
+// Result range API on zero-row result — foreach must simply not iterate
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    auto res = c.exec("SELECT 1 WHERE FALSE");
+    assert(res.ntuples == 0);
+
+    int count = 0;
+    foreach (row; res) count++;
+    assert(count == 0, "foreach over zero-row result must not execute the body");
+
+    // Sanity: nfields is still defined even for empty results.
+    assert(res.nfields == 1);
+}
+
+
+// ---------------------------------------------------------------------------
+// execParams with zero bound parameters
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // No parameters at all — the variadic template must handle the empty case.
+    auto res = c.execParams("SELECT 42");
+    res.ensureQueryOk;
+    assert(res.ntuples == 1);
+    assert(res[0][0].as!int == 42, "execParams with zero params must return correct result");
+}
+
+
+// ---------------------------------------------------------------------------
+// Connection failure: bad credentials / unreachable host throws ConnectionError
+// ---------------------------------------------------------------------------
+
+unittest {
+    // Wrong password — connection must fail immediately with ConnectionError.
+    auto ex = collectException!ConnectionError(Connection(
+        dbname:   environment.get("POSTGRES_DB", "peque-test"),
+        user:     "no_such_user_xyz",
+        password: "wrong_password",
+        host:     environment.get("POSTGRES_HOST", "localhost"),
+        port:     environment.get("POSTGRES_PORT", "5432"),
+    ));
+    assert(ex !is null, "bad credentials must throw ConnectionError");
+
+    // Unreachable port — connection must also throw ConnectionError.
+    auto ex2 = collectException!ConnectionError(Connection(
+        dbname:   "irrelevant",
+        user:     "irrelevant",
+        password: "irrelevant",
+        host:     "127.0.0.1",
+        port:     "19999",
+    ));
+    assert(ex2 !is null, "unreachable host/port must throw ConnectionError");
 }
 

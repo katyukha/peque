@@ -66,7 +66,11 @@ PGValue convertToPG(T) (in T value)
 /// ditto
 PGValue convertToPG(T) (in T value)
 @safe pure if (isFloatingPoint!T) {
-    auto v = format("%.20f", value);
+    import std.math: isNaN, isInfinity;
+    string v;
+    if (value.isNaN)           v = "NaN";
+    else if (value.isInfinity) v = value > 0 ? "Infinity" : "-Infinity";
+    else                       v = format("%.20f", value);
     return PGValue(
         PGType.NUMERIC,
         PGFormat.TEXT,

@@ -246,6 +246,113 @@ unittest {
 }
 
 
+// ---------------------------------------------------------------------------
+// Integer boundary values
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.datetime;
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // int (int4) boundaries
+    auto res = c.execParams("SELECT $1::int4", int.min).ensureQueryOk;
+    assert(res[0][0].get!int == int.min);
+
+    res = c.execParams("SELECT $1::int4", int.max).ensureQueryOk;
+    assert(res[0][0].get!int == int.max);
+
+    // long (int8) boundaries
+    res = c.execParams("SELECT $1::int8", long.min).ensureQueryOk;
+    assert(res[0][0].get!long == long.min);
+
+    res = c.execParams("SELECT $1::int8", long.max).ensureQueryOk;
+    assert(res[0][0].get!long == long.max);
+}
+
+
+// ---------------------------------------------------------------------------
+// Floating-point special values: NaN and Infinity
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.math: isNaN, isInfinity;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    auto res = c.exec("SELECT 'NaN'::float8").ensureQueryOk;
+    assert(res[0][0].get!double.isNaN, "NaN must round-trip as NaN");
+    assert(res[0][0].get!string == "NaN");
+
+    res = c.exec("SELECT 'Infinity'::float8").ensureQueryOk;
+    assert(res[0][0].get!double.isInfinity, "Infinity must round-trip as infinity");
+    assert(res[0][0].get!double > 0, "Infinity must be positive");
+
+    res = c.exec("SELECT '-Infinity'::float8").ensureQueryOk;
+    assert(res[0][0].get!double.isInfinity, "-Infinity must round-trip as infinity");
+    assert(res[0][0].get!double < 0, "-Infinity must be negative");
+
+    // Round-trip through execParams
+    res = c.execParams("SELECT $1::float8", double.nan).ensureQueryOk;
+    assert(res[0][0].get!double.isNaN, "NaN parameter must round-trip as NaN");
+
+    res = c.execParams("SELECT $1::float8", double.infinity).ensureQueryOk;
+    assert(res[0][0].get!double.isInfinity && res[0][0].get!double > 0);
+
+    res = c.execParams("SELECT $1::float8", -double.infinity).ensureQueryOk;
+    assert(res[0][0].get!double.isInfinity && res[0][0].get!double < 0);
+}
+
+
+// ---------------------------------------------------------------------------
+// Arrays: empty array and NULL element
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.conv: ConvException;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // Empty array: must decode to an empty D slice, not throw.
+    auto res = c.execParams("SELECT $1::int[]", cast(int[])[]).ensureQueryOk;
+    assert(res[0][0].get!(int[]) == [], "empty int array must decode to []");
+
+    res = c.exec("SELECT ARRAY[]::text[]").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == [], "empty text array must decode to []");
+
+    // NULL element in an int array: the array parser cannot convert the
+    // literal token "NULL" to int — ConvException is thrown.
+    // Nullable element arrays are not yet supported (see TODO in pg_to_d.d).
+    c.exec("SELECT ARRAY[1,NULL,3]::int[]")
+        .ensureQueryOk
+        [0][0].get!(int[])
+        .assertThrown!ConvException;
+
+    // NULL element in a string array: the unquoted token "NULL" is treated
+    // as the literal string "NULL" — no error, but it is NOT a D null.
+    res = c.exec("SELECT ARRAY['a',NULL,'b']::text[]").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == ["a", "NULL", "b"],
+        "NULL in text array decodes to the literal string \"NULL\"");
+}
+
+
 // Separate case to test things that are not allowed in safe code
 @system unittest {
     import std.datetime;
