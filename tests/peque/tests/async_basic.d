@@ -4,7 +4,7 @@
   * existing tests in other files verify query correctness on the default
   * (blocking) wait strategy.  These tests add two contracts:
   *
-  *  1. Infrastructure: waitReadable is invoked at least once per query when
+  *  1. Infrastructure: a read wait is invoked at least once per query when
   *     a MockWS is in use — confirms the async loop is actually reached.
   *  2. Correctness: results returned through the async path are accurate —
   *     correct values, correct row counts, no cross-query contamination.
@@ -31,22 +31,22 @@ private Connection mockConn(ref MockWaitStrategy mock) {
 
 
 // ---------------------------------------------------------------------------
-// Infrastructure: waitReadable is called for every query
+// Infrastructure: a read wait happens for every query
 // ---------------------------------------------------------------------------
 
 unittest {
     MockWaitStrategy mock;
     auto c = mockConn(mock);
 
-    auto before = mock.readableCount;
+    auto before = mock.readCount;
     c.exec("SELECT 1");
-    assert(mock.readableCount > before,
-        "waitReadable must be called at least once per exec()");
+    assert(mock.readCount > before,
+        "a read wait must happen at least once per exec()");
 
-    before = mock.readableCount;
+    before = mock.readCount;
     c.execParams("SELECT $1::int", 42);
-    assert(mock.readableCount > before,
-        "waitReadable must be called at least once per execParams()");
+    assert(mock.readCount > before,
+        "a read wait must happen at least once per execParams()");
 }
 
 unittest {
@@ -57,8 +57,8 @@ unittest {
     foreach (_; 0 .. n)
         c.exec("SELECT 1");
 
-    assert(mock.readableCount >= n,
-        "readableCount must accumulate across queries");
+    assert(mock.readCount >= n,
+        "readCount must accumulate across queries");
 }
 
 
@@ -119,7 +119,7 @@ unittest {
 // Error propagation: bad SQL raises QueryError through the async path
 // ---------------------------------------------------------------------------
 
-// The async loop (send → flush → waitReadable → consumeInput → collectResult)
+// The async loop (send → flush → read-wait → consumeInput → collectResult)
 // must propagate errors correctly; errors must not be silently swallowed.
 unittest {
     MockWaitStrategy mock;
@@ -170,7 +170,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// PreparedStatement: uses the same async path, waitReadable must be called
+// PreparedStatement: uses the same async path, a read wait must happen
 // ---------------------------------------------------------------------------
 
 unittest {
@@ -179,10 +179,10 @@ unittest {
 
     auto ps = c.prepare("add_two_ints", "SELECT $1::int + $2::int");
 
-    auto before = mock.readableCount;
+    auto before = mock.readCount;
     auto res = ps.exec(3, 7);
-    assert(mock.readableCount > before,
-        "PreparedStatement.exec must invoke waitReadable through the async path");
+    assert(mock.readCount > before,
+        "PreparedStatement.exec must go through the async read-wait path");
     assert(res[0][0].as!int == 10,
         "PreparedStatement result must be correct through async path");
 

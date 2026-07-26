@@ -8,7 +8,7 @@
   *  - multiple notifications drained in one call, order preserved
   *  - listen/unlisten with a channel name that requires identifier quoting
   *  - escapeIdentifier correctness
-  *  - clear error when the WaitStrategy lacks the timed waitReadable overload
+  *  - clear error when the WaitStrategy lacks the timed wait overload
   *  - transactional delivery: NOTIFY is invisible until COMMIT
   **/
 module peque.tests.notify;
@@ -191,20 +191,18 @@ unittest {
 
 /// Minimal strategy satisfying only the required isWaitStrategy surface.
 private struct NoTimeoutWS {
-    void waitReadable(int fd) {
+    void wait(int fd, WaitMask mask) {
         import core.sys.posix.poll;
-        pollfd pfd = {fd: fd, events: POLLIN};
-        poll(&pfd, 1, -1);
-    }
-    void waitWritable(int fd) {
-        import core.sys.posix.poll;
-        pollfd pfd = {fd: fd, events: POLLOUT};
+        short ev = 0;
+        if (mask & WaitMask.read)  ev |= POLLIN;
+        if (mask & WaitMask.write) ev |= POLLOUT;
+        pollfd pfd = {fd: fd, events: ev};
         poll(&pfd, 1, -1);
     }
 }
 
 static assert(isWaitStrategy!NoTimeoutWS);
-static assert(!hasTimedWaitReadable!NoTimeoutWS);
+static assert(!hasTimedWait!NoTimeoutWS);
 
 unittest {
     auto c = Connection(
@@ -223,7 +221,7 @@ unittest {
     // …but waitNotifications refuses with an actionable message.
     auto e = collectException!PequeException(c.waitNotifications(1.msecs));
     assert(e !is null);
-    assert(e.msg.canFind("waitReadable(int fd, Duration timeout)"));
+    assert(e.msg.canFind("wait(int fd, WaitMask mask, Duration timeout)"));
 }
 
 
@@ -242,12 +240,12 @@ unittest {
         MockWS(&mock),
     );
 
-    // timedReadableResult=false simulates an immediate timeout: the timed
-    // slot is invoked once and waitNotifications returns empty.
-    mock.timedReadableResult = false;
-    auto before = mock.timedReadableCount;
+    // timedResult=false simulates an immediate timeout: the timed slot is
+    // invoked once and waitNotifications returns empty.
+    mock.timedResult = false;
+    auto before = mock.timedCount;
     assert(c.waitNotifications(50.msecs).length == 0);
-    assert(mock.timedReadableCount == before + 1);
+    assert(mock.timedCount == before + 1);
 }
 
 

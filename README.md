@@ -245,7 +245,7 @@ Caveats worth knowing:
   sent within one transaction.
 - Payloads are limited to **~8000 bytes** — send an ID, not a document.
 - `waitNotifications` requires the connection's `WaitStrategy` to provide the
-  optional timed overload `bool waitReadable(int fd, Duration timeout)`.
+  optional timed overload `bool wait(int fd, WaitMask mask, Duration timeout)`.
   `PollWaitStrategy` (default) and `VibeWaitStrategy` both do; a custom
   strategy without it keeps working for queries and `getNotifications()`.
 

@@ -49,21 +49,20 @@ enum IsolationLevel {
 }
 
 
-/** Type-erased trio of wait delegates stored in every Connection.
+/** Type-erased pair of wait delegates stored in every Connection.
   *
   * Set once at construction from a WaitStrategy value; never mutated afterwards.
   * Read-only during query dispatch — trivially thread-safe without atomics.
   *
-  * The first two slots are required (isWaitStrategy).  The third is optional:
-  * it is null when the strategy does not provide the timed
-  * `bool waitReadable(int fd, Duration)` overload (hasTimedWaitReadable), and
-  * only waitNotifications depends on it.
+  * The first slot is required (isWaitStrategy).  The second is optional: it
+  * is null when the strategy does not provide the timed
+  * `bool wait(int fd, WaitMask, Duration)` overload (hasTimedWait), and only
+  * waitNotifications depends on it.
   **/
 private struct RuntimeWaitStrategy {
-    void delegate(int fd) @safe waitReadable;
-    void delegate(int fd) @safe waitWritable;
-    /// Optional timed wait; null when the strategy lacks the timeout overload.
-    bool delegate(int fd, Duration timeout) @safe waitReadableTimeout;
+    void delegate(int fd, WaitMask mask) @safe wait;
+    /// Optional timed wait; null when the strategy lacks the timed overload.
+    bool delegate(int fd, WaitMask mask, Duration timeout) @safe waitTimed;
 }
 
 
@@ -183,23 +182,30 @@ struct Connection {
     }
 
     private void _setHooks(WS)(WS ws) if (isWaitStrategy!WS) {
-        _asyncHooks = RuntimeWaitStrategy(
-            (int fd) @trusted { ws.waitReadable(fd); },
-            (int fd) @trusted { ws.waitWritable(fd); });
-        static if (hasTimedWaitReadable!WS)
-            _asyncHooks.waitReadableTimeout =
-                (int fd, Duration timeout) @trusted => ws.waitReadable(fd, timeout);
+        _asyncHooks.wait = (int fd, WaitMask mask) @trusted { ws.wait(fd, mask); };
+        static if (hasTimedWait!WS)
+            _asyncHooks.waitTimed =
+                (int fd, WaitMask mask, Duration timeout) @trusted
+                    => ws.wait(fd, mask, timeout);
     }
 
     auto serverVersion() {
-        // See docs here: https://www.postgresql.org/docs/current/libpq-status.html#LIBPQ-PQSERVERVERSION
         int v = _connection.borrow!((auto ref conn) @trusted => PQserverVersion(conn._pg_conn));
-        uint major_version = v / 10000;
-        uint minor_version = (v - major_version * 10000) / 100;
-        uint patch_version = v - major_version * 10000 - minor_version * 100;
-        if (major_version > 10 && minor_version == 0)
-            return Version(major_version, patch_version);
-        return Version(major_version, minor_version, patch_version);
+        return _parseServerVersion(v);
+    }
+
+    /** Decode a PQserverVersion() value.
+      *
+      * Since PostgreSQL 10 versions are two-part: major * 10000 + minor.
+      * Before 10 they were three-part: major * 10000 + minor * 100 + patch.
+      * See https://www.postgresql.org/docs/current/libpq-status.html#LIBPQ-PQSERVERVERSION
+      **/
+    package(peque) static Version _parseServerVersion(int v) @safe pure nothrow {
+        immutable major = v / 10000;
+        immutable rest  = v % 10000;
+        if (major >= 10)
+            return Version(major, rest);
+        return Version(major, rest / 100, rest % 100);
     }
 
     /// Check status of connection
@@ -334,14 +340,14 @@ struct Connection {
       *     (spurious readable — e.g. keepalive traffic).
       * Throws:
       *     PequeException when this Connection's WaitStrategy lacks the timed
-      *     `bool waitReadable(int fd, Duration)` overload.
+      *     `bool wait(int fd, WaitMask mask, Duration timeout)` overload.
       **/
     Notification[] waitNotifications(Duration timeout) {
         enforce!PequeException(
-            _asyncHooks.waitReadableTimeout !is null,
+            _asyncHooks.waitTimed !is null,
             "waitNotifications requires a WaitStrategy providing "
-            ~ "`bool waitReadable(int fd, Duration timeout)`; the strategy used "
-            ~ "to construct this Connection does not provide it "
+            ~ "`bool wait(int fd, WaitMask mask, Duration timeout)`; the strategy "
+            ~ "used to construct this Connection does not provide it "
             ~ "(PollWaitStrategy and VibeWaitStrategy both do).");
 
         // (a) Drain first — libpq may hold notifications while the socket is idle.
@@ -350,7 +356,7 @@ struct Connection {
             return pending;
 
         // (b) Bounded wait for new socket data.
-        if (!_asyncHooks.waitReadableTimeout(_socket(), timeout))
+        if (!_asyncHooks.waitTimed(_socket(), WaitMask.read, timeout))
             return null;                     // timed out
 
         // (c) Consume and drain whatever arrived (may legitimately be empty).
@@ -400,8 +406,16 @@ struct Connection {
       *
       * PQflush returns:
       *   0  — all data sent
-      *   1  — would block; wait for fd to be writable then retry
+      *   1  — would block
       *  -1  — error
+      *
+      * On 1, libpq's protocol requires waiting until the socket is readable
+      * OR writable and consuming input before retrying — waiting only for
+      * writability can deadlock when both TCP directions are full (the server
+      * blocked writing to us stops reading until we consume). PQconsumeInput
+      * never blocks (libpq sockets are internally non-blocking), so calling
+      * it after a possibly-writable wake-up is safe, and each readable
+      * wake-up clears its own condition — no busy-spin.
       **/
     private void _flushLoop() @trusted {
         int fd = _socket();
@@ -410,20 +424,115 @@ struct Connection {
                 int r = PQflush(conn._pg_conn);
                 if (r == 0) return;
                 enforce!QueryError(r > 0, "PQflush failed: " ~ errorMessage);
-                _asyncHooks.waitWritable(fd);
+                _asyncHooks.wait(fd, WaitMask.readWrite);
+                enforce!QueryError(
+                    PQconsumeInput(conn._pg_conn) == 1,
+                    "PQconsumeInput failed during flush: " ~ errorMessage);
             }
         });
     }
 
+    /** Ensure the next PQgetResult call will not block: consume socket input
+      * until PQisBusy == 0.
+      *
+      * Unlike _waitForResult, checks PQisBusy BEFORE waiting — between the
+      * results of a multi-statement query the next result may already be
+      * fully buffered, and the socket would never turn readable again.
+      * Without this, PQgetResult for statements after the first blocks inside
+      * libpq's own socket read — stalling every fiber of a vibe.d thread.
+      **/
+    private void _waitWhileBusy(PGconn* pg) @trusted {
+        while (PQisBusy(pg) == 1) {
+            _asyncHooks.wait(PQsocket(pg), WaitMask.read);
+            enforce!QueryError(
+                PQconsumeInput(pg) == 1,
+                "PQconsumeInput failed: " ~ errorMessage);
+        }
+    }
+
+    /** Reject an unexpected COPY sub-protocol result.
+      *
+      * No-op unless `cur` has PGRES_COPY_* status. libpq keeps returning
+      * fresh COPY results from PQgetResult until the COPY is actually
+      * performed, so the collect loops would spin forever. peque does not
+      * implement COPY: abort it (end our sending side, drain incoming data),
+      * drain all trailing results so the connection stays usable, and throw
+      * QueryError. Clears and nulls `cur` when it throws, so callers' cleanup
+      * guards can safely `PQclear(cur)` on other error paths.
+      **/
+    private void _rejectCopy(PGconn* pg, ref PGresult* cur) @trusted {
+        immutable st = PQresultStatus(cur);
+        if (st != PGRES_COPY_OUT && st != PGRES_COPY_IN && st != PGRES_COPY_BOTH)
+            return;
+        PQclear(cur);
+        cur = null;
+        _abortCopy(pg, st);
+
+        // Drain trailing results (the COPY's final status and any further
+        // statements of a multi-statement string). A later statement may be
+        // another COPY — abort those too instead of spinning on them.
+        while (true) {
+            _waitWhileBusy(pg);
+            auto r = PQgetResult(pg);
+            if (r is null) break;
+            immutable st2 = PQresultStatus(r);
+            PQclear(r);
+            if (st2 == PGRES_COPY_OUT || st2 == PGRES_COPY_IN
+                    || st2 == PGRES_COPY_BOTH)
+                _abortCopy(pg, st2);
+        }
+
+        throw new QueryError(
+            "COPY TO/FROM STDOUT/STDIN is not supported by peque. "
+            ~ "Use COPY with a server-side file, or psql's \\copy.");
+    }
+
+    /** Terminate one COPY sub-protocol: end our sending side, drain incoming
+      * data. Best-effort: a PQconsumeInput failure mid-abort breaks out
+      * silently and the caller still throws the friendly "COPY not supported"
+      * QueryError — the underlying connection error surfaces on the next
+      * query instead of here.
+      **/
+    private void _abortCopy(PGconn* pg, ExecStatusType st) @trusted {
+        immutable fd = PQsocket(pg);
+
+        // COPY IN / BOTH: end the client→server stream (server responds with
+        // an error result carrying this message). 0 = queue full — retry
+        // after a readWrite wait + consume (see _flushLoop for the rationale).
+        if (st == PGRES_COPY_IN || st == PGRES_COPY_BOTH) {
+            while (PQputCopyEnd(pg, "COPY rejected: not supported by peque") == 0) {
+                _asyncHooks.wait(fd, WaitMask.readWrite);
+                if (PQconsumeInput(pg) != 1) break;
+            }
+            while (PQflush(pg) == 1) {
+                _asyncHooks.wait(fd, WaitMask.readWrite);
+                if (PQconsumeInput(pg) != 1) break;
+            }
+        }
+
+        // COPY OUT / BOTH: drain the server→client stream until it ends.
+        if (st == PGRES_COPY_OUT || st == PGRES_COPY_BOTH) {
+            char* buf;
+            int r;
+            while ((r = PQgetCopyData(pg, &buf, 1)) != -1) {
+                if (r > 0) { PQfreemem(buf); continue; }
+                if (r == -2) break;             // connection trouble — stop
+                // r == 0: nothing buffered yet
+                _asyncHooks.wait(fd, WaitMask.read);
+                if (PQconsumeInput(pg) != 1) break;
+            }
+        }
+    }
+
     /** Wait until the server result is ready (PQisBusy == 0).
       *
-      * Loop: waitReadable → PQconsumeInput → check PQisBusy.
+      * Loop: wait for readable → PQconsumeInput → check PQisBusy.
       **/
     private void _waitForResult() @trusted {
         int fd = _socket();
         _connection.borrow!((auto ref conn) @trusted {
             while (true) {
-                _asyncHooks.waitReadable(fd);
+                _asyncHooks.wait(fd, WaitMask.read);
                 enforce!QueryError(
                     PQconsumeInput(conn._pg_conn) == 1,
                     "PQconsumeInput failed: " ~ errorMessage);
@@ -444,13 +553,21 @@ struct Connection {
             auto cur = PQgetResult(conn._pg_conn);
             enforce!QueryError(cur !is null,
                 "PQgetResult returned null — query send failed");
+            // Free the in-flight result if the walk throws mid-way
+            // (_rejectCopy nulls cur before throwing, so no double-free).
+            scope(failure) if (cur !is null) PQclear(cur);
             // Walk to the last result; PQclear each intermediate one.
-            PGresult* next;
-            while ((next = PQgetResult(conn._pg_conn)) !is null) {
+            while (true) {
+                _rejectCopy(conn._pg_conn, cur);    // throws on COPY
+                _waitWhileBusy(conn._pg_conn);      // never block in PQgetResult
+                auto next = PQgetResult(conn._pg_conn);
+                if (next is null) break;
                 PQclear(cur);
                 cur = next;
             }
-            return Result(cur);
+            auto result = Result(cur);
+            cur = null;                             // ownership transferred
+            return result;
         });
     }
 
@@ -469,9 +586,14 @@ struct Connection {
     private Result[] _collectAllResults() @trusted {
         auto ptrs = _connection.borrow!((auto ref conn) @trusted {
             PGresult*[] acc;
-            PGresult* cur;
-            while ((cur = PQgetResult(conn._pg_conn)) !is null)
+            scope(failure) foreach (p; acc) PQclear(p);
+            while (true) {
+                _waitWhileBusy(conn._pg_conn);      // never block in PQgetResult
+                auto cur = PQgetResult(conn._pg_conn);
+                if (cur is null) break;
+                _rejectCopy(conn._pg_conn, cur);    // throws on COPY (owns cur)
                 acc ~= cur;
+            }
             return acc;
         });
         Result[] results;
@@ -900,4 +1022,13 @@ unittest {
     import std.exception;
 
     Connection("some bad connection string").assertThrown!ConnectionError;
+}
+
+// PQserverVersion decoding: two-part since PG 10 (10.x included), three-part before
+unittest {
+    assert(Connection._parseServerVersion(160001) == Version(16, 1));
+    assert(Connection._parseServerVersion(140000) == Version(14, 0));
+    assert(Connection._parseServerVersion(100005) == Version(10, 5));
+    assert(Connection._parseServerVersion(100023) == Version(10, 23));
+    assert(Connection._parseServerVersion(90605)  == Version(9, 6, 5));
 }

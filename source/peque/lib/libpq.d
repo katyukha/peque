@@ -129,6 +129,14 @@ mixin(joinFnBinds!staticBinding((){
         {q{PGnotify*}, q{PQnotifies},         q{PGconn* conn}},
         {q{void},      q{PQfreemem},          q{void* ptr}},
 
+        // COPY sub-protocol — bound only to abort/drain an unexpected COPY
+        // so the connection stays usable (peque does not implement COPY).
+        // PQgetCopyData: >0=row length (buffer must be PQfreemem'd),
+        //                0=no data yet (async), -1=copy done, -2=error
+        // PQputCopyEnd:  1=ok, 0=would block (retry), -1=error
+        {q{int}, q{PQgetCopyData}, q{PGconn* conn, char** buffer, int async}},
+        {q{int}, q{PQputCopyEnd},  q{PGconn* conn, const(char)* errormsg}},
+
         // Non-blocking mode
         {q{int}, q{PQsetnonblocking},         q{PGconn* conn, int arg}},
         {q{int}, q{PQisnonblocking},          q{const(PGconn)* conn}},
