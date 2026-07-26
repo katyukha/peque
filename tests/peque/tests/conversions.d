@@ -167,13 +167,15 @@ unittest {
     assert(res.getValue(0, 0).get!string == "9223372036854775899");
     assert(res.getValue(0, 0).get!ulong == 9223372036854775899);
 
-    res = c.execParams("SELECT round($1,10)", 0.1782788489);
+    // round(v, n) exists only for numeric — float params now arrive as
+    // float4/float8 and need an explicit cast
+    res = c.execParams("SELECT round($1::numeric,10)", 0.1782788489);
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!float.isClose(0.1782788489f));
     assert(res.getValue(0, 0).get!double.isClose(0.1782788489));
     assert(res.getValue(0, 0).get!string == "0.1782788489");
 
-    res = c.execParams("SELECT round($1, 5)", 0.17827f);
+    res = c.execParams("SELECT round($1::numeric, 5)", 0.17827f);
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!float.isClose(0.1782700000f));
     assert(res.getValue(0, 0).get!double.isClose(0.1782700000));
@@ -312,6 +314,68 @@ unittest {
 
     res = c.execParams("SELECT $1::float8", -double.infinity).ensureQueryOk;
     assert(res[0][0].get!double.isInfinity && res[0][0].get!double < 0);
+}
+
+
+// ---------------------------------------------------------------------------
+// Floating-point exact round-trip: tiny magnitudes and full double precision
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // Values below ~5e-21 used to be zeroed by fixed-point formatting
+    auto res = c.execParams("SELECT $1::float8", 1.5e-25).ensureQueryOk;
+    assert(res[0][0].get!double == 1.5e-25);
+
+    res = c.execParams("SELECT $1::float8", -4.9e-324).ensureQueryOk;
+    assert(res[0][0].get!double == -4.9e-324);
+
+    // Full 17-significant-digit precision must survive the round-trip
+    res = c.execParams("SELECT $1::float8", 1.2345678901234567e-10).ensureQueryOk;
+    assert(res[0][0].get!double == 1.2345678901234567e-10);
+
+    res = c.execParams("SELECT $1::float8", double.max).ensureQueryOk;
+    assert(res[0][0].get!double == double.max);
+
+    res = c.execParams("SELECT $1::float4", 1.1754944e-38f).ensureQueryOk;
+    assert(res[0][0].get!float == 1.1754944e-38f);
+}
+
+
+// ---------------------------------------------------------------------------
+// Declared parameter OIDs: server must see native integer/float types,
+// not NUMERIC (which would defeat btree indexes on integer columns)
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    static string typeOf(P)(ref Connection c, P param) {
+        return c.execParams("SELECT pg_typeof($1)::text", param)
+                .getValue(0, 0).get!string;
+    }
+
+    assert(typeOf(c, short(1))  == "smallint");
+    assert(typeOf(c, 1)         == "integer");
+    assert(typeOf(c, 1L)        == "bigint");
+    assert(typeOf(c, 1uL)       == "numeric");  // exceeds bigint range
+    assert(typeOf(c, 1.0f)      == "real");
+    assert(typeOf(c, 1.0)       == "double precision");
+    assert(typeOf(c, [1, 2])    == "integer[]");
+    assert(typeOf(c, [1.0])     == "double precision[]");
 }
 
 

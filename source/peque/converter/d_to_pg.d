@@ -11,9 +11,11 @@ private import std.traits:
     isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray;
 private import std.range: ElementType;
 private import std.typecons: Nullable;
+private import std.exception: enforce;
 
 private import peque.pg_type;
 private import peque.pg_format;
+private import peque.exception: ConversionError;
 
 /** Struct that represents value to be passed to PQexecParams.
   **/
@@ -27,7 +29,9 @@ private import peque.pg_format;
         assert(
             is_null || (value.length > 0 && value[$ - 1] == '\0'),
              "PGValue value must be null-terminated!");
-        assert(
+        // Data-driven (huge user value), so a runtime enforce rather than an
+        // assert: length() casts to int for the libpq call.
+        enforce!ConversionError(
             is_null || value.length < int.max,
              "Too large value length for PGValue!");
         this.type = type;
@@ -49,16 +53,36 @@ private import peque.pg_format;
 /** Convert provided D value to PGValue
   **/
 PGValue convertToPG(T) (in T value)
-@safe pure if (isSomeString!T)
-in (!value.canFind('\0'), "String value cannot contain null (\\0) characters!") {
+@safe pure if (isSomeString!T) {
+    // libpq receives text-format params as C strings — an embedded NUL would
+    // silently truncate the value. Must be a runtime enforce, not a
+    // contract/assert: the guard has to survive -release builds.
+    enforce!ConversionError(
+        !value.canFind('\0'),
+        "String value cannot contain null (\\0) characters!");
     return PGValue(PGType.TEXT, PGFormat.TEXT, value.to!(char[]) ~ "\0");
 }
 
 /// ditto
 PGValue convertToPG(T) (in T value)
 @safe pure if (isIntegral!T) {
+    // The declared OID must be the native integer type covering T's range:
+    // a NUMERIC-typed parameter compared to an integer column makes the
+    // server cast the COLUMN to numeric, which defeats btree indexes
+    // (e.g. `WHERE id = $1` degrades to a seq scan).
+    // Range checks rather than exact type matches, so unsigned types (which
+    // have no PG counterpart) map across automatically: ubyte → INT2,
+    // ushort → INT4, uint → INT8.
+    static if (T.min >= short.min && T.max <= short.max)
+        enum PGType oid = PGType.INT2;
+    else static if (T.min >= int.min && T.max <= int.max)
+        enum PGType oid = PGType.INT4;
+    else static if (T.min >= long.min && T.max <= long.max)
+        enum PGType oid = PGType.INT8;
+    else
+        enum PGType oid = PGType.NUMERIC;  // ulong: exceeds INT8 range
     return PGValue(
-        PGType.NUMERIC,
+        oid,
         PGFormat.TEXT,
         (value.to!(char[]) ~ '\0'),
     );
@@ -68,12 +92,27 @@ PGValue convertToPG(T) (in T value)
 PGValue convertToPG(T) (in T value)
 @safe pure if (isFloatingPoint!T) {
     import std.math: isNaN, isInfinity;
+    // Significant digits needed for an exact round-trip of T's mantissa
+    // (9 for float, 17 for double, 21 for 80-bit real). Fixed-point
+    // formatting must not be used here: it zeroes magnitudes below the
+    // fraction width instead of switching to scientific notation.
+    enum fpFormat = "%." ~ (2 + cast(int)(T.mant_dig * 30103L / 100000L)).to!string ~ "g";
+    // Same index-friendliness rule as for integrals: declare the matching
+    // native float type. FLOAT4/FLOAT8 also accept Infinity on every server
+    // version, while NUMERIC does so only since PostgreSQL 14. `real` keeps
+    // NUMERIC: FLOAT8 would silently round its extra mantissa bits.
+    static if (T.mant_dig <= float.mant_dig)
+        enum PGType oid = PGType.FLOAT4;
+    else static if (T.mant_dig <= double.mant_dig)
+        enum PGType oid = PGType.FLOAT8;
+    else
+        enum PGType oid = PGType.NUMERIC;
     string v;
     if (value.isNaN)           v = "NaN";
     else if (value.isInfinity) v = value > 0 ? "Infinity" : "-Infinity";
-    else                       v = format("%.20f", value);
+    else                       v = format(fpFormat, value);
     return PGValue(
-        PGType.NUMERIC,
+        oid,
         PGFormat.TEXT,
         (v.to!(char[]) ~ '\0'),
     );
@@ -199,11 +238,45 @@ PGValue convertToPG(T)(in T value)
 }
 
 
-// Test that convertion of string with null is not allowed
+// Test that conversion of string with null is not allowed
+// (must throw ConversionError — a catchable exception that survives -release)
 unittest {
     import std.exception: assertThrown;
-    import core.exception: AssertError;
-    convertToPG("t1\0; H").assertThrown!AssertError;
+    convertToPG("t1\0; H").assertThrown!ConversionError;
+}
+
+// Test that numeric params are declared with native OIDs — a NUMERIC-typed
+// parameter compared to an integer column casts the column to numeric and
+// defeats btree indexes.
+unittest {
+    assert(convertToPG(byte(1)).type    == PGType.INT2);
+    assert(convertToPG(ubyte(1)).type   == PGType.INT2);
+    assert(convertToPG(short(1)).type   == PGType.INT2);
+    assert(convertToPG(ushort(1)).type  == PGType.INT4);
+    assert(convertToPG(1).type          == PGType.INT4);
+    assert(convertToPG(1u).type         == PGType.INT8);
+    assert(convertToPG(1L).type         == PGType.INT8);
+    assert(convertToPG(1uL).type        == PGType.NUMERIC);
+    assert(convertToPG(1.0f).type       == PGType.FLOAT4);
+    assert(convertToPG(1.0).type        == PGType.FLOAT8);
+    assert(convertToPG([1, 2]).type     == PGType._INT4);
+    assert(convertToPG([1.0, 2.0]).type == PGType._FLOAT8);
+}
+
+// Test that float serialization is round-trip exact for tiny and precise
+// magnitudes (fixed-point "%.20f" used to zero anything below ~5e-21).
+unittest {
+    static string pgText(T)(T v) {
+        return convertToPG(v).value[0 .. $ - 1].idup;
+    }
+
+    assert(pgText(1.5e-25).to!double == 1.5e-25);
+    assert(pgText(-4.9e-324).to!double == -4.9e-324);  // smallest subnormal double
+    assert(pgText(1.2345678901234567e-10).to!double == 1.2345678901234567e-10);
+    assert(pgText(double.max).to!double == double.max);
+    assert(pgText(1.5f).to!float == 1.5f);
+    assert(pgText(1.1754944e-38f).to!float == 1.1754944e-38f);  // near float.min_normal
+    assert(pgText(3.14L).to!real == 3.14L);
 }
 
 // Test that array element quoting/escaping in convertToPG works correctly
