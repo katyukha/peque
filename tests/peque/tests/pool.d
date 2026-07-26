@@ -9,6 +9,8 @@ module peque.tests.pool;
 private import std.process: environment;
 private import std.exception: assertThrown, collectException;
 
+private import core.sys.posix.sys.socket: shutdown, SHUT_RDWR;
+
 private import peque.connection: Connection;
 private import peque.pool: ThreadConnectionPool;
 private import peque.exception: QueryError;
@@ -92,6 +94,30 @@ unittest {
     // Pool still works.
     auto res = pool.borrow((ref Connection conn) => conn.exec("SELECT 2"));
     assert(res[0][0].get!int == 2);
+}
+
+
+/** Post-use health check: a stale connection (socket closed mid-borrow) is
+  * replaced before the slot is released so the next borrow gets a live
+  * connection rather than inheriting the dead one. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+
+    // Shut down I/O on the socket without closing the fd.  This accurately
+    // models a real stale TCP connection (NAT timeout / server-side idle
+    // close): PQstatus still reports CONNECTION_OK (cached), but the next
+    // I/O attempt fails.  Using shutdown rather than close avoids freeing
+    // the fd number, so _factory() cannot accidentally reuse it.
+    auto ex = collectException!Exception(pool.borrow((ref Connection conn) {
+        shutdown(conn.socketFd(), SHUT_RDWR);
+        conn.exec("SELECT 1"); // must fail — connection shut down
+    }));
+    assert(ex !is null, "expected an error after socket was closed");
+
+    // Post-use check should have replaced the dead connection.
+    // The next borrow must succeed with a fresh connection.
+    auto res = pool.borrow((ref Connection conn) => conn.exec("SELECT 99"));
+    assert(res[0][0].get!int == 99);
 }
 
 

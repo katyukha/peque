@@ -52,6 +52,8 @@ struct ConnectionPool(Sem, Mtx) {
     @disable this(this);
     @disable void opAssign(typeof(this));
 
+    ~this() nothrow { try { close(); } catch (Exception) {} }
+
     /** Construct a pool with fixed capacity.
       *
       * All connections are created eagerly via factory. If factory throws,
@@ -80,8 +82,13 @@ struct ConnectionPool(Sem, Mtx) {
       * fun(ref conn). The connection is returned to the pool when fun
       * returns or throws — even if an exception propagates.
       *
-      * A health check runs before calling fun: if the connection's status
-      * is not CONNECTION_OK it is replaced by a fresh one from the factory.
+      * A pre-use health check replaces the connection if its cached status
+      * is not CONNECTION_OK. A post-use health check additionally replaces
+      * connections that went dead during the call (e.g. server-side idle
+      * timeout that closed the TCP socket while PQstatus still reported OK).
+      * The post-use check is best-effort: if the factory throws, the broken
+      * connection is left in the slot and the next borrower's pre-use check
+      * will retry, so the pool never deadlocks.
       *
       * Params:
       *     fun = callable accepting (ref Connection); may return any type
@@ -92,7 +99,16 @@ struct ConnectionPool(Sem, Mtx) {
         scope(exit) _sem.unlock();
 
         immutable idx = _acquireSlot();
+        // Scope guards execute LIFO.  Order: failure-flag → replace → release.
         scope(exit) _releaseSlot(idx);
+        bool _connOk = true;
+        scope(exit) {
+            if (!_connOk || _conns[idx].status != CONNECTION_OK)
+                _replaceBrokenSafe(idx);
+        }
+        // Mark connection suspect whenever fun exits via exception —
+        // even when PQstatus still caches CONNECTION_OK (stale TCP socket).
+        scope(failure) _connOk = false;
 
         _healthCheck(idx);
 
@@ -101,6 +117,17 @@ struct ConnectionPool(Sem, Mtx) {
 
     /// Total number of connections managed by this pool.
     size_t capacity() const { return _conns.length; }
+
+    /** Close all connections immediately.
+      *
+      * Call this before exiting the event loop (e.g. in a SIGINT handler)
+      * to release file descriptors before the I/O driver tears down.
+      * The pool must not be borrowed from after close() is called.
+      **/
+    void close() {
+        foreach (ref conn; _conns)
+            conn.close();
+    }
 
     // --- internals ---
 
@@ -126,6 +153,14 @@ struct ConnectionPool(Sem, Mtx) {
     private void _healthCheck(size_t idx) {
         if (_conns[idx].status != CONNECTION_OK)
             _conns[idx] = _factory();
+    }
+
+    // D forbids catch inside scope(exit), so this nothrow wrapper replaces
+    // a broken connection and swallows factory errors so the slot is always
+    // released.  If the factory fails, the broken connection (CONNECTION_BAD)
+    // stays in the slot; _healthCheck on the next borrow will retry.
+    private void _replaceBrokenSafe(size_t idx) nothrow {
+        try { _conns[idx] = _factory(); } catch (Exception) {}
     }
 }
 

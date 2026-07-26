@@ -86,12 +86,14 @@ struct Connection {
             this(keywords, values);
         }
 
-        ~this() @trusted {
+        void close() @trusted {
             if (_pg_conn !is null) {
                 PQfinish(_pg_conn);
                 _pg_conn = null;
             }
         }
+
+        ~this() @trusted { close(); }
 
         // Must not be copiable
         @disable this(this);
@@ -240,6 +242,22 @@ struct Connection {
             return PQsocket(conn._pg_conn);
         });
     }
+
+    /** Close the connection immediately, releasing the underlying PGconn.
+      *
+      * Idempotent — safe to call on an already-closed connection.
+      * If multiple handles share the same SafeRefCounted payload (e.g. a
+      * Transaction borrows the connection), the PGconn is finalized as soon
+      * as this handle closes it, regardless of other holders' refcounts.
+      * Only call close() when you are the sole owner (pool slots always are).
+      **/
+    void close() @trusted {
+        _connection.borrow!((auto ref conn) @trusted { conn.close(); });
+    }
+
+    /** Expose raw socket fd — package-only, used by pool tests to simulate
+      * a dead TCP connection. **/
+    package(peque) int socketFd() @trusted { return _socket(); }
 
     /** Flush the send buffer after PQsendQuery* / PQsendPrepare*.
       *
