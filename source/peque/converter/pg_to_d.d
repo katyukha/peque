@@ -10,6 +10,7 @@ private import std.conv;
 private import std.datetime;
 private import std.exception;
 private import std.json: JSONValue, parseJSON;
+private import std.uuid: UUID;
 
 private import peque.pg_type;
 private import peque.exception;
@@ -132,6 +133,15 @@ T convertTextTypeToD(T)(
         default:
             assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
     }
+}
+
+/// ditto
+T convertTextTypeToD(T)(
+        scope const char* data,
+        in int length,
+        in PGType pg_type)
+pure @trusted if (is(T == UUID)) {
+    return UUID(data[0 .. length].idup);
 }
 
 /// ditto

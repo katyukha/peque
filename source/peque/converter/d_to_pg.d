@@ -6,6 +6,7 @@ private import std.format;
 private import std.datetime;
 private import std.algorithm;
 private import std.json: JSONValue;
+private import std.uuid: UUID;
 private import std.traits:
     isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray;
 private import std.range: ElementType;
@@ -177,6 +178,12 @@ PGValue convertToPG(T) (in T value)
     return PGValue(PGArrayType, PGFormat.TEXT, result ~ "\0");
 }
 
+
+/// ditto
+PGValue convertToPG(T)(in T value)
+@safe pure if (is(T == UUID)) {
+    return PGValue(PGType.UUID, PGFormat.TEXT, value.toString().to!(char[]) ~ '\0');
+}
 
 /// ditto — Nullable: sends SQL NULL when empty, delegates to inner type when set
 PGValue convertToPG(T)(in T value)

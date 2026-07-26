@@ -378,6 +378,35 @@ unittest {
 }
 
 
+// ---------------------------------------------------------------------------
+// UUID round-trip
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.uuid: UUID;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    auto id = UUID("550e8400-e29b-41d4-a716-446655440000");
+
+    // send as $1, receive as uuid
+    auto res = c.execParams("SELECT $1::uuid", id).ensureQueryOk;
+    assert(res[0][0].get!UUID == id);
+    assert(res[0][0].get!string == "550e8400-e29b-41d4-a716-446655440000");
+
+    // server-generated UUID must parse back to UUID
+    res = c.exec("SELECT gen_random_uuid()").ensureQueryOk;
+    auto generated = res[0][0].get!UUID;
+    assert(generated != UUID.init);
+}
+
+
 // Separate case to test things that are not allowed in safe code
 @system unittest {
     import std.datetime;
