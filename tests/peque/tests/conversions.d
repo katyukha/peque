@@ -388,7 +388,8 @@ unittest {
 // ---------------------------------------------------------------------------
 
 unittest {
-    import std.conv: ConvException;
+    import std.typecons: Nullable, nullable;
+    import peque.exception: ConversionError;
 
     auto c = Connection(
         dbname:   environment.get("POSTGRES_DB",       "peque-test"),
@@ -405,19 +406,34 @@ unittest {
     res = c.exec("SELECT ARRAY[]::text[]").ensureQueryOk;
     assert(res[0][0].get!(string[]) == [], "empty text array must decode to []");
 
-    // NULL element in an int array: the array parser cannot convert the
-    // literal token "NULL" to int — ConvException is thrown.
-    // Nullable element arrays are not yet supported (see TODO in pg_to_d.d).
+    // NULL element in a non-nullable array: rejected loudly with
+    // ConversionError (previously a raw ConvException for int[], or the
+    // silent literal "NULL" string for text[]).
     c.exec("SELECT ARRAY[1,NULL,3]::int[]")
         .ensureQueryOk
         [0][0].get!(int[])
-        .assertThrown!ConvException;
+        .assertThrown!ConversionError;
+    c.exec("SELECT ARRAY['a',NULL,'b']::text[]")
+        .ensureQueryOk
+        [0][0].get!(string[])
+        .assertThrown!ConversionError;
 
-    // NULL element in a string array: the unquoted token "NULL" is treated
-    // as the literal string "NULL" — no error, but it is NOT a D null.
+    // NULL element in a Nullable!U[] array: decodes to an empty element.
+    res = c.exec("SELECT ARRAY[1,NULL,3]::int[]").ensureQueryOk;
+    auto ints = res[0][0].get!(Nullable!int[]);
+    assert(ints.length == 3);
+    assert(ints[0] == 1.nullable && ints[1].isNull && ints[2] == 3.nullable,
+        "NULL in a Nullable!int[] must decode to an empty element");
+
     res = c.exec("SELECT ARRAY['a',NULL,'b']::text[]").ensureQueryOk;
-    assert(res[0][0].get!(string[]) == ["a", "NULL", "b"],
-        "NULL in text array decodes to the literal string \"NULL\"");
+    auto strs = res[0][0].get!(Nullable!string[]);
+    assert(strs.length == 3);
+    assert(strs[0] == "a".nullable && strs[1].isNull && strs[2] == "b".nullable);
+
+    // A *quoted* "NULL" is the literal string, distinct from a SQL NULL.
+    res = c.exec("SELECT ARRAY['NULL','b']::text[]").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == ["NULL", "b"],
+        "quoted NULL must stay the literal string \"NULL\"");
 }
 
 
