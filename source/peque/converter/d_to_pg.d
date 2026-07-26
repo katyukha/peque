@@ -113,7 +113,7 @@ PGValue convertToPG(T)(in T value)
 @safe if (is(T == JSONValue)) {
     auto s = value.toString();
     return PGValue(
-        PGType.JSON,
+        PGType.JSONB,
         PGFormat.TEXT,
         (s.to!(char[]) ~ '\0'),
     );

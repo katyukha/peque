@@ -25,7 +25,7 @@ private struct ResultInternalData {
 
     this(PGresult* pg_result) { _pg_result = pg_result; }
 
-    ~this() @trusted {
+    ~this() @trusted nothrow @nogc {
         if (_pg_result !is null) {
             PQclear(_pg_result);
             _pg_result = null;

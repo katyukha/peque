@@ -87,14 +87,14 @@ struct Connection {
             this(keywords, values);
         }
 
-        void close() @trusted {
+        void close() @trusted nothrow @nogc {
             if (_pg_conn !is null) {
                 PQfinish(_pg_conn);
                 _pg_conn = null;
             }
         }
 
-        ~this() @trusted { close(); }
+        ~this() @trusted nothrow @nogc { close(); }
 
         // Must not be copiable
         @disable this(this);
