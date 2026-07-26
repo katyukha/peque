@@ -461,7 +461,7 @@ struct Connection {
       *     params = already-converted PGValue parameters (empty slice → no params)
       * Returns: Result
       **/
-    package(peque) Result execParams(string query, in PGValue[] params) {
+    Result execParams(string query, in PGValue[] params) {
         if (params.length == 0) return execParams(query);
 
         auto pTypes   = new uint[params.length];
@@ -614,7 +614,7 @@ struct Transaction {
     }
 
     /// ditto — forwards pre-built PGValue slice to Connection.execParams(PGValue[]).
-    package(peque) auto execParams(string query, in PGValue[] params) {
+    auto execParams(string query, in PGValue[] params) {
         return _conn.execParams(query, params);
     }
 

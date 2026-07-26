@@ -16,7 +16,7 @@ private import peque.pg_format;
 
 /** Struct that represents value to be passed to PQexecParams.
   **/
-package(peque) @safe pure const struct PGValue {
+@safe pure const struct PGValue {
     PGType type;
     PGFormat format = PGFormat.TEXT;
     char[] value;
