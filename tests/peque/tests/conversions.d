@@ -475,10 +475,11 @@ unittest {
 }
 
 
-// Separate case to test things that are not allowed in safe code
-@system unittest {
+// Converting a value whose pg type cannot map to the requested D type must
+// throw ConversionError (previously an assert(0), which is UB under -release).
+unittest {
     import std.datetime;
-    import core.exception: AssertError;
+    import peque.exception: ConversionError;
 
     auto c = Connection(
             dbname: environment.get("POSTGRES_DB", "peque-test"),
@@ -489,7 +490,7 @@ unittest {
     );
 
     auto res = c.exec("SELECT 42;");
-    res.getValue(0, 0).get!Date.assertThrown!AssertError;
+    res.getValue(0, 0).get!Date.assertThrown!ConversionError;
 }
 
 

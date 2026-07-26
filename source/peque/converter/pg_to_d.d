@@ -32,9 +32,13 @@ T convertTextTypeToD(T)(
         in int length,
         in PGType pg_type)
 pure @trusted if (isSomeString!T) {
-    // It seems that it is safe to convert any string postgres string types
-    // to string this way.
-    return data ? cast(T)data[0 .. length].idup : "";
+    // Transcode via std.conv.to: for `string` this is a plain immutable dup
+    // of the libpq bytes, and for `wstring`/`dstring` it decodes the UTF-8
+    // payload and re-encodes to the wider code unit. A raw `cast(T)` would
+    // reinterpret the UTF-8 bytes as wchar/dchar and yield garbage.
+    if (data is null)
+        return T.init;
+    return data[0 .. length].to!T;
 }
 
 /// ditto
@@ -60,7 +64,8 @@ pure @trusted if (isScalarType!T) {
             case "f":
                 return false;
             default:
-                assert(0, "Cannot parse boolean value from postgres: " ~ data[0 .. length].idup);
+                throw new ConversionError(
+                    "Cannot parse boolean value from postgres: " ~ data[0 .. length].idup);
         }
     else
         static assert(0, "Unsupported scalar type " ~ T.stringof);
@@ -82,7 +87,8 @@ pure @trusted if (is(T == Date)) {
                 "Cannot parse date '%s' from postgres".format(data[0 .. length]));
             return Date.fromISOExtString(data[0 .. 10]);
         default:
-            assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+            throw new ConversionError(
+                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
     }
 }
 
@@ -103,7 +109,8 @@ pure @trusted if (is(T == DateTime)) {
                     data[0 .. length]));
             return DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]);
         default:
-            assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+            throw new ConversionError(
+                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
     }
 }
 
@@ -131,7 +138,8 @@ T convertTextTypeToD(T)(
         case PGType.TIMESTAMPTZ:
             return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
         default:
-            assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+            throw new ConversionError(
+                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
     }
 }
 
@@ -156,7 +164,8 @@ T convertTextTypeToD(T)(
         case PGType.JSONB:
             return parseJSON(data[0 .. length].idup);
         default:
-            assert(0, "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+            throw new ConversionError(
+                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
     }
 }
 
@@ -253,4 +262,43 @@ unittest {
     convertTextTypeToD!DateTime(p, 10, PGType.TIMESTAMP).assertThrown!ConversionError;
     convertTextTypeToD!DateTime(p, 10, PGType.TIMESTAMPTZ).assertThrown!ConversionError;
     convertTextTypeToD!DateTime(p, 10, PGType.GUESS).assertThrown!ConversionError;
+}
+
+// Unparseable boolean text must throw ConversionError rather than assert(0)
+// (which is UB when compiled with -release).
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: ConversionError;
+    assert(convertTextTypeToD!bool("t".ptr, 1, PGType.BOOL) == true);
+    assert(convertTextTypeToD!bool("f".ptr, 1, PGType.BOOL) == false);
+    convertTextTypeToD!bool("x".ptr, 1, PGType.BOOL).assertThrown!ConversionError;
+}
+
+// An unexpected pg_type for a date/time/JSON target must throw ConversionError
+// rather than assert(0) (UB under -release).
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: ConversionError;
+    immutable(char)* d = "2023-07-17".ptr;
+    convertTextTypeToD!Date(d, 10, PGType.INT4).assertThrown!ConversionError;
+    immutable(char)* dt = "2023-07-17 10:20:30".ptr;
+    convertTextTypeToD!DateTime(dt, 19, PGType.INT4).assertThrown!ConversionError;
+    convertTextTypeToD!SysTime(dt, 19, PGType.INT4).assertThrown!ConversionError;
+    immutable(char)* j = "{}".ptr;
+    convertTextTypeToD!JSONValue(j, 2, PGType.INT4).assertThrown!ConversionError;
+}
+
+// String conversion transcodes UTF-8 to wide code units instead of
+// reinterpreting the bytes (a raw cast produced garbage for wstring/dstring).
+unittest {
+    // "áé€" — multi-byte UTF-8 that must decode to the same code points.
+    enum src = "áé€";
+    immutable bytes = cast(immutable(char)[])src;
+    assert(convertTextTypeToD!string(bytes.ptr, cast(int)bytes.length, PGType.TEXT) == src);
+    assert(convertTextTypeToD!wstring(bytes.ptr, cast(int)bytes.length, PGType.TEXT) == "áé€"w);
+    assert(convertTextTypeToD!dstring(bytes.ptr, cast(int)bytes.length, PGType.TEXT) == "áé€"d);
+
+    // null data yields an empty string of the requested width.
+    assert(convertTextTypeToD!string(null, 0, PGType.TEXT) == "");
+    assert(convertTextTypeToD!wstring(null, 0, PGType.TEXT) == ""w);
 }
