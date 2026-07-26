@@ -17,7 +17,9 @@ private import peque.result;
   * methods to its parent Connection. No changes to Transaction needed.
   **/
 template isQueryContext(Ctx) {
+    import peque.converter: PGValue;
     enum bool isQueryContext =
-        is(typeof(Ctx.init.exec(string.init))       : Result) &&
-        is(typeof(Ctx.init.execParams(string.init)) : Result);
+        is(typeof(Ctx.init.exec(string.init))                           : Result) &&
+        is(typeof(Ctx.init.execParams(string.init))                     : Result) &&
+        is(typeof(Ctx.init.execParams(string.init, PGValue[].init))     : Result);
 }

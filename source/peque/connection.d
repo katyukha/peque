@@ -16,6 +16,7 @@ private import peque.pg_type;
 private import peque.pg_format;
 private import peque.result;
 private import peque.wait_strategy;
+private import peque.converter: PGValue;
 
 
 /** Controls what happens at the end of a successful transaction() call.
@@ -373,17 +374,8 @@ struct Connection {
         import std.conv;
         import peque.converter;
 
-        uint[T.length] param_types;
-        const(char)*[T.length] param_values;
-        int[T.length] param_lengths;
-        int[T.length] param_formats;
-
-        /* We have to convert all params to PGValue and keep references for them
-         * while PQsendQueryParams completes.
-         *
-         * This is done via string mixin to avoid copying elements of
-         * array of PGValues.
-         */
+        // Build a stack-allocated PGValue array and pass a slice to the overload
+        // below.
         PGValue[T.length] values = mixin(() {
             static assert(T.length >= 0, "execParams called with no args!");
             auto r = "[convertToPG!(T[0])(params[0])";
@@ -393,15 +385,37 @@ struct Connection {
             r ~= "]";
             return r;
         }());
-        static foreach(i; T.length.iota) {
-            param_types[i]   = values[i].type;
-            param_formats[i] = values[i].format;
-            if (values[i].isNull) {
-                param_values[i]  = null;
-                param_lengths[i] = 0;
+        return execParams(query, values[]);
+    }
+
+    /** Execute a parameterised query from a pre-built PGValue slice.
+      *
+      * Package-visible overload used by the ORM QuerySet (peque.orm.*), which
+      * accumulates PGValue params at runtime across multiple .where() calls and
+      * cannot use the compile-time-variadic execParams(T...) overload.
+      *
+      * Params:
+      *     query  = SQL with $1, $2, … placeholders
+      *     params = already-converted PGValue parameters (empty slice → no params)
+      * Returns: Result
+      **/
+    package(peque) Result execParams(string query, in PGValue[] params) {
+        if (params.length == 0) return execParams(query);
+
+        auto pTypes   = new uint[params.length];
+        auto pValues  = new const(char)*[params.length];
+        auto pLengths = new int[params.length];
+        auto pFormats = new int[params.length];
+
+        foreach (i, ref v; params) {
+            pTypes[i]   = v.type;
+            pFormats[i] = v.format;
+            if (v.isNull) {
+                pValues[i]  = null;
+                pLengths[i] = 0;
             } else {
-                param_values[i]  = &values[i].value[0];
-                param_lengths[i] = values[i].length;
+                pValues[i]  = &v.value[0];
+                pLengths[i] = v.length;
             }
         }
 
@@ -410,18 +424,17 @@ struct Connection {
                 PQsendQueryParams(
                     conn._pg_conn,
                     query.toStringz,
-                    T.length,
-                    param_types.ptr,
-                    param_values.ptr,
-                    param_lengths.ptr,
-                    param_formats.ptr,
+                    cast(int)params.length,
+                    pTypes.ptr,
+                    pValues.ptr,
+                    pLengths.ptr,
+                    pFormats.ptr,
                     PGFormat.TEXT) == 1,
                 "PQsendQueryParams failed: " ~ errorMessage);
         });
         _flushLoop();
         _waitForResult();
-        auto r = _collectResult();
-        return r.ensureQueryOk();
+        return _collectResult().ensureQueryOk();
     }
 
     /** Prepare a named server-side statement.
@@ -535,6 +548,11 @@ struct Transaction {
 
     /// ditto
     auto execParams(T...)(in string query, T params) {
+        return _conn.execParams(query, params);
+    }
+
+    /// ditto — forwards pre-built PGValue slice to Connection.execParams(PGValue[]).
+    package(peque) auto execParams(string query, in PGValue[] params) {
         return _conn.execParams(query, params);
     }
 
