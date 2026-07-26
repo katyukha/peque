@@ -432,20 +432,16 @@ struct Connection {
 
     /// ditto
     auto execParams(T...)(in string query, T params) {
-        import std.range: iota;
-        import std.conv;
+        import std.conv: to;
         import peque.converter;
 
-        // Build a stack-allocated PGValue array and pass a slice to the overload
-        // below.
         PGValue[T.length] values = mixin(() {
-            static assert(T.length >= 0, "execParams called with no args!");
-            auto r = "[convertToPG!(T[0])(params[0])";
-            static if (T.length > 1)
-                static foreach(i; iota(1, T.length))
-                    r ~= ", convertToPG!(T[" ~ i.to!string ~ "])(params[" ~ i.to!string ~ "]) ";
-            r ~= "]";
-            return r;
+            string r = "[";
+            static foreach (i; 0 .. T.length) {
+                if (i > 0) r ~= ", ";
+                r ~= "convertToPG!(T[" ~ i.to!string ~ "])(params[" ~ i.to!string ~ "])";
+            }
+            return r ~ "]";
         }());
         return execParams(query, values[]);
     }
@@ -708,8 +704,6 @@ struct PreparedStatement {
       * Uses the same async path as execParams (PQsendQueryPrepared + flush/consume loop).
       **/
     auto exec(T...)(T params) {
-        import std.range: iota;
-        import std.conv;
         import peque.converter;
 
         static if (T.length == 0) {
@@ -729,14 +723,15 @@ struct PreparedStatement {
             int[T.length] param_formats;
 
             PGValue[T.length] values = mixin(() {
-                auto r = "[convertToPG!(T[0])(params[0])";
-                static if (T.length > 1)
-                    static foreach(i; iota(1, T.length))
-                        r ~= ", convertToPG!(T[" ~ i.to!string ~ "])(params[" ~ i.to!string ~ "]) ";
-                r ~= "]";
-                return r;
+                import std.conv: to;
+                string r = "[";
+                static foreach (i; 0 .. T.length) {
+                    if (i > 0) r ~= ", ";
+                    r ~= "convertToPG!(T[" ~ i.to!string ~ "])(params[" ~ i.to!string ~ "])";
+                }
+                return r ~ "]";
             }());
-            static foreach(i; T.length.iota) {
+            static foreach (i; 0 .. T.length) {
                 param_types[i]   = values[i].type;
                 param_formats[i] = values[i].format;
                 if (values[i].isNull) {

@@ -140,12 +140,12 @@ PGValue convertToPG(T) (in T value)
      * thus we take slice `value[0 ... $-1]`
      */
     char[] result = ['{'];
-    static if (isIntegral!TI || isFloatingPoint!TI || isBoolean!TI || is(TI == Date) || is(TI == DateTime) || is(TI == SysTime)) {
-        // We do not need escaping for these simple types
+    static if ((isIntegral!TI || isFloatingPoint!TI || isBoolean!TI ||
+                is(TI == Date) || is(TI == DateTime) || is(TI == SysTime)) ||
+               (isArray!TI && !isSomeString!TI)) {
+        // No quoting needed — numeric, boolean, date, or nested array types
         result ~= value.map!((v) => convertToPG(v).value[0 .. $-1]).join(",");
-    } else static if (isArray!TI && !isSomeString!TI) {
-        result ~= value.map!((v) => convertToPG(v).value[0 .. $-1]).join(",");
-    }else {
+    } else {
         // Case when array is array of strings. Special handling. here to escape resulting array correctly
         result ~= value.map!((v) {
             // We skip ending \0 symbol in value
