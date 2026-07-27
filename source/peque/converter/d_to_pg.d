@@ -93,10 +93,11 @@ PGValue convertToPG(T) (in T value)
 @safe pure if (isFloatingPoint!T) {
     import std.math: isNaN, isInfinity;
     // Significant digits needed for an exact round-trip of T's mantissa
-    // (9 for float, 17 for double, 21 for 80-bit real). Fixed-point
-    // formatting must not be used here: it zeroes magnitudes below the
-    // fraction width instead of switching to scientific notation.
-    enum fpFormat = "%." ~ (2 + cast(int)(T.mant_dig * 30103L / 100000L)).to!string ~ "g";
+    // (9 for float, 17 for double, 21 for 80-bit real, 36 for binary128).
+    // Fixed-point formatting must not be used here: it zeroes magnitudes
+    // below the fraction width instead of switching to scientific notation.
+    enum int fpDigits = 2 + cast(int)(T.mant_dig * 30103L / 100000L);
+    enum fpFormat = "%." ~ fpDigits.to!string ~ "g";
     // Same index-friendliness rule as for integrals: declare the matching
     // native float type. FLOAT4/FLOAT8 also accept Infinity on every server
     // version, while NUMERIC does so only since PostgreSQL 14. `real` keeps
@@ -110,7 +111,14 @@ PGValue convertToPG(T) (in T value)
     string v;
     if (value.isNaN)           v = "NaN";
     else if (value.isInfinity) v = value > 0 ? "Infinity" : "-Infinity";
-    else                       v = format(fpFormat, value);
+    else static if (T.mant_dig <= double.mant_dig) {
+        v = format(fpFormat, value);
+    } else {
+        // Reals wider than double: Phobos formats binary128 at double
+        // precision only, so use the exact engine.
+        import peque.converter.decimal: formatExact;
+        v = formatExact(value, fpDigits);
+    }
     return PGValue(
         oid,
         PGFormat.TEXT,
@@ -281,7 +289,15 @@ unittest {
     assert(pgText(double.max).to!double == double.max);
     assert(pgText(1.5f).to!float == 1.5f);
     assert(pgText(1.1754944e-38f).to!float == 1.1754944e-38f);  // near float.min_normal
-    assert(pgText(3.14L).to!real == 3.14L);
+    static if (real.mant_dig <= 64) {
+        assert(pgText(3.14L).to!real == 3.14L);
+    } else {
+        // binary128: emission is exact, but std.conv.to!real may lose the
+        // last ulp when parsing back — compare mantissa agreement.
+        import std.math: feqrel;
+        assert(pgText(3.14L).to!double == 3.14);
+        assert(feqrel(pgText(3.14L).to!real, 3.14L) >= real.mant_dig - 2);
+    }
 }
 
 // Test that array element quoting/escaping in convertToPG works correctly

@@ -634,3 +634,37 @@ unittest {
     assert(res[0]["data_dt_tz"].get!SysTime.utcOffset == 4.hours);
     assert(res[0]["data_bool"].get!bool == false);
 }
+
+
+// ---------------------------------------------------------------------------
+// Floats: server round-trip of extreme magnitudes and `real` (NUMERIC)
+// ---------------------------------------------------------------------------
+unittest {
+    import std.math: nextUp;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // Extreme doubles through float8: subnormal, max, tiny.
+    foreach (v; [nextUp(0.0), double.max, double.min_normal, 1.5e-25])
+        assert(c.execParams("SELECT $1::float8", v).ensureQueryOk
+            [0][0].get!double == v);
+    assert(c.execParams("SELECT $1::float4", 1.1754944e-38f).ensureQueryOk
+        [0][0].get!float == 1.1754944e-38f);
+
+    // real goes through NUMERIC: the server must accept the emitted text
+    // and return every digit.
+    auto res = c.execParams("SELECT $1::numeric", 3.14L).ensureQueryOk;
+    static if (real.mant_dig <= 64) {
+        assert(res[0][0].get!real == 3.14L);
+    } else {
+        // binary128: parsing the result may lose the last ulp (std.conv).
+        import std.math: feqrel;
+        assert(feqrel(res[0][0].get!real, 3.14L) >= real.mant_dig - 2);
+    }
+}

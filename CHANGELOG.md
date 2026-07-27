@@ -30,7 +30,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   throwing `AssertError` (hit when a GC-owned `ConnectionPool` was finalized).
 - **Float parameter precision** — float parameters are serialized with
   round-trip-exact significant digits (`%g`-style); fixed-point `%.20f` used
-  to zero magnitudes below ~5e-21 and truncate small values.
+  to zero magnitudes below ~5e-21 and truncate small values. `real`
+  parameters are formatted by an exact pure-D decimal engine
+  (`peque.converter.decimal`) — full 36-digit precision where `real` is IEEE
+  binary128 (AArch64), where Phobos's `%g` silently falls back to double
+  precision.
 - **Native parameter OIDs** — integer and float parameters are declared as
   `INT2`/`INT4`/`INT8`/`FLOAT4`/`FLOAT8` instead of `NUMERIC` (`ulong` and
   `real` stay `NUMERIC`), so indexed comparisons like `WHERE id = $1` use
