@@ -232,3 +232,25 @@ unittest {
     static if (real.mant_dig == 64)
         assert(formatExact(3.14L, 21).to!real == 3.14L);
 }
+
+// Wide reals (binary128): direct tests of the two-word mantissa split.
+// Exact binary fractions have the same spelling in every float format.
+static if (real.mant_dig > 64) unittest {
+    import std.algorithm: endsWith;
+    import std.math: feqrel, nextUp;
+
+    assert(formatExact(1.0L, 36) == "1");
+    assert(formatExact(0.5L, 36) == "0.5");
+    assert(formatExact(-2.5L, 36) == "-2.5");
+    assert(formatExact(1e18L, 36) == "1000000000000000000");
+    assert(formatExact(0.375L, 2) == "0.38");   // tie, odd → up
+    assert(formatExact(999.5L, 3) == "1e+03");  // carry through all nines
+
+    // Extremes must format without error; 2^-16494 ≈ 6.5e-4966.
+    assert(formatExact(nextUp(0.0L), 36).endsWith("e-4966"));
+
+    // Full-width mantissas: emitted text parses back to within the last
+    // ulps (std.conv.to!real is not correctly rounded on quads).
+    foreach (v; [3.14L, 0.1L, 2.0L / 3.0L, 1.23456789e300L])
+        assert(feqrel(formatExact(v, 36).to!real, v) >= real.mant_dig - 3);
+}
