@@ -65,7 +65,10 @@ pure @trusted if (isScalarType!T) {
         if (s == "NaN")       return T.nan;
         if (s == "Infinity")  return T.infinity;
         if (s == "-Infinity") return -T.infinity;
-        return s.to!T;
+        // Correctly rounded on every platform — std.conv parses through
+        // `real` and loses the last ulp where real == double.
+        import peque.converter.decimal: parseExactFloat;
+        return parseExactFloat!T(s);
     }
     else static if (isBoolean!T)
         switch (data[0 .. length]) {

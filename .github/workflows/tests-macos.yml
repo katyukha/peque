@@ -71,7 +71,7 @@ jobs:
           PGHOST: localhost
           PGPORT: 5432
         run: |
-          psql postgres -c "CREATE DATABASE \"$POSTGRES_DB\" ENCODING 'unicode'"
+          psql postgres -c "CREATE DATABASE \"$POSTGRES_DB\" OWNER \"$POSTGRES_USER\" ENCODING 'unicode'"
 
       - name: Run tests
         run: dub test -b unittest-cov -c "unittest${{ matrix.buildConf }}"

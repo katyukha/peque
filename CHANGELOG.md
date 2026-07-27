@@ -35,6 +35,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (`peque.converter.decimal`) — full 36-digit precision where `real` is IEEE
   binary128 (AArch64), where Phobos's `%g` silently falls back to double
   precision.
+- **Correctly rounded float results** — float8/float4/NUMERIC result values
+  are parsed by `peque.converter.decimal.parseExactFloat` (correct rounding,
+  half to even, on every platform); `std.conv` could be off by the last ulp
+  where `real` has no extra precision over `double` (e.g. AArch64 macOS).
 - **Native parameter OIDs** — integer and float parameters are declared as
   `INT2`/`INT4`/`INT8`/`FLOAT4`/`FLOAT8` instead of `NUMERIC` (`ulong` and
   `real` stay `NUMERIC`), so indexed comparisons like `WHERE id = $1` use

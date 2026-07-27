@@ -650,21 +650,27 @@ unittest {
         port:     environment.get("POSTGRES_PORT",     "5432"),
     );
 
-    // Extreme doubles through float8: subnormal, max, tiny.
+    // Extreme doubles through float8: subnormal, max, tiny. Compare the
+    // server's text (shortest exact form, PG >= 12) — parse-free, so the
+    // check is independent of std.conv parse accuracy on this platform.
+    import std.typecons: tuple;
+    foreach (t; [tuple(nextUp(0.0),        "5e-324"),
+                 tuple(double.max,         "1.7976931348623157e+308"),
+                 tuple(double.min_normal,  "2.2250738585072014e-308"),
+                 tuple(1.5e-25,            "1.5e-25")])
+        assert(c.execParams("SELECT $1::float8", t[0]).ensureQueryOk
+            [0][0].get!string == t[1]);
+
+    // Parsed round-trip: result parsing is correctly rounded on every
+    // platform, so extreme values recover exactly.
     foreach (v; [nextUp(0.0), double.max, double.min_normal, 1.5e-25])
         assert(c.execParams("SELECT $1::float8", v).ensureQueryOk
             [0][0].get!double == v);
     assert(c.execParams("SELECT $1::float4", 1.1754944e-38f).ensureQueryOk
         [0][0].get!float == 1.1754944e-38f);
 
-    // real goes through NUMERIC: the server must accept the emitted text
-    // and return every digit.
+    // real goes through NUMERIC (FLOAT8 where real == double): the server
+    // must accept the emitted text and return the digits.
     auto res = c.execParams("SELECT $1::numeric", 3.14L).ensureQueryOk;
-    static if (real.mant_dig <= 64) {
-        assert(res[0][0].get!real == 3.14L);
-    } else {
-        // binary128: parsing the result may lose the last ulp (std.conv).
-        import std.math: feqrel;
-        assert(feqrel(res[0][0].get!real, 3.14L) >= real.mant_dig - 2);
-    }
+    assert(res[0][0].get!real == 3.14L);
 }

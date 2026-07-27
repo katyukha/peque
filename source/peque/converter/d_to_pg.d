@@ -280,24 +280,27 @@ unittest {
         return convertToPG(v).value[0 .. $ - 1].idup;
     }
 
-    assert(pgText(1.5e-25).to!double == 1.5e-25);
     // smallest subnormal double — spelled via nextUp(0.0) because ldc2's
     // lexer rejects the 4.9e-324 literal as "not representable"
     immutable minSub = nextUp(0.0);
-    assert(pgText(-minSub).to!double == -minSub);
-    assert(pgText(1.2345678901234567e-10).to!double == 1.2345678901234567e-10);
-    assert(pgText(double.max).to!double == double.max);
+
+    // The %.20f regression: tiny magnitudes must switch to scientific
+    // notation instead of flushing to zeros.
+    assert(pgText(1.5e-25).canFind('e'));
+    assert(pgText(-minSub).canFind('e'));
+
     assert(pgText(1.5f).to!float == 1.5f);
     assert(pgText(1.1754944e-38f).to!float == 1.1754944e-38f);  // near float.min_normal
-    static if (real.mant_dig <= 64) {
-        assert(pgText(3.14L).to!real == 3.14L);
-    } else {
-        // binary128: emission is exact, but std.conv.to!real may lose the
-        // last ulp when parsing back — compare mantissa agreement.
-        import std.math: feqrel;
-        assert(pgText(3.14L).to!double == 3.14);
-        assert(feqrel(pgText(3.14L).to!real, 3.14L) >= real.mant_dig - 2);
-    }
+
+    // Emission is exact and parseExactFloat is correctly rounded on every
+    // platform, so the round-trip is the identity.
+    import peque.converter.decimal: parseExactFloat;
+    assert(parseExactFloat!double(pgText(1.5e-25)) == 1.5e-25);
+    assert(parseExactFloat!double(pgText(-minSub)) == -minSub);
+    assert(parseExactFloat!double(pgText(1.2345678901234567e-10))
+        == 1.2345678901234567e-10);
+    assert(parseExactFloat!double(pgText(double.max)) == double.max);
+    assert(parseExactFloat!real(pgText(3.14L)) == 3.14L);
 }
 
 // Test that array element quoting/escaping in convertToPG works correctly
