@@ -1,6 +1,6 @@
 name "peque"
 subPackage "subPackages/vibe"
-description "Light postgresql binding to libpq (ImportC)"
+description "Light postgresql binding to libpq"
 homepage "https://github.com/katyukha/peque"
 authors "Dmytro Katyukha"
 copyright "Copyright © 2023, Dmytro Katyukha"
