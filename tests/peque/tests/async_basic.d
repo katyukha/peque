@@ -227,3 +227,37 @@ unittest {
     assert(res2.ntuples == 1,
         "rolled-back insert must not persist through async path");
 }
+
+
+// ---------------------------------------------------------------------------
+// Non-blocking mode: PQflush retry loop under send-buffer pressure
+// ---------------------------------------------------------------------------
+
+/** An 8 MB parameter exceeds any default socket send buffer, so PQflush
+  * repeatedly reports "would block" and the retry loop must run to
+  * completion (readable-or-writable wait + PQconsumeInput — the write-only
+  * wait variant could deadlock when both TCP directions filled). **/
+unittest {
+    import std.array: replicate;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+    assert(!c.isNonBlocking);
+    c.setNonBlocking(true);
+    assert(c.isNonBlocking);
+
+    immutable big = "abcdefghij".replicate(800_000);   // 8 MB
+    auto res = c.execParams("SELECT length($1), $1", big);
+    assert(res[0][0].get!long == big.length);
+    assert(res[0][1].get!string == big);
+
+    // Toggling back works and the connection stays usable.
+    c.setNonBlocking(false);
+    assert(!c.isNonBlocking);
+    assert(c.execParams("SELECT $1::int", 42)[0][0].get!int == 42);
+}

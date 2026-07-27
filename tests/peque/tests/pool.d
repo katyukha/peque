@@ -166,3 +166,37 @@ unittest {
         GC.collect();     // finalize the pool + its connections
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Contention under OS threads: more threads than connections — excess
+// threads block on the semaphore, at most `capacity` borrows run at once,
+// and every thread completes.
+// ---------------------------------------------------------------------------
+unittest {
+    import core.thread: Thread;
+    import core.atomic: atomicOp, atomicLoad;
+
+    auto pool = ThreadConnectionPool(2, makeFactory());
+    shared int active = 0;
+    shared int done = 0;
+
+    Thread[] threads;
+    foreach (i; 0 .. 6)
+        threads ~= new Thread({
+            pool.borrow((ref Connection c) {
+                immutable now = atomicOp!"+="(active, 1);
+                assert(now <= 2, "more concurrent borrows than pool capacity");
+                c.exec("SELECT pg_sleep(0.05)");
+                atomicOp!"-="(active, 1);
+            });
+            atomicOp!"+="(done, 1);
+        }).start();
+
+    foreach (t; threads)
+        t.join();   // rethrows any in-thread failure, including asserts
+
+    assert(atomicLoad(done) == 6);
+    assert(atomicLoad(active) == 0);
+    pool.close();
+}

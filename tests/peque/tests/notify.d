@@ -272,3 +272,38 @@ unittest {
     assert(ns.length == 1);
     assert(ns[0].payload == "gated");
 }
+
+
+// ---------------------------------------------------------------------------
+// Payload edge cases: empty, unicode, near the 8000-byte server limit
+// ---------------------------------------------------------------------------
+unittest {
+    import std.array: replicate;
+    import peque.exception: QueryError;
+
+    auto listener = makeConn();
+    auto notifier = makeConn();
+
+    listener.listen("peque_payload_chan");
+    scope(exit) listener.unlisten("peque_payload_chan");
+
+    immutable big = "x".replicate(7900);
+    notifier.execParams("SELECT pg_notify($1, $2)", "peque_payload_chan", "");
+    notifier.execParams("SELECT pg_notify($1, $2)", "peque_payload_chan", "привіт 🚀");
+    notifier.execParams("SELECT pg_notify($1, $2)", "peque_payload_chan", big);
+
+    auto ns = listener.waitNotifications(5.seconds);
+    foreach (_; 0 .. 10) {
+        if (ns.length >= 3)
+            break;
+        ns ~= listener.waitNotifications(1.seconds);
+    }
+    assert(ns.length == 3);
+    assert(ns[0].payload == "");
+    assert(ns[1].payload == "привіт 🚀");
+    assert(ns[2].payload == big);
+
+    // Above the limit the server rejects pg_notify with an error.
+    notifier.execParams("SELECT pg_notify($1, $2)", "peque_payload_chan",
+        "y".replicate(8100)).assertThrown!QueryError;
+}

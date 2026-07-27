@@ -344,3 +344,50 @@ unittest {
     assert(ex2 !is null, "unreachable host/port must throw ConnectionError");
 }
 
+
+
+// ---------------------------------------------------------------------------
+// execMulti / exec: an error mid-batch throws QueryError and the connection
+// stays usable (the failure path frees already-collected results)
+// ---------------------------------------------------------------------------
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: QueryError;
+
+    auto c = Connection(
+            environment.get("POSTGRES_DB", "peque-test"),
+            environment.get("POSTGRES_USER", "peque"),
+            environment.get("POSTGRES_PASSWORD", "peque"),
+            environment.get("POSTGRES_HOST", "localhost"),
+            environment.get("POSTGRES_PORT", "5432"),
+    );
+
+    c.execMulti("SELECT 1; SELECT no_such_column_xyz; SELECT 3")
+        .assertThrown!QueryError;
+    assert(c.exec("SELECT 42").getValue!int(0, 0) == 42);
+
+    c.exec("SELECT 1; SELECT no_such_column_xyz; SELECT 3")
+        .assertThrown!QueryError;
+    assert(c.exec("SELECT 43").getValue!int(0, 0) == 43);
+}
+
+// ---------------------------------------------------------------------------
+// Row bounds: an out-of-range row index throws RowNotExistsError
+// ---------------------------------------------------------------------------
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: RowNotExistsError;
+
+    auto c = Connection(
+            environment.get("POSTGRES_DB", "peque-test"),
+            environment.get("POSTGRES_USER", "peque"),
+            environment.get("POSTGRES_PASSWORD", "peque"),
+            environment.get("POSTGRES_HOST", "localhost"),
+            environment.get("POSTGRES_PORT", "5432"),
+    );
+
+    auto res = c.exec("SELECT 1");
+    res[5].assertThrown!RowNotExistsError;
+    res[-1].assertThrown!RowNotExistsError;
+    res.getValue(3, 0).assertThrown!RowNotExistsError;
+}

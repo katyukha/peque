@@ -674,3 +674,27 @@ unittest {
     auto res = c.execParams("SELECT $1::numeric", 3.14L).ensureQueryOk;
     assert(res[0][0].get!real == 3.14L);
 }
+
+
+// ---------------------------------------------------------------------------
+// NUMERIC with far more digits than the target float type holds
+// ---------------------------------------------------------------------------
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // 100 fractional digits → correctly rounded through the long-digit path.
+    assert(c.exec("SELECT round(2::numeric / 3, 100)").ensureQueryOk
+        [0][0].get!double == 2.0 / 3.0);
+    assert(c.exec("SELECT round(2::numeric / 3, 100)").ensureQueryOk
+        [0][0].get!float == 2.0f / 3.0f);
+
+    // 51 integer digits; +1 is far below the double spacing at 1e50.
+    assert(c.exec("SELECT 10::numeric ^ 50 + 1").ensureQueryOk
+        [0][0].get!double == 1e50);
+}
