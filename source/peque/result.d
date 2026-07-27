@@ -21,22 +21,35 @@ package(peque) enum ColFormat: int {
 
 /// Refcounted wrapper for PGresult to be used as ResultInternal.
 private struct ResultInternalData {
-    PGresult* _pg_result;
+    PGresult*           _pg_result;
+    private int[string] _colCache;   // name → column index, populated on demand
 
     this(PGresult* pg_result) { _pg_result = pg_result; }
 
-    ~this() @trusted {
+    ~this() @trusted nothrow @nogc {
         if (_pg_result !is null) {
             PQclear(_pg_result);
             _pg_result = null;
         }
     }
 
-    // Must not be copiable
+    // Must not be copiable — opAssign is intentionally left enabled so that
+    // SafeRefCounted can move-initialise the payload via std.algorithm.mutation.move.
+    // move() resets the source to T.init (null pointer) before the destructor runs,
+    // so there is no double-free risk.
     @disable this(this);
 
-    // Must not be assignable
-    @disable void opAssign(typeof(this));
+    // Return the column index for name.
+    // Delegates to PQfnumber on the first access per distinct name (O(F)),
+    // then serves subsequent accesses for that name from the cache (O(1)).
+    // PQfnumber handles identifier case-folding, so this matches its semantics
+    // exactly without any custom lowercasing logic.
+    package int _colIdx(in string name) @trusted {
+        if (auto p = name in _colCache) return *p;
+        immutable idx = PQfnumber(_pg_result, name.toStringz);
+        _colCache[name] = idx;
+        return idx;
+    }
 }
 
 /// Ref-counted connection to postgres
@@ -140,19 +153,38 @@ struct ResultRow {
         _row_number = row_number;
     }
 
+    /// Number of columns (fields) in this row.
+    /// Mirrors Result.nfields; enables iterating a row's columns by index.
+    int nfields() @trusted {
+        return _result.borrow!((auto ref res) @trusted {
+            return PQnfields(res._pg_result);
+        });
+    }
+
     auto opIndex(in int col_number) {
+        enforce!ColNotExistsError(
+            col_number >= 0 && col_number < nfields,
+            "Column %s does not exists in result!".format(col_number));
         return ResultValue(_result, _row_number, col_number);
     }
 
     auto opIndex(in string col_name) {
-        // TODO: Maybe move to ResultInternal and dynamically create mapping to avoid frequent calls to PQfnumber?
-        int col_number = _result.borrow!((auto ref res) @trusted {
-            return PQfnumber(res._pg_result, col_name.toStringz);
-        });
+        int col_number = _fieldIndex(col_name);
         enforce!ColNotExistsError(
             col_number >= 0,
             "Column %s does not exists in result!".format(col_name));
         return ResultValue(_result, _row_number, col_number);
+    }
+
+    /** Return the column index for the given name, or -1 if not found.
+      *
+      * Uses a per-result name→index map built on first call (O(F) once, O(1)
+      * thereafter), replacing the previous per-call PQfnumber linear scan.
+      **/
+    package(peque) int _fieldIndex(in string name) @trusted {
+        return _result.borrow!((auto ref res) @trusted {
+            return res._colIdx(name);
+        });
     }
 }
 
@@ -204,7 +236,12 @@ struct Result {
         if (bad_states.canFind(status.statusType))
             throw new QueryError(errorMessage);
 
-        return this;
+        // Use an explicit named copy rather than `return this` to avoid a
+        // DMD optimization bug where returning `this` directly from a method
+        // called on an rvalue temporary corrupts non-SafeRefCounted fields
+        // (specifically _current_range_index).
+        auto r = this;
+        return r;
     }
 
     /// Return number of rows (tuples) fetched.

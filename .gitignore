@@ -9,6 +9,8 @@ peque.dll
 peque.a
 peque.lib
 peque-test-*
+subPackages/vibe/peque-vibe-test-*
+subPackages/vibe/dub.selections.json
 *.exe
 *.pdb
 *.o

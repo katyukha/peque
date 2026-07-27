@@ -1,50 +1,50 @@
-name "peque"
-subPackage "subPackages/vibe"
-description "Light postgresql binding to libpq (ImportC)"
+name "vibe"
+description "vibe.d fiber-aware integration for peque (VibeWaitStrategy + VibeConnectionPool)"
 homepage "https://github.com/katyukha/peque"
 authors "Dmytro Katyukha"
 copyright "Copyright © 2023, Dmytro Katyukha"
 license "MPL-2"
-target "library"
+targetType "library"
 
-/* dflags "-preview=dip1000" */
-
-dependency "versioned" version=">=0.1.0"
-dependency "bindbc-common" version=">=1.0.5"
-
+dependency "peque" path="../.."
+dependency "vibe-core" version=">=2.9.0"
 
 configuration "libraryStatic" {
     libs "pq"
     versions "PequeStatic"
+    subConfiguration "peque" "libraryStatic"
 }
 
 configuration "libraryDynamic" {
     dependency "bindbc-loader" version=">=1.1.5"
     versions "PequeDynamic"
+    subConfiguration "peque" "libraryDynamic"
 }
 
 configuration "sourceLibraryStatic" {
     targetType "sourceLibrary"
     libs "pq"
     versions "PequeStatic"
+    subConfiguration "peque" "sourceLibraryStatic"
 }
 
 configuration "sourceLibraryDynamic" {
     targetType "sourceLibrary"
     dependency "bindbc-loader" version=">=1.1.5"
     versions "PequeDynamic"
+    subConfiguration "peque" "sourceLibraryDynamic"
 }
 
 configuration "unittestStatic" {
-    dflags "-checkaction=context" "-allinst"
     sourcePaths "tests"
     libs "pq"
     versions "PequeStatic"
+    subConfiguration "peque" "libraryStatic"
 }
 
 configuration "unittestDynamic" {
     dependency "bindbc-loader" version=">=1.1.5"
-    dflags "-checkaction=context" "-allinst"
     sourcePaths "tests"
     versions "PequeDynamic"
+    subConfiguration "peque" "libraryDynamic"
 }

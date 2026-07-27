@@ -19,6 +19,7 @@ jobs:
           - 15
           - 16
           - 17
+          - 18
         include:
           # ubuntu-24.04-arm
           - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Static,   pgVersion: 15 }
@@ -27,6 +28,7 @@ jobs:
           - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Dynamic,  pgVersion: 15 }
           - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Dynamic,  pgVersion: 16 }
           - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Dynamic,  pgVersion: 17 }
+          - { os: ubuntu-24.04-arm, dc: ldc-1.41.0, buildConf: Dynamic,  pgVersion: 18 }
     env:
       POSTGRES_USER: peque
       POSTGRES_PASSWORD: peque
@@ -72,3 +74,6 @@ jobs:
 
       - name: Run tests
         run: dub test -b unittest-cov -c "unittest${{ matrix.buildConf }}"
+
+      - name: Run tests (vibe)
+        run: dub test :vibe -c "unittest${{ matrix.buildConf }}"

@@ -2,12 +2,12 @@ module peque.tests.sql_injections;
 
 private import std.process: environment;
 private import std.exception: assertThrown;
-private import core.exception: AssertError;
 
 private import versioned: Version;
 
 private import peque.connection: Connection;
 private import peque.result: Result;
+private import peque.exception: ConversionError;
 
 
 unittest {
@@ -46,15 +46,16 @@ unittest {
     res = c.execParams("SELECT $1", "t1' --");
     assert(res[0][0].as!string == "t1' --");
 
-    // It is not allowed to pass strings that contain nulls to SQL
-    c.execParams("SELECT code, title FROM peque_test WHERE code = $1", "t1\0; Hello World").assertThrown!AssertError;
-    c.execParams("SELECT $1", "t1\0; Hello World").assertThrown!AssertError;
+    // It is not allowed to pass strings that contain nulls to SQL.
+    // ConversionError (not an assert) — the guard survives -release builds.
+    c.execParams("SELECT code, title FROM peque_test WHERE code = $1", "t1\0; Hello World").assertThrown!ConversionError;
+    c.execParams("SELECT $1", "t1\0; Hello World").assertThrown!ConversionError;
 
     // This should fail on null char in string
     c.execParams(
         "INSERT INTO peque_test (code, title) VALUES ('messy', $1)",
         "Double\" Quote, Single' Quote, Backslash\\, Percent%, Underscore_, Newline\n, Tab\t, Emoji 🐇, and a NUL\0 byte.")
-    .assertThrown!AssertError;
+    .assertThrown!ConversionError;
 
     // Try to insert messy string
     res = c.execParams(

@@ -38,8 +38,12 @@ jobs:
       - name: Start PostgreSQL on MacOS
         run: |
           brew install libpq
-          brew install postgresql@14
-          brew services start postgresql
+          brew install postgresql@18
+          # postgresql@18 is keg-only: put pg_isready/psql on PATH for this
+          # and the following steps
+          echo "$(brew --prefix)/opt/postgresql@18/bin" >> $GITHUB_PATH
+          export PATH="$(brew --prefix)/opt/postgresql@18/bin:$PATH"
+          brew services start postgresql@18
           echo 'Check PostgreSQL service is running'
           i=10
           while [ $i -gt 0 ]; do
@@ -67,7 +71,7 @@ jobs:
           PGHOST: localhost
           PGPORT: 5432
         run: |
-          psql postgres -c "CREATE DATABASE \"$POSTGRES_DB\" ENCODING 'unicode'"
+          psql postgres -c "CREATE DATABASE \"$POSTGRES_DB\" OWNER \"$POSTGRES_USER\" ENCODING 'unicode'"
 
       - name: Run tests
         run: dub test -b unittest-cov -c "unittest${{ matrix.buildConf }}"

@@ -167,13 +167,15 @@ unittest {
     assert(res.getValue(0, 0).get!string == "9223372036854775899");
     assert(res.getValue(0, 0).get!ulong == 9223372036854775899);
 
-    res = c.execParams("SELECT round($1,10)", 0.1782788489);
+    // round(v, n) exists only for numeric — float params now arrive as
+    // float4/float8 and need an explicit cast
+    res = c.execParams("SELECT round($1::numeric,10)", 0.1782788489);
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!float.isClose(0.1782788489f));
     assert(res.getValue(0, 0).get!double.isClose(0.1782788489));
     assert(res.getValue(0, 0).get!string == "0.1782788489");
 
-    res = c.execParams("SELECT round($1, 5)", 0.17827f);
+    res = c.execParams("SELECT round($1::numeric, 5)", 0.17827f);
     assert(!res.getValue(0, 0).isNull);
     assert(res.getValue(0, 0).get!float.isClose(0.1782700000f));
     assert(res.getValue(0, 0).get!double.isClose(0.1782700000));
@@ -246,10 +248,254 @@ unittest {
 }
 
 
-// Separate case to test things that are not allowed in safe code
-@system unittest {
+// ---------------------------------------------------------------------------
+// Integer boundary values
+// ---------------------------------------------------------------------------
+
+unittest {
     import std.datetime;
-    import core.exception: AssertError;
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // int (int4) boundaries
+    auto res = c.execParams("SELECT $1::int4", int.min).ensureQueryOk;
+    assert(res[0][0].get!int == int.min);
+
+    res = c.execParams("SELECT $1::int4", int.max).ensureQueryOk;
+    assert(res[0][0].get!int == int.max);
+
+    // long (int8) boundaries
+    res = c.execParams("SELECT $1::int8", long.min).ensureQueryOk;
+    assert(res[0][0].get!long == long.min);
+
+    res = c.execParams("SELECT $1::int8", long.max).ensureQueryOk;
+    assert(res[0][0].get!long == long.max);
+}
+
+
+// ---------------------------------------------------------------------------
+// Floating-point special values: NaN and Infinity
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.math: isNaN, isInfinity;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    auto res = c.exec("SELECT 'NaN'::float8").ensureQueryOk;
+    assert(res[0][0].get!double.isNaN, "NaN must round-trip as NaN");
+    assert(res[0][0].get!string == "NaN");
+
+    res = c.exec("SELECT 'Infinity'::float8").ensureQueryOk;
+    assert(res[0][0].get!double.isInfinity, "Infinity must round-trip as infinity");
+    assert(res[0][0].get!double > 0, "Infinity must be positive");
+
+    res = c.exec("SELECT '-Infinity'::float8").ensureQueryOk;
+    assert(res[0][0].get!double.isInfinity, "-Infinity must round-trip as infinity");
+    assert(res[0][0].get!double < 0, "-Infinity must be negative");
+
+    // Round-trip through execParams
+    res = c.execParams("SELECT $1::float8", double.nan).ensureQueryOk;
+    assert(res[0][0].get!double.isNaN, "NaN parameter must round-trip as NaN");
+
+    res = c.execParams("SELECT $1::float8", double.infinity).ensureQueryOk;
+    assert(res[0][0].get!double.isInfinity && res[0][0].get!double > 0);
+
+    res = c.execParams("SELECT $1::float8", -double.infinity).ensureQueryOk;
+    assert(res[0][0].get!double.isInfinity && res[0][0].get!double < 0);
+}
+
+
+// ---------------------------------------------------------------------------
+// Floating-point exact round-trip: tiny magnitudes and full double precision
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // Values below ~5e-21 used to be zeroed by fixed-point formatting
+    auto res = c.execParams("SELECT $1::float8", 1.5e-25).ensureQueryOk;
+    assert(res[0][0].get!double == 1.5e-25);
+
+    // smallest subnormal double — spelled via nextUp(0.0) because ldc2's
+    // lexer rejects the 4.9e-324 literal as "not representable"
+    import std.math: nextUp;
+    immutable minSub = nextUp(0.0);
+    res = c.execParams("SELECT $1::float8", -minSub).ensureQueryOk;
+    assert(res[0][0].get!double == -minSub);
+
+    // Full 17-significant-digit precision must survive the round-trip
+    res = c.execParams("SELECT $1::float8", 1.2345678901234567e-10).ensureQueryOk;
+    assert(res[0][0].get!double == 1.2345678901234567e-10);
+
+    res = c.execParams("SELECT $1::float8", double.max).ensureQueryOk;
+    assert(res[0][0].get!double == double.max);
+
+    res = c.execParams("SELECT $1::float4", 1.1754944e-38f).ensureQueryOk;
+    assert(res[0][0].get!float == 1.1754944e-38f);
+}
+
+
+// ---------------------------------------------------------------------------
+// Declared parameter OIDs: server must see native integer/float types,
+// not NUMERIC (which would defeat btree indexes on integer columns)
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    static string typeOf(P)(ref Connection c, P param) {
+        return c.execParams("SELECT pg_typeof($1)::text", param)
+                .getValue(0, 0).get!string;
+    }
+
+    assert(typeOf(c, short(1))  == "smallint");
+    assert(typeOf(c, 1)         == "integer");
+    assert(typeOf(c, 1L)        == "bigint");
+    assert(typeOf(c, 1uL)       == "numeric");  // exceeds bigint range
+    assert(typeOf(c, 1.0f)      == "real");
+    assert(typeOf(c, 1.0)       == "double precision");
+    assert(typeOf(c, [1, 2])    == "integer[]");
+    assert(typeOf(c, [1.0])     == "double precision[]");
+}
+
+
+// ---------------------------------------------------------------------------
+// Arrays: empty array and NULL element
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.typecons: Nullable, nullable;
+    import peque.exception: ConversionError;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // Empty array: must decode to an empty D slice, not throw.
+    auto res = c.execParams("SELECT $1::int[]", cast(int[])[]).ensureQueryOk;
+    assert(res[0][0].get!(int[]) == [], "empty int array must decode to []");
+
+    res = c.exec("SELECT ARRAY[]::text[]").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == [], "empty text array must decode to []");
+
+    // NULL element in a non-nullable array: rejected loudly with
+    // ConversionError (previously a raw ConvException for int[], or the
+    // silent literal "NULL" string for text[]).
+    c.exec("SELECT ARRAY[1,NULL,3]::int[]")
+        .ensureQueryOk
+        [0][0].get!(int[])
+        .assertThrown!ConversionError;
+    c.exec("SELECT ARRAY['a',NULL,'b']::text[]")
+        .ensureQueryOk
+        [0][0].get!(string[])
+        .assertThrown!ConversionError;
+
+    // NULL element in a Nullable!U[] array: decodes to an empty element.
+    res = c.exec("SELECT ARRAY[1,NULL,3]::int[]").ensureQueryOk;
+    auto ints = res[0][0].get!(Nullable!int[]);
+    assert(ints.length == 3);
+    assert(ints[0] == 1.nullable && ints[1].isNull && ints[2] == 3.nullable,
+        "NULL in a Nullable!int[] must decode to an empty element");
+
+    res = c.exec("SELECT ARRAY['a',NULL,'b']::text[]").ensureQueryOk;
+    auto strs = res[0][0].get!(Nullable!string[]);
+    assert(strs.length == 3);
+    assert(strs[0] == "a".nullable && strs[1].isNull && strs[2] == "b".nullable);
+
+    // A *quoted* "NULL" is the literal string, distinct from a SQL NULL.
+    res = c.exec("SELECT ARRAY['NULL','b']::text[]").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == ["NULL", "b"],
+        "quoted NULL must stay the literal string \"NULL\"");
+}
+
+
+// ---------------------------------------------------------------------------
+// Arrays: empty-string elements must not crash the parser
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // A leading empty-string element triggers &tmp_value[0] when tmp_value
+    // is empty because the quoted value "" produces no characters.
+    auto res = c.exec("SELECT ARRAY['', 'b', '']::text[]").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == ["", "b", ""],
+        "array with empty-string elements must decode correctly");
+
+    // Single empty element — smallest reproducer.
+    res = c.exec("SELECT ARRAY['']::text[]").ensureQueryOk;
+    assert(res[0][0].get!(string[]) == [""]);
+}
+
+
+// ---------------------------------------------------------------------------
+// UUID round-trip
+// ---------------------------------------------------------------------------
+
+unittest {
+    import std.uuid: UUID;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    auto id = UUID("550e8400-e29b-41d4-a716-446655440000");
+
+    // send as $1, receive as uuid
+    auto res = c.execParams("SELECT $1::uuid", id).ensureQueryOk;
+    assert(res[0][0].get!UUID == id);
+    assert(res[0][0].get!string == "550e8400-e29b-41d4-a716-446655440000");
+
+    // server-generated UUID must parse back to UUID
+    res = c.exec("SELECT gen_random_uuid()").ensureQueryOk;
+    auto generated = res[0][0].get!UUID;
+    assert(generated != UUID.init);
+}
+
+
+// Converting a value whose pg type cannot map to the requested D type must
+// throw ConversionError (previously an assert(0), which is UB under -release).
+unittest {
+    import std.datetime;
+    import peque.exception: ConversionError;
 
     auto c = Connection(
             dbname: environment.get("POSTGRES_DB", "peque-test"),
@@ -260,7 +506,7 @@ unittest {
     );
 
     auto res = c.exec("SELECT 42;");
-    res.getValue(0, 0).get!Date.assertThrown!AssertError;
+    res.getValue(0, 0).get!Date.assertThrown!ConversionError;
 }
 
 
@@ -387,4 +633,68 @@ unittest {
     assert(res[0]["data_dt_tz"].get!SysTime == SysTime(DateTime(2023, 8, 3, 22, 10, 42), hnsecs(1_234_560), new immutable(SimpleTimeZone)(4.hours)));
     assert(res[0]["data_dt_tz"].get!SysTime.utcOffset == 4.hours);
     assert(res[0]["data_bool"].get!bool == false);
+}
+
+
+// ---------------------------------------------------------------------------
+// Floats: server round-trip of extreme magnitudes and `real` (NUMERIC)
+// ---------------------------------------------------------------------------
+unittest {
+    import std.math: nextUp;
+
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // Extreme doubles through float8: subnormal, max, tiny. Compare the
+    // server's text (shortest exact form, PG >= 12) — parse-free, so the
+    // check is independent of std.conv parse accuracy on this platform.
+    import std.typecons: tuple;
+    foreach (t; [tuple(nextUp(0.0),        "5e-324"),
+                 tuple(double.max,         "1.7976931348623157e+308"),
+                 tuple(double.min_normal,  "2.2250738585072014e-308"),
+                 tuple(1.5e-25,            "1.5e-25")])
+        assert(c.execParams("SELECT $1::float8", t[0]).ensureQueryOk
+            [0][0].get!string == t[1]);
+
+    // Parsed round-trip: result parsing is correctly rounded on every
+    // platform, so extreme values recover exactly.
+    foreach (v; [nextUp(0.0), double.max, double.min_normal, 1.5e-25])
+        assert(c.execParams("SELECT $1::float8", v).ensureQueryOk
+            [0][0].get!double == v);
+    assert(c.execParams("SELECT $1::float4", 1.1754944e-38f).ensureQueryOk
+        [0][0].get!float == 1.1754944e-38f);
+
+    // real goes through NUMERIC (FLOAT8 where real == double): the server
+    // must accept the emitted text and return the digits.
+    auto res = c.execParams("SELECT $1::numeric", 3.14L).ensureQueryOk;
+    assert(res[0][0].get!real == 3.14L);
+}
+
+
+// ---------------------------------------------------------------------------
+// NUMERIC with far more digits than the target float type holds
+// ---------------------------------------------------------------------------
+unittest {
+    auto c = Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+
+    // 100 fractional digits → correctly rounded through the long-digit path.
+    assert(c.exec("SELECT round(2::numeric / 3, 100)").ensureQueryOk
+        [0][0].get!double == 2.0 / 3.0);
+    assert(c.exec("SELECT round(2::numeric / 3, 100)").ensureQueryOk
+        [0][0].get!float == 2.0f / 3.0f);
+
+    // 51 integer digits; +1 is far below the double spacing at 1e50.
+    assert(c.exec("SELECT 10::numeric ^ 50 + 1").ensureQueryOk
+        [0][0].get!double == 1e50);
 }

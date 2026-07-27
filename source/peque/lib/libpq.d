@@ -1,5 +1,10 @@
-/* This file is result of translation of zip.h file of libzip to D,
- * using BindBC to be able to load library dynamically.
+/* D bindings for libpq (PostgreSQL client library).
+ * Translated from the PostgreSQL libpq C headers using BindBC codegen
+ * for dynamic loading support.
+ *
+ * PostgreSQL is Copyright © 1996-2024 The PostgreSQL Global Development Group.
+ * PostgreSQL is licensed under the PostgreSQL License
+ * (see https://www.postgresql.org/about/licence/).
  */
 module peque.lib.libpq;
 
@@ -51,6 +56,20 @@ struct pg_result;
 alias pg_conn PGconn;
 alias pg_result PGresult;
 
+/* PGnotify — notification message received via LISTEN/NOTIFY.
+ * Layout must match libpq-fe.h exactly, including the internal `next` field.
+ * Instances are heap-allocated by libpq (returned by PQnotifies) and must be
+ * released with PQfreemem.
+ */
+struct pgNotify {
+    char* relname;      // notification channel name
+    int   be_pid;       // process ID of the notifying server backend
+    char* extra;        // notification payload string
+    // Field below is private to libpq; never touch it.
+    pgNotify* next;     // list link (libpq internal)
+}
+alias pgNotify PGnotify;
+
 
 enum staticBinding = (){
 	version(BindBC_Static)      return true;
@@ -91,6 +110,42 @@ mixin(joinFnBinds!staticBinding((){
 
 
         {q{size_t}, q{PQescapeStringConn}, q{PGconn* conn, char* to, const(char)* from, size_t length, int* error}},
+        // Returns a libpq-malloc'd buffer (must be released with PQfreemem), or null on error
+        {q{char*}, q{PQescapeIdentifier}, q{PGconn* conn, const(char)* str, size_t length}},
+
+        // Async send — return 1=ok, 0=fail
+        {q{int}, q{PQsendQuery},              q{PGconn* conn, const(char)* query}},
+        {q{int}, q{PQsendQueryParams},        q{PGconn* conn, const(char)* command, int nParams, const(Oid)* paramTypes, const(char*)* paramValues, const(int)* paramLengths, const(int)* paramFormats, int resultFormat}},
+
+        // Flush / consume / busy / socket
+        {q{int},       q{PQflush},            q{PGconn* conn}},         // 0=done, 1=would block, -1=error
+        {q{int},       q{PQsocket},           q{const(PGconn)* conn}},
+        {q{int},       q{PQconsumeInput},     q{PGconn* conn}},         // 1=ok, 0=error
+        {q{int},       q{PQisBusy},           q{PGconn* conn}},         // 1=busy, 0=result ready
+        {q{PGresult*}, q{PQgetResult},        q{PGconn* conn}},
+
+        // LISTEN/NOTIFY — PQnotifies pops one buffered notification (null when drained);
+        // each returned PGnotify* must be released with PQfreemem
+        {q{PGnotify*}, q{PQnotifies},         q{PGconn* conn}},
+        {q{void},      q{PQfreemem},          q{void* ptr}},
+
+        // COPY sub-protocol — bound only to abort/drain an unexpected COPY
+        // so the connection stays usable (peque does not implement COPY).
+        // PQgetCopyData: >0=row length (buffer must be PQfreemem'd),
+        //                0=no data yet (async), -1=copy done, -2=error
+        // PQputCopyEnd:  1=ok, 0=would block (retry), -1=error
+        {q{int}, q{PQgetCopyData}, q{PGconn* conn, char** buffer, int async}},
+        {q{int}, q{PQputCopyEnd},  q{PGconn* conn, const(char)* errormsg}},
+
+        // Non-blocking mode
+        {q{int}, q{PQsetnonblocking},         q{PGconn* conn, int arg}},
+        {q{int}, q{PQisnonblocking},          q{const(PGconn)* conn}},
+
+        // Prepared statements (async path) — return 1=ok, 0=fail
+        {q{int},       q{PQsendPrepare},          q{PGconn* conn, const(char)* stmtName, const(char)* query, int nParams, const(Oid)* paramTypes}},
+        {q{int},       q{PQsendQueryPrepared},    q{PGconn* conn, const(char)* stmtName, int nParams, const(char*)* paramValues, const(int)* paramLengths, const(int)* paramFormats, int resultFormat}},
+        {q{int},       q{PQsendDescribePrepared}, q{PGconn* conn, const(char)* stmtName}},
+        {q{PGresult*}, q{PQdescribePrepared},     q{PGconn* conn, const(char)* stmtName}},
     ];
 
     return ret;
