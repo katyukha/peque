@@ -269,16 +269,38 @@ struct pgType {
 struct defaultOrder(fields...) if (fields.length >= 1) {}
 
 
+/** Normalize a single UDA to its `many2one!(T, od)` type, or `void`.
+  *
+  * A UDA may be attached in either of two forms, and both must be recognised:
+  * `@many2one!(Partner)` (the type itself) and `@many2one!(Partner)()` (an
+  * instance) — the latter is a natural thing to write given `@field()` and
+  * `@index(...)` are instances. Feeding both through this template keeps the
+  * detector (hasMany2OneUDA) and every target-type extractor in agreement; a
+  * site that pattern-matched only the type form would silently skip the
+  * instance form and drop the FK from hydration, DDL, or join resolution.
+  *
+  * Non-many2one UDAs (and symbols with no `typeof`, e.g. a bare template name)
+  * normalize to `void`, which never matches a `many2one!(T, od)` pattern.
+  **/
+template many2oneUDAType(alias uda) {
+    static if (is(uda))
+        alias many2oneUDAType = uda;
+    else static if (__traits(compiles, typeof(uda)))
+        alias many2oneUDAType = typeof(uda);
+    else
+        alias many2oneUDAType = void;
+}
+
 /** Check if a symbol has any @many2one!(T, ...) UDA attached (any T, any OnDelete).
   *
-  * Used internally by the hydration and ORM layers to detect FK fields.
+  * Accepts both the type form (`@many2one!(Partner)`) and the instance form
+  * (`@many2one!(Partner)()`). Used internally by the hydration and ORM layers
+  * to detect FK fields.
   **/
 template hasMany2OneUDA(alias sym) {
     private template _isM2O(alias uda) {
-        static if (is(uda))
-            enum bool _isM2O = is(uda == many2one!(U, od), U, OnDelete od);
-        else
-            enum bool _isM2O = false;
+        enum bool _isM2O =
+            is(many2oneUDAType!uda == many2one!(U, od), U, OnDelete od);
     }
     import std.meta: anySatisfy;
     enum bool hasMany2OneUDA = anySatisfy!(_isM2O, __traits(getAttributes, sym));
@@ -366,49 +388,61 @@ struct checkConstraint {
   *
   * An optional WHERE clause turns it into a partial index.
   *
+  * The field must also be a column (@field / @primaryKey / @many2one) — an
+  * index UDA on a non-column field is a compile error rather than a silently
+  * missing index.
+  *
+  * Use name: to give the index an explicit name; two indexes that would
+  * otherwise derive the same name are rejected at compile time.
+  *
   * Examples:
   * ---
-  * @index                          string email;   // CREATE INDEX ON table (email)
-  * @index(where: "active = true")  string email;   // CREATE INDEX … WHERE active = true
+  * @field @index                         string email;  // CREATE INDEX ON table (email)
+  * @field @index(where: "active = true") string email;  // partial index
+  * @field @index(where: "a = 1")
+  *        @index(where: "b = 2", name: "idx_t_email_b") string email;
   * ---
   **/
-struct index { string where = ""; }
+struct index { string where = ""; string name = ""; }
 
 /** Create a single-column unique btree index on this field in the generated DDL.
   *
   * Examples:
   * ---
-  * @uniqueIndex                           string slug;
-  * @uniqueIndex(where: "deleted_at IS NULL") string slug;
+  * @field @uniqueIndex                             string slug;
+  * @field @uniqueIndex(where: "deleted_at IS NULL") string slug;
   * ---
   **/
-struct uniqueIndex { string where = ""; }
+struct uniqueIndex { string where = ""; string name = ""; }
 
 /** Create a single-column GIN index on this field in the generated DDL.
   *
   * GIN indexes are suited for array columns, tsvector full-text search, and JSONB.
   * Emits: CREATE INDEX … USING gin (col) [WHERE cond]
   *
+  * The field must also carry @field to be a column. Array columns additionally
+  * need an explicit @pgType, since D slices have no default PostgreSQL mapping.
+  *
   * Example:
   * ---
-  * @ginIndex  string[] tags;
+  * @field @pgType("TEXT[]") @ginIndex string[] tags;
   * ---
   **/
-struct ginIndex { string where = ""; }
+struct ginIndex { string where = ""; string name = ""; }
 
 /** Create a single-column GiST index on this field in the generated DDL.
   *
   * GiST indexes suit geometric types, range types, and full-text search.
   * Emits: CREATE INDEX … USING gist (col) [WHERE cond]
   **/
-struct gistIndex { string where = ""; }
+struct gistIndex { string where = ""; string name = ""; }
 
 /** Create a single-column Hash index on this field in the generated DDL.
   *
   * Hash indexes only support equality lookups — no range scans.
   * Emits: CREATE INDEX … USING hash (col) [WHERE cond]
   **/
-struct hashIndex { string where = ""; }
+struct hashIndex { string where = ""; string name = ""; }
 
 /** Create a multi-column btree index. Applied on the model struct.
   *
@@ -430,6 +464,7 @@ struct hashIndex { string where = ""; }
 struct indexTogether(cols...) if (cols.length >= 2) {
     enum string[] columns = [cols];
     string where = "";
+    string name  = "";
 }
 
 /** Create a multi-column unique index. Applied on the model struct.
@@ -455,4 +490,5 @@ struct indexTogether(cols...) if (cols.length >= 2) {
 struct uniqueIndexTogether(cols...) if (cols.length >= 2) {
     enum string[] columns = [cols];
     string where = "";
+    string name  = "";
 }

@@ -459,6 +459,12 @@ private bool _pathHasDot(string s) pure nothrow @safe @nogc {
     return false;
 }
 
+private size_t _pathDotCount(string s) pure nothrow @safe @nogc {
+    size_t n = 0;
+    foreach (c; s) if (c == '.') ++n;
+    return n;
+}
+
 /** Type-free field builder — no explicit model type needed.
   *
   * For plain fields (no dot): resolves via camelToSnake convention, returns a
@@ -482,6 +488,11 @@ private bool _pathHasDot(string s) pure nothrow @safe @nogc {
   * failures. Use F!(M, "field") when compile-time validation is desired.
   **/
 template F(string path) {
+    static assert(_pathDotCount(path) <= 2,
+        "F!\"" ~ path ~ "\": relation paths support at most two relation segments " ~
+        "(\"rel.field\" or \"rel1.rel2.field\"). A deeper path cannot be resolved " ~
+        "and would be emitted as a schema-qualified name, producing invalid SQL. " ~
+        "Query from the far side of the relation instead.");
     static if (_pathHasDot(path)) {
         enum PathBuilder!path F = PathBuilder!path.init;
     } else {

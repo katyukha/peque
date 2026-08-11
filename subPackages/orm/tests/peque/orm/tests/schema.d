@@ -117,8 +117,15 @@ private Connection makeConn() {
     );
 }
 
+// Quote-insensitive substring check. Every identifier peque emits is now
+// double-quoted unconditionally; these tests are about type mapping and
+// constraint generation, so they match against the DDL with quotes stripped.
+// The quoting rule itself is pinned by _sqlIdent's unit tests and end-to-end by
+// peque.orm.tests.reserved_words.
 private bool contains(string haystack, string needle) {
-    return haystack.indexOf(needle) >= 0;
+    string bare;
+    foreach (char c; haystack) if (c != '"') bare ~= c;
+    return bare.indexOf(needle) >= 0;
 }
 
 
@@ -464,4 +471,98 @@ unittest {
     auto ups = repo.upsert(t2);
     assert(ups.id == explicit);
     assert(ups.name == "fixed");
+}
+
+
+// ===========================================================================
+// Index-name collisions and misplaced index UDAs (ORM-9)
+// ===========================================================================
+//
+// Every CREATE INDEX carries IF NOT EXISTS, so two indexes deriving the same
+// name meant the second was silently skipped — the schema "deployed" with an
+// index missing. Both cases below must now fail the build instead.
+
+@model("ixc_partial")
+struct IxcPartial {
+    @primaryKey int    id;
+    // Two partial indexes on one column: both derive idx_ixc_partial_code.
+    @field @index(where: "a = 1") @index(where: "b = 2") string code;
+}
+
+@model("ixc_together")
+struct IxcTogether {
+    @primaryKey int    id;
+    @field      string a;
+    @field      string bC;
+    @field      string aB;
+    @field      string c;
+}
+// "a" + "b_c" and "a_b" + "c" both join to idx_ixc_together_a_b_c.
+@indexTogether!("a", "b_c")
+@indexTogether!("a_b", "c")
+@model("ixc_together2")
+struct IxcTogether2 {
+    @primaryKey int    id;
+    @field      string a;
+    @field      string bC;
+    @field      string aB;
+    @field      string c;
+}
+
+@model("ixc_named")
+struct IxcNamed {
+    @primaryKey int    id;
+    // Same two partial indexes, disambiguated by an explicit name:.
+    @field @index(where: "a = 1")
+           @index(where: "b = 2", name: "idx_ixc_named_code_b") string code;
+}
+
+@model("ixc_noncol")
+struct IxcNonCol {
+    @primaryKey int    id;
+    @field      string code;
+    @index      string notAColumn;   // no @field → never becomes a column
+}
+
+unittest {
+    // Colliding derived names are a compile-time error (CTFE forces evaluation).
+    static assert(!__traits(compiles, { enum x = modelDDL!IxcPartial(); }),
+        "two partial indexes deriving one name must be rejected");
+    static assert(!__traits(compiles, { enum x = modelDDL!IxcTogether2(); }),
+        "colliding @indexTogether names must be rejected");
+
+    // An explicit name: resolves the collision.
+    static assert(__traits(compiles, { enum x = modelDDL!IxcNamed(); }),
+        "an explicit name: must make the two indexes coexist");
+    enum namedDDL = modelDDL!IxcNamed();
+    import std.algorithm.searching: canFind;
+    static assert(namedDDL.canFind("idx_ixc_named_code "),  namedDDL);
+    static assert(namedDDL.canFind("idx_ixc_named_code_b"), namedDDL);
+
+    // An index UDA on a non-column field is no longer silently dropped.
+    static assert(!__traits(compiles, modelDDL!IxcNonCol()),
+        "@index on a field without @field must be rejected, not ignored");
+}
+
+
+// ===========================================================================
+// The documented array + GIN form must actually compile
+// ===========================================================================
+//
+// model.d and this module's header previously showed `@ginIndex string[] tags;`
+// with no @field, which the "index UDA needs a column" assert now rejects — and
+// which never had a PostgreSQL type mapping either. This pins the corrected
+// form so the examples and the code cannot drift apart again.
+
+@model("ixdoc_tagged")
+struct IxDocTagged {
+    @primaryKey                              int      id;
+    @field @pgType("TEXT[]") @ginIndex       string[] tags;
+}
+
+unittest {
+    enum ddl = modelDDL!IxDocTagged();
+    assert(ddl.contains("tags TEXT[] NOT NULL"), ddl);
+    assert(ddl.contains("CREATE INDEX IF NOT EXISTS gin_ixdoc_tagged_tags"), ddl);
+    assert(ddl.contains("USING gin"), ddl);
 }

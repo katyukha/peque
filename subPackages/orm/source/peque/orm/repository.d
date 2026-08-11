@@ -93,10 +93,17 @@ if (isModel!M && isQueryContext!Ctx) {
                                    " WHERE " ~ _crudPk ~ " = $1";
     private enum _crudExistsByIdSQL = "SELECT 1 FROM " ~ _crudTable ~
                                       " WHERE " ~ _crudPk ~ " = $1 LIMIT 1";
-    private enum _crudInsSQL     = "INSERT INTO " ~ _crudTable ~
-                                   " (" ~ buildInsertColList!M() ~ ")" ~
-                                   " VALUES (" ~ buildInsertPlaceholders!M() ~ ")" ~
-                                   " RETURNING " ~ _crudSel;
+    // A model whose only column is the primary key has an empty insert column
+    // list; "INSERT INTO t () VALUES ()" is not valid SQL, so such tables use
+    // the DEFAULT form instead. PK-only marker/identity tables are legitimate,
+    // so this is handled rather than rejected.
+    private enum _crudInsSQL     = countNonPkFields!M() == 0
+        ? "INSERT INTO " ~ _crudTable ~ " (" ~ _crudPk ~ ") VALUES (DEFAULT)" ~
+          " RETURNING " ~ _crudSel
+        : "INSERT INTO " ~ _crudTable ~
+          " (" ~ buildInsertColList!M() ~ ")" ~
+          " VALUES (" ~ buildInsertPlaceholders!M() ~ ")" ~
+          " RETURNING " ~ _crudSel;
     private enum _crudUpdSQL     = "UPDATE " ~ _crudTable ~
                                    " SET " ~ buildUpdateSetClause!M() ~
                                    " WHERE " ~ _crudPk ~
@@ -184,12 +191,24 @@ if (isModel!M && isQueryContext!Ctx) {
             foreach (ref r; records) r.applyDefaults();
 
         enum _nf = countNonPkFields!M();
-        auto params = buildInsertParamsMany!M(records);
-        string sql = "INSERT INTO " ~ _crudTable ~
-                     " (" ~ buildInsertColList!M() ~ ") VALUES " ~
-                     buildMultiRowPlaceholders(_nf, records.length) ~
-                     " RETURNING " ~ _crudSel;
-        return _ctx.execParams(sql, params).as!(M[]);
+        static if (_nf == 0) {
+            // PK-only model: no values to bind, one (DEFAULT) tuple per record.
+            string rows;
+            foreach (i; 0 .. records.length) {
+                if (i) rows ~= ", ";
+                rows ~= "(DEFAULT)";
+            }
+            string sql = "INSERT INTO " ~ _crudTable ~ " (" ~ _crudPk ~ ")" ~
+                         " VALUES " ~ rows ~ " RETURNING " ~ _crudSel;
+            return _ctx.exec(sql).as!(M[]);
+        } else {
+            auto params = buildInsertParamsMany!M(records);
+            string sql = "INSERT INTO " ~ _crudTable ~
+                         " (" ~ buildInsertColList!M() ~ ") VALUES " ~
+                         buildMultiRowPlaceholders(_nf, records.length) ~
+                         " RETURNING " ~ _crudSel;
+            return _ctx.execParams(sql, params).as!(M[]);
+        }
     }
 
     /** Insert or update by primary key.
@@ -205,7 +224,7 @@ if (isModel!M && isQueryContext!Ctx) {
       * (UUIDs, natural integer keys) or to re-apply a previously inserted record.
       * For natural-key upserts (conflict on email, code, …) use upsert!"field".
       **/
-    M upsert(ref M record) {
+    M upsert()(ref M record) {
         static assert(_buildExcludedSetClause!M().length > 0,
             M.stringof ~ " has no non-PK fields; upsert() has nothing to update. " ~
             "Use insert() instead.");
@@ -289,7 +308,7 @@ if (isModel!M && isQueryContext!Ctx) {
       * All non-PK column fields are written.  If you want a partial update,
       * write a custom method using execParams directly.
       **/
-    void update(ref M record) {
+    void update()(ref M record) {
         static assert(buildUpdateSetClause!M().length > 0,
             M.stringof ~ " has no non-PK column fields; update() would emit an " ~
             "empty SET clause. Nothing to update — the PK alone identifies the row.");

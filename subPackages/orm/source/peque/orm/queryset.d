@@ -49,10 +49,11 @@ private import std.conv: to;
 private import std.traits: hasUDA, FieldNameTuple, Fields;
 private import std.string: indexOf;
 private import std.exception: enforce;
-private import peque.exception: PequeException;
+private import peque.exception: PequeException, QueryError;
 
 private import peque.model: model, defaultOrder, field, primaryKey, related,
-    one2many, many2many, many2one, OnDelete, hasMany2OneUDA, autoHydrate;
+    one2many, many2many, many2one, OnDelete, hasMany2OneUDA, many2oneUDAType,
+    autoHydrate;
 private import peque.converter: PGValue, convertToPG;
 private import peque.query_context: isQueryContext;
 private import peque.orm.repository: isModel;
@@ -100,10 +101,11 @@ private template _innerRelType(M, string jf) {
 }
 
 // Extract the target model type from a @many2one!(T, ...) field on M.
+// Goes through many2oneUDAType so both the type and instance UDA forms resolve.
 private template _m2oRelType(M, string memberName) {
     private alias _Mem = __traits(getMember, M, memberName);
     static foreach (_uda; __traits(getAttributes, _Mem)) {
-        static if (is(_uda == many2one!(_U, _od), _U, OnDelete _od)) {
+        static if (is(many2oneUDAType!_uda == many2one!(_U, _od), _U, OnDelete _od)) {
             alias _m2oRelType = _U;
         }
     }
@@ -144,7 +146,7 @@ private template _pathFkCol(M, string relName) {
             static if (_mn == relName && hasUDA!(_Mem, related))
                 enum string _scan = _fkColForRelatedField!(M, _mn, _innerRelType!(M, _mn))();
             else static if (_mn == relName && hasMany2OneUDA!_Mem)
-                enum string _scan = _colName!(_Mem, _mn);
+                enum string _scan = _sqlIdent(_colName!(_Mem, _mn));
             else
                 enum string _scan = _scan!(i + 1);
         }
@@ -191,7 +193,7 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                     // FK column on TargetM — resolve from the named invField directly
                     // (the field may have @field or @many2one UDA; either is valid)
                     alias InvFieldDecl = __traits(getMember, TargetM, invField);
-                    enum fkCol = _colName!(InvFieldDecl, invField);
+                    enum fkCol = _sqlIdent(_colName!(InvFieldDecl, invField));
 
                     string sql = "SELECT " ~ buildSelectList!TargetM() ~
                                  " FROM "  ~ ormTableName!TargetM ~
@@ -248,12 +250,17 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                     // column so a self-referential m2m (junction key column name
                     // colliding with a target column) still reads correctly.
                     enum selfKeyAlias = "__peque_self_key";
+                    // Junction table and key columns come from the UDA verbatim,
+                    // so they need the same reserved-word quoting as model columns.
+                    enum jtSql = _sqlIdent(jt);
+                    enum skSql = _sqlIdent(sk);
+                    enum tkSql = _sqlIdent(tk);
                     string sql =
                         "SELECT " ~ _prefixedSelectList!(TargetM, "t")() ~
-                        ", j." ~ sk ~ " AS " ~ selfKeyAlias ~
+                        ", j." ~ skSql ~ " AS " ~ selfKeyAlias ~
                         " FROM " ~ ormTableName!TargetM ~ " t" ~
-                        " JOIN " ~ jt ~ " j ON j." ~ tk ~ " = t." ~ targetPkCol ~
-                        " WHERE j." ~ sk ~ " IN (" ~ placeholders ~ ")";
+                        " JOIN " ~ jtSql ~ " j ON j." ~ tkSql ~ " = t." ~ targetPkCol ~
+                        " WHERE j." ~ skSql ~ " IN (" ~ placeholders ~ ")";
 
                     PGValue[] pgParams;
                     foreach (pk; pks) pgParams ~= convertToPG(pk);
@@ -353,7 +360,10 @@ private string _resolveOneLevel(M, JoinFields...)(
         }
     }}
 
-    assert(result.length > 0,
+    // enforce, not assert: relName arrives from a runtime string (type-free
+    // F!"rel.field"), so a typo is user input, not a logic error. Under -release
+    // an assert would vanish and the empty result would be spliced into the SQL.
+    enforce!QueryError(result.length > 0,
         "No @related or @many2one field '" ~ relName ~ "' on " ~ M.stringof);
     return result;
 }
@@ -414,7 +424,8 @@ private string _resolveTwoLevel(M, JoinFields...)(
         }
     }}
 
-    assert(result.length > 0,
+    // enforce, not assert — see _resolveOneLevel.
+    enforce!QueryError(result.length > 0,
         "Cannot resolve path '" ~ rel1 ~ "." ~ rel2 ~ "." ~ fieldName ~ "' on " ~ M.stringof);
     return result;
 }
@@ -433,7 +444,16 @@ private string _resolvePathToCol(M, JoinFields...)(
     if (d2 < 0) {
         return _resolveOneLevel!(M, JoinFields)(rel1, rest, fjoins, idx);
     }
-    return _resolveTwoLevel!(M, JoinFields)(rel1, rest[0 .. d2], rest[d2 + 1 .. $], fjoins, idx);
+    string rel2 = rest[0 .. d2];
+    string leaf = rest[d2 + 1 .. $];
+    // The resolver handles at most two relation segments. A deeper path used to
+    // fall through with the remainder as the "leaf", so "a.b.c.d" emitted
+    // `fj1.c.d` — which PostgreSQL reads as schema fj1, table c, column d.
+    enforce!QueryError(indexOf(leaf, '.') < 0,
+        "Relation path '" ~ path ~ "' on " ~ M.stringof ~ " is deeper than the two " ~
+        "relation segments supported (rel.field or rel1.rel2.field). Query from " ~
+        "the far side of the relation instead.");
+    return _resolveTwoLevel!(M, JoinFields)(rel1, rel2, leaf, fjoins, idx);
 }
 
 // Resolve all PathNodes in a predicate tree; return a new tree with concrete nodes.
@@ -447,7 +467,16 @@ private Predicate _resolvePred(M, JoinFields...)(
         (ref NullNode n)    => p,
         (ref RawNode n)     => p,
         (ref LiteralNode n)      => p,
-        (ref ExistsNode n)       => p,
+        // Recurse into the EXISTS body: an outer F!"rel.field" used alongside
+        // the inner SF!"field" references is still a PathNode and must be
+        // resolved, or it reaches serialisation unresolved. Outer aliases
+        // (_m, fj*, j*) are in scope inside a correlated subquery, and any
+        // filter joins collected here land in the outer FROM, so resolving
+        // against M is correct.
+        (ref ExistsNode n) {
+            auto inner = _resolvePred!(M, JoinFields)(*n.inner, fjoins, idx);
+            return Predicate(ExistsNode(n.tableName, new Predicate(inner)));
+        },
         (ref InSubqueryNode n)   => p,
         (ref PathNode n) {
             string colExpr = _resolvePathToCol!(M, JoinFields)(n.path, fjoins, idx);
@@ -627,6 +656,31 @@ private string _bestRelForColCTFE(M)(string dtoColName) {
         }
     }}
     return best;
+}
+
+// Longest matching explicit-JoinField prefix for a DTO column name.
+// idx is the JoinFields index (-1 when nothing matches); len is the matched
+// prefix length, used to compare against the implicit-relation match.
+private struct _PrefixHit { ptrdiff_t idx = -1; size_t len = 0; }
+
+private _PrefixHit _bestJfHitCTFE(JoinFields...)(string dtoColName) {
+    import peque.hydration: camelToSnake;
+    _PrefixHit hit;
+    static foreach (i, jf; JoinFields) {{
+        enum jfPrefix = camelToSnake(jf) ~ "_";
+        if (dtoColName.length > jfPrefix.length &&
+            dtoColName[0 .. jfPrefix.length] == jfPrefix &&
+            jfPrefix.length > hit.len) {
+            hit.idx = i;
+            hit.len = jfPrefix.length;
+        }
+    }}
+    return hit;
+}
+
+private ptrdiff_t _indexOfNameCTFE(string[] names, string name) {
+    foreach (i, n; names) if (n == name) return i;
+    return -1;
 }
 
 // Returns a list of @related member names on M that are needed to satisfy DTO fields.
@@ -1163,7 +1217,7 @@ if (isModel!M && isQueryContext!Ctx) {
                 static foreach (idx, jf; JoinFields) {{
                     alias RelType    = _innerRelType!(M, jf);
                     enum _prefix     = "__" ~ jf ~ "_";
-                    enum _pkPrefCol  = _prefix ~ ormPkColName!RelType();
+                    enum _pkPrefCol  = _prefix ~ _identSlug(ormPkColNameRaw!RelType());
                     immutable pkIdx  = row._fieldIndex(_pkPrefCol);
                     if (pkIdx >= 0 && !row[pkIdx].isNull) {
                         auto rel = _hydrateAnnotated!(RelType, _prefix)(row);
@@ -1430,43 +1484,35 @@ if (isModel!M && isQueryContext!Ctx) {
             if (selList.length) selList ~= ", ";
 
             static if (_isMainColCTFE!(M, dtoColName)()) {
-                selList ~= "_m." ~ dtoColName;
+                selList ~= "_m." ~ _sqlIdent(dtoColName);
             } else {
-                bool matched = false;
+                // Bind the column to the relation with the LONGEST matching
+                // prefix across BOTH explicitly loaded joins (JoinFields → j*)
+                // and implicit DTO-driven joins (dj*). Taking the first matching
+                // JoinField instead bound partner_company_name to `partner`,
+                // silently selecting company_name from the wrong table whenever
+                // one relation name is a prefix of another. A tie prefers the
+                // explicit join, which is already in the FROM clause.
+                //
+                // The column is quoted; the AS alias stays bare because
+                // hydration looks the DTO member up by that exact snake_case
+                // name (both positions accept keywords unquoted anyway).
+                enum jfHit   = _bestJfHitCTFE!JoinFields(dtoColName);
+                enum relBest = _bestRelForColCTFE!M(dtoColName);
+                enum relLen  = relBest.length ? camelToSnake(relBest).length + 1 : 0;
+                enum djIdx   = _indexOfNameCTFE(neededRelNames, relBest);
 
-                // Check explicit JoinFields
-                static foreach (jfIdx2, jf; JoinFields) {{
-                    if (!matched) {
-                        enum jfSnake  = camelToSnake(jf);
-                        enum jfPrefix = jfSnake ~ "_";
-                        static if (dtoColName.length > jfPrefix.length &&
-                                   dtoColName[0 .. jfPrefix.length] == jfPrefix) {
-                            selList ~= "j" ~ to!string(jfIdx2) ~ "." ~
-                                       dtoColName[jfPrefix.length .. $] ~ " AS " ~ dtoColName;
-                            matched = true;
-                        }
-                    }
-                }}
-
-                // Check implicit DTO joins (dj0, dj1, …). Bind to the relation
-                // with the LONGEST matching prefix (via the same helper as
-                // _neededRelsCTFE) so partner_company_name resolves against
-                // partnerCompany, not partner.
-                enum bestRel = _bestRelForColCTFE!M(dtoColName);
-                static foreach (ni; 0 .. nRels) {{
-                    if (!matched) {
-                        enum rn       = neededRelNames[ni];
-                        enum rnSnake  = camelToSnake(rn);
-                        enum rnPrefix = rnSnake ~ "_";
-                        static if (bestRel.length && rn == bestRel) {
-                            selList ~= "dj" ~ to!string(ni) ~ "." ~
-                                       dtoColName[rnPrefix.length .. $] ~ " AS " ~ dtoColName;
-                            matched = true;
-                        }
-                    }
-                }}
-
-                if (!matched) selList ~= dtoColName; // fallback
+                static if (jfHit.idx >= 0 && jfHit.len >= relLen) {
+                    selList ~= "j" ~ to!string(jfHit.idx) ~ "." ~
+                               _sqlIdent(dtoColName[jfHit.len .. $]) ~
+                               " AS " ~ dtoColName;
+                } else static if (relLen > 0 && djIdx >= 0) {
+                    selList ~= "dj" ~ to!string(djIdx) ~ "." ~
+                               _sqlIdent(dtoColName[relLen .. $]) ~
+                               " AS " ~ dtoColName;
+                } else {
+                    selList ~= _sqlIdent(dtoColName);   // fallback
+                }
             }
         }}
 

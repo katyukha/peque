@@ -19,6 +19,85 @@ private import peque.converter: PGValue, convertToPG;
 
 
 // ---------------------------------------------------------------------------
+// SQL identifier rendering
+// ---------------------------------------------------------------------------
+
+/** Render `name` as a SQL identifier.
+  *
+  * Every identifier naming a real database object — table, column, junction
+  * table and its keys, constraint name — is double-quoted unconditionally. That
+  * is the whole rule: no keyword list to keep in sync with PostgreSQL releases,
+  * no per-name special cases, and no way for a field called `order`, `end`,
+  * `user` or `check` to produce invalid SQL.
+  *
+  * Because peque quotes in DDL and in every statement it generates, the two
+  * always agree, so no manual quoting is ever needed in @model / @field.
+  *
+  * Consequence worth knowing: quoted identifiers are case-exact, so the string
+  * you write IS the identifier. For a lowercase name — everything camelToSnake
+  * produces — quoting is indistinguishable from emitting it bare, so the usual
+  * snake_case model needs no thought. Only if you deliberately write mixed case
+  * (`@field("MyCol")`) do you get a case-sensitive column, which is then also
+  * how you address one in a legacy schema.
+  *
+  * Generated aliases (_m, j0, __owner_*, index names) are NOT passed through
+  * here: peque synthesises those itself, they can never collide with a keyword,
+  * and quoting them would force the hydration lookup to match case exactly for
+  * no benefit. Use _identSlug for names folded into such identifiers.
+  **/
+package(peque.orm) string _sqlIdent(string name) pure @safe {
+    string quoted = "\"";
+    foreach (char c; name) {
+        if (c == '"') quoted ~= '"';    // double an embedded quote
+        quoted ~= c;
+    }
+    return quoted ~ "\"";
+}
+
+/** Reduce `name` to characters safe inside a *derived* identifier.
+  *
+  * Used where a name is concatenated into a larger identifier that must itself
+  * stay bare — generated index names and joined-column aliases. Quoting is
+  * wrong there (`idx_t_"order"` is not a valid identifier), so quotes and any
+  * other stray characters are dropped. Case is preserved so that generated
+  * aliases keep matching what the hydration layer looks up.
+  **/
+package(peque.orm) string _identSlug(string name) pure @safe {
+    string result;
+    foreach (char c; name) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_')
+            result ~= c;
+    }
+    return result;
+}
+
+unittest {
+    // One rule, applied to every identifier.
+    assert(_sqlIdent("name")       == `"name"`);
+    assert(_sqlIdent("partner_id") == `"partner_id"`);
+    assert(_sqlIdent("order")      == `"order"`);
+    assert(_sqlIdent("end")        == `"end"`);
+    assert(_sqlIdent("check")      == `"check"`);
+    // Case is preserved: what you write is the identifier.
+    assert(_sqlIdent("MyCol")      == `"MyCol"`);
+    // Names that could never work bare now just work.
+    assert(_sqlIdent("weird col")  == `"weird col"`);
+    assert(_sqlIdent("2fast")      == `"2fast"`);
+    // An embedded quote is doubled, so a hostile UDA string cannot break out.
+    assert(_sqlIdent(`a"b`)        == `"a""b"`);
+    assert(_sqlIdent(`x"; DROP TABLE y; --`) == `"x""; DROP TABLE y; --"`);
+    assert(_sqlIdent("")           == `""`);
+
+    // Slugs stay usable inside a bigger identifier.
+    assert(_identSlug("order")     == "order");
+    assert(_identSlug(`"order"`)   == "order");
+    assert(_identSlug("MyCol")     == "MyCol");
+    assert(_identSlug("weird col") == "weirdcol");
+}
+
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -45,21 +124,33 @@ package(peque.orm) template _isColField(alias F) {
 // Public helpers
 // ---------------------------------------------------------------------------
 
-/// Table name for model M (from @model("table") UDA).
-template ormTableName(M) {
-    enum string ormTableName = getUDAs!(M, model)[0].tableName;
+/// Raw table name for model M, exactly as written in the @model("table") UDA.
+/// Use only where the name is folded into a *derived* identifier (index names);
+/// for SQL emission use ormTableName, which quotes reserved words.
+template ormTableNameRaw(M) {
+    enum string ormTableNameRaw = getUDAs!(M, model)[0].tableName;
 }
 
-/// Primary-key column name for model M.
-/// Honors a `@field("col")` override on the primary-key member (mirrors
-/// buildSelectList / _fieldColName); falls back to camelToSnake otherwise.
-string ormPkColName(M)() {
+/// Table name for model M, ready to embed in SQL (quoted only if it has to be).
+template ormTableName(M) {
+    enum string ormTableName = _sqlIdent(ormTableNameRaw!M);
+}
+
+/// Raw primary-key column name for model M (no quoting) — for building derived
+/// identifiers such as joined-column aliases.
+/// Honors a `@field("col")` override on the primary-key member.
+string ormPkColNameRaw(M)() {
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
         static if (hasUDA!(F, primaryKey))
             return _colName!(F, memberName);
     }}
     assert(false, "No @primaryKey field on " ~ M.stringof);
+}
+
+/// Primary-key column name for model M, ready to embed in SQL.
+string ormPkColName(M)() {
+    return _sqlIdent(ormPkColNameRaw!M());
 }
 
 /// SELECT column list: "id, name, partner_id, ..."
@@ -69,7 +160,7 @@ string buildSelectList(M)() {
         alias F = __traits(getMember, M, memberName);
         static if (_isColField!F) {
             if (result.length) result ~= ", ";
-            result ~= _colName!(F, memberName);
+            result ~= _sqlIdent(_colName!(F, memberName));
         }
     }}
     return result;
@@ -82,7 +173,7 @@ string buildInsertColList(M)() {
         alias F = __traits(getMember, M, memberName);
         static if (!hasUDA!(F, primaryKey) && _isColField!F) {
             if (result.length) result ~= ", ";
-            result ~= _colName!(F, memberName);
+            result ~= _sqlIdent(_colName!(F, memberName));
         }
     }}
     return result;
@@ -115,7 +206,7 @@ string buildUpdateSetClause(M)() {
         static if (!hasUDA!(F, primaryKey) && _isColField!F) {
             n++;
             if (result.length) result ~= ", ";
-            result ~= _colName!(F, memberName) ~ " = $" ~ n.to!string;
+            result ~= _sqlIdent(_colName!(F, memberName)) ~ " = $" ~ n.to!string;
         }
     }}
     return result;
@@ -212,7 +303,8 @@ string _buildExcludedSetClause(M, skipFields...)() {
                     if (memberName == sf) skip = true;
             if (!skip) {
                 if (result.length) result ~= ", ";
-                result ~= _colName!(F, memberName) ~ "=EXCLUDED." ~ _colName!(F, memberName);
+                result ~= _sqlIdent(_colName!(F, memberName)) ~
+                          "=EXCLUDED." ~ _sqlIdent(_colName!(F, memberName));
             }
         }
     }}
@@ -252,13 +344,24 @@ PGValue[] buildInsertParamsMany(M)(in M[] records) {
   * the model (accepts camelCase names that convert cleanly).
   **/
 package(peque.orm) string _fieldColNameRuntime(M)(string memberName) {
+    import std.exception: enforce;
+    import std.string: indexOf;
+    import peque.exception: QueryError;
+
     static foreach (mn; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, mn);
         static if (_isColField!F) {
-            if (mn == memberName) return _colName!(F, mn);
+            if (mn == memberName) return _sqlIdent(_colName!(F, mn));
         }
     }}
-    return camelToSnake(memberName);
+    // A leaf name containing '.' means a relation path reached a place expecting
+    // a plain field. camelToSnake would pass it straight through and the caller
+    // would splice it into SQL as a qualified name (fj1.c.d → schema.table.col).
+    enforce!QueryError(indexOf(memberName, '.') < 0,
+        "'" ~ memberName ~ "' is not a column on " ~ M.stringof ~ " and contains a " ~
+        "'.', so it cannot be a column name either — a relation path was passed " ~
+        "where a field name was expected.");
+    return _sqlIdent(camelToSnake(memberName));
 }
 
 /** Return the SQL column name for fieldName on M if it is a DB column field.
@@ -269,7 +372,7 @@ package(peque.orm) string _fieldColName(M, string fieldName)() {
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
         static if (memberName == fieldName && _isColField!F)
-            result = _colName!(F, memberName);
+            result = _sqlIdent(_colName!(F, memberName));
     }}
     return result;
 }
@@ -281,7 +384,7 @@ package(peque.orm) string _prefixedSelectList(M, string prefix)() {
         alias F = __traits(getMember, M, memberName);
         static if (_isColField!F) {
             if (result.length) result ~= ", ";
-            result ~= prefix ~ "." ~ _colName!(F, memberName);
+            result ~= prefix ~ "." ~ _sqlIdent(_colName!(F, memberName));
         }
     }}
     return result;
@@ -296,8 +399,11 @@ package(peque.orm) string _joinSelectExtras(RelM, string tableAlias, string colP
         alias F = __traits(getMember, RelM, memberName);
         static if (_isColField!F) {
             if (result.length) result ~= ", ";
-            result ~= tableAlias ~ "." ~ _colName!(F, memberName) ~
-                      " AS " ~ colPrefix ~ _colName!(F, memberName);
+            // Left side is a column reference (quote it); right side builds a
+            // new alias that must stay bare — hydration looks it up by that
+            // exact name via ResultRow._fieldIndex.
+            result ~= tableAlias ~ "." ~ _sqlIdent(_colName!(F, memberName)) ~
+                      " AS " ~ colPrefix ~ _identSlug(_colName!(F, memberName));
         }
     }}
     return result;
@@ -307,16 +413,15 @@ package(peque.orm) string _joinSelectExtras(RelM, string tableAlias, string colP
   * Returns "" when none is found.
   **/
 package(peque.orm) string _findM2OFKColFor(M, RelType)() {
-    import peque.model: many2one, OnDelete;
+    import peque.model: many2one, OnDelete, many2oneUDAType;
     string result;
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
         static if (hasMany2OneUDA!F) {
             static foreach (uda; __traits(getAttributes, F)) {{
-                static if (is(uda)) {
-                    static if (is(uda == many2one!(U, od), U, OnDelete od) && is(U == RelType)) {
-                        result = _colName!(F, memberName);
-                    }
+                static if (is(many2oneUDAType!uda == many2one!(U, od), U, OnDelete od) &&
+                           is(U == RelType)) {
+                    result = _sqlIdent(_colName!(F, memberName));
                 }
             }}
         }

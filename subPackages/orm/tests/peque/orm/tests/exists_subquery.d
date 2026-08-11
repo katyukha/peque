@@ -74,11 +74,14 @@ unittest {
     );
     auto s = serializePredicate(pred);
     import std.string: indexOf;
-    assert(s.sql.indexOf("EXISTS (SELECT 1 FROM eq_invoices _sq WHERE") >= 0,
+    // Identifiers are emitted quoted; compare against the unquoted shape.
+    string bare;
+    foreach (char ch; s.sql) if (ch != '"') bare ~= ch;
+    assert(bare.indexOf("EXISTS (SELECT 1 FROM eq_invoices _sq WHERE") >= 0,
         "expected EXISTS clause, got: " ~ s.sql);
-    assert(s.sql.indexOf("_sq.order_id = _m.id") >= 0,
+    assert(bare.indexOf("_sq.order_id = _m.id") >= 0,
         "expected column correlation, got: " ~ s.sql);
-    assert(s.sql.indexOf("_sq.status = $1") >= 0,
+    assert(bare.indexOf("_sq.status = $1") >= 0,
         "expected status predicate, got: " ~ s.sql);
     assert(s.params.length == 1);
 }

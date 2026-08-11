@@ -23,19 +23,27 @@ private import std.exception: assertThrown;
 
 private import peque.connection: Connection;
 private import peque.model: model, field, primaryKey, many2one, related,
-    many2many, autoHydrate;
+    many2many, autoHydrate, OnDelete;
 private import peque.orm;
 private import peque.orm.sql: ormPkColName;
 
 
-// #4 (compile-time): a model with zero non-PK column fields must be rejected —
-// both upsert() and update() would emit an empty SET clause. The static asserts
-// in those methods make CRUDMixin (hence Repository) fail to instantiate.
+// #4 (compile-time): on a model with zero non-PK column fields, update() and
+// upsert() would emit an empty SET clause and must stay compile errors. They are
+// templates, so the guards fire at the call site rather than at instantiation —
+// that lets such a model still form a Repository and use the operations that do
+// make sense (insert / findById / deleteById), which ORM-7 covers.
 @model("occ_pk_only")
 struct OccPkOnly { @primaryKey int id; }
 unittest {
-    static assert(!__traits(compiles, Repository!(OccPkOnly, Connection)),
-        "a zero-non-PK-column model must not form a Repository (empty SET guard)");
+    static assert(__traits(compiles, Repository!(OccPkOnly, Connection)),
+        "a PK-only model should still form a Repository for insert/find/delete");
+
+    alias PkRepo = Repository!(OccPkOnly, Connection);
+    static assert(!__traits(compiles, (ref PkRepo r, ref OccPkOnly m) => r.update(m)),
+        "update() on a zero-non-PK-column model must not compile (empty SET)");
+    static assert(!__traits(compiles, (ref PkRepo r, ref OccPkOnly m) => r.upsert(m)),
+        "upsert() on a zero-non-PK-column model must not compile (nothing to update)");
 }
 
 private Connection makeConn() {
@@ -60,10 +68,14 @@ struct OccPk {
 }
 alias OccPkReg = Registry!(Bind!(OccPk, ModelRepo!OccPk));
 
-// CTFE: the PK column name must reflect the @field override.
+// CTFE: the PK column name must reflect the @field override (and, like every
+// emitted identifier, arrive quoted).
 unittest {
-    static assert(ormPkColName!OccPk() == "uid",
-        "ormPkColName must honor @field(\"uid\") on the primary key");
+    import peque.orm.sql: ormPkColNameRaw;
+    static assert(ormPkColNameRaw!OccPk() == "uid",
+        "ormPkColNameRaw must honor @field(\"uid\") on the primary key");
+    static assert(ormPkColName!OccPk() == `"uid"`,
+        "ormPkColName must be SQL-ready (quoted)");
 }
 
 // Integration: insert/find/exists must all agree on the "uid" column.
@@ -305,4 +317,224 @@ unittest {
     // a bogus `company_name` leaf. Longest-prefix binds it to partnerCompany.
     assert(dtos[0].partnerName == "Acme");
     assert(dtos[0].partnerCompanyName == "Globex");
+}
+
+
+// ===========================================================================
+// #6 — @many2one instance form behaves exactly like the type form (CORE-10)
+// ===========================================================================
+//
+// hasMany2OneUDA only matched the type form, so `@many2one!(T)()` silently
+// dropped the field from hydration and DDL. Detection alone is not enough:
+// three separate sites independently extract the target type (schema REFERENCES,
+// _findM2OFKColFor for joins, _m2oRelType for path resolution). All four now go
+// through many2oneUDAType, so both spellings must produce identical results.
+
+@model("occ_m2o_org")
+struct OccM2OOrg {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+// Type form — the reference behaviour.
+@model("occ_m2o_doc")
+struct OccM2ODocType {
+    @primaryKey                              int                id;
+    @field                                   string             title;
+    @many2one!(OccM2OOrg, OnDelete.cascade)  Nullable!int       orgId;
+    @related                                 Nullable!OccM2OOrg org;
+}
+
+// Instance form — same declaration, written with parens.
+@model("occ_m2o_doc")
+struct OccM2ODocInst {
+    @primaryKey                                int                id;
+    @field                                     string             title;
+    @many2one!(OccM2OOrg, OnDelete.cascade)()  Nullable!int       orgId;
+    @related                                   Nullable!OccM2OOrg org;
+}
+
+alias OccM2OReg = Registry!(
+    Bind!(OccM2OOrg,     ModelRepo!OccM2OOrg),
+    Bind!(OccM2ODocInst, ModelRepo!OccM2ODocInst),
+);
+
+unittest {
+    // DDL: the instance form must still emit REFERENCES + ON DELETE. Without
+    // routing schema.d through many2oneUDAType this silently produced a plain
+    // integer column with no foreign key.
+    enum ddlType = modelDDL!OccM2ODocType();
+    enum ddlInst = modelDDL!OccM2ODocInst();
+
+    import std.algorithm.searching: canFind;
+    static assert(ddlType.canFind(`REFERENCES "occ_m2o_org"("id")`));
+    static assert(ddlInst.canFind(`REFERENCES "occ_m2o_org"("id")`),
+        "instance-form @many2one must emit a REFERENCES clause");
+    static assert(ddlInst.canFind("ON DELETE CASCADE"),
+        "instance-form @many2one must carry its OnDelete through to DDL");
+    static assert(ddlType == ddlInst,
+        "both @many2one spellings must generate identical DDL");
+}
+
+unittest {
+    auto c = makeConn();
+    c.exec("DROP TABLE IF EXISTS occ_m2o_doc;");
+    c.exec("DROP TABLE IF EXISTS occ_m2o_org;");
+    c.exec(schemaSQL!OccM2OReg());
+
+    auto orgRepo = Repository!(OccM2OOrg, Connection)(&c);
+    auto orgSeed = OccM2OOrg(0, "Initech");
+    auto org     = orgRepo.insert(orgSeed);
+
+    auto docRepo = Repository!(OccM2ODocInst, Connection)(&c);
+    OccM2ODocInst docSeed;
+    docSeed.title = "D1";
+    docSeed.orgId = org.id.nullable;
+    docRepo.insert(docSeed);
+
+    // The FK round-trips (hydration treats the instance form as a column) …
+    auto plain = docRepo.query().all();
+    assert(plain.length == 1);
+    assert(!plain[0].orgId.isNull && plain[0].orgId.get == org.id);
+
+    // … and joinOne!/load! resolves the FK column through _findM2OFKColFor,
+    // which also had to learn the instance form.
+    auto joined = docRepo.query().load!"org"().all();
+    assert(joined.length == 1);
+    assert(!joined[0].org.isNull);
+    assert(joined[0].org.get.name == "Initech");
+
+    // Relation paths in predicates go through _m2oRelType — the third extractor.
+    auto filtered = docRepo.query().where(F!"org.name"("Initech")).all();
+    assert(filtered.length == 1);
+    assert(filtered[0].title == "D1");
+}
+
+
+// ===========================================================================
+// #7 — PK-only models: INSERT must use the DEFAULT form (ORM-7)
+// ===========================================================================
+//
+// With no non-PK columns the insert column list is empty, which used to emit
+// "INSERT INTO t () VALUES ()" — rejected by PostgreSQL. Marker / identity
+// tables are a legitimate shape, so they are supported rather than rejected.
+
+@model("occ_marker")
+struct OccMarker { @primaryKey int id; }
+
+alias OccMarkerReg = Registry!(Bind!(OccMarker, ModelRepo!OccMarker));
+
+unittest {
+    auto c = makeConn();
+    c.exec("DROP TABLE IF EXISTS occ_marker;");
+    c.exec(schemaSQL!OccMarkerReg());
+
+    auto repo = Repository!(OccMarker, Connection)(&c);
+
+    OccMarker seed;
+    auto one = repo.insert(seed);
+    assert(one.id >= 1, "PK-only insert must return the generated key");
+
+    // Bulk insert emits one (DEFAULT) tuple per record.
+    auto many = repo.insertMany([OccMarker.init, OccMarker.init, OccMarker.init]);
+    assert(many.length == 3);
+    foreach (m; many) assert(m.id >= 1);
+
+    // The rest of the read/delete surface works as usual.
+    assert(repo.findAll().length == 4);
+    assert(repo.existsById(one.id));
+    assert(!repo.findById(one.id).isNull);
+    repo.deleteById(one.id);
+    assert(repo.findAll().length == 3);
+
+    c.exec("DROP TABLE IF EXISTS occ_marker;");
+}
+
+
+// ===========================================================================
+// #8 — select!DTO longest-prefix across EXPLICIT joins too (ORM-2)
+// ===========================================================================
+//
+// #5 fixed the implicit (dj*) branch; the explicit JoinFields (j*) branch kept
+// taking the FIRST matching prefix. With both relations explicitly loaded,
+// partner_company_name matched "partner_" first and selected company_name from
+// the PARTNER row. The target table here deliberately HAS a company_name
+// column, so the bug returns plausible wrong data instead of erroring.
+
+@model("sd_org")
+struct SdOrg {
+    @primaryKey int    id;
+    @field      string name;
+    @field      string companyName;   // column company_name — the decoy
+}
+
+@model("sd_rec")
+struct SdRec {
+    @primaryKey                  int            id;
+    @field                       string         title;
+    @many2one!(SdOrg)            Nullable!int   partnerId;
+    @related("partnerId")        Nullable!SdOrg partner;
+    @many2one!(SdOrg)            Nullable!int   partnerCompanyId;
+    @related("partnerCompanyId") Nullable!SdOrg partnerCompany;
+}
+
+alias SdReg = Registry!(
+    Bind!(SdOrg, ModelRepo!SdOrg),
+    Bind!(SdRec, ModelRepo!SdRec),
+);
+
+@autoHydrate
+struct SdDTO {
+    int    id;
+    string title;
+    string partnerName;         // partner_name         → partner.name
+    string partnerCompanyName;  // partner_company_name → partnerCompany.name
+}
+
+unittest {
+    auto c = makeConn();
+    c.exec("DROP TABLE IF EXISTS sd_rec;");
+    c.exec("DROP TABLE IF EXISTS sd_org;");
+    c.exec(schemaSQL!SdReg());
+
+    auto orgRepo = Repository!(SdOrg, Connection)(&c);
+    auto acmeSeed   = SdOrg(0, "Acme",   "DECOY-from-partner");
+    auto globexSeed = SdOrg(0, "Globex", "DECOY-from-company");
+    auto acme   = orgRepo.insert(acmeSeed);
+    auto globex = orgRepo.insert(globexSeed);
+
+    auto recRepo = Repository!(SdRec, Connection)(&c);
+    SdRec seed;
+    seed.title            = "R1";
+    seed.partnerId        = acme.id.nullable;
+    seed.partnerCompanyId = globex.id.nullable;
+    recRepo.insert(seed);
+
+    // Both relations loaded EXPLICITLY — this is the j* branch.
+    auto dtos = recRepo.query().load!"partner"().load!"partnerCompany"()
+                       .select!SdDTO();
+    assert(dtos.length == 1);
+    assert(dtos[0].partnerName == "Acme");
+    // The bug produced "DECOY-from-partner" here: j0.company_name, i.e. the
+    // partner's company_name rather than partnerCompany's name.
+    assert(dtos[0].partnerCompanyName == "Globex",
+        "partner_company_name must bind to partnerCompany, got: " ~
+        dtos[0].partnerCompanyName);
+
+    // Declaration order must not matter: loading the longer name first still
+    // resolves each column to its own relation.
+    auto dtos2 = recRepo.query().load!"partnerCompany"().load!"partner"()
+                        .select!SdDTO();
+    assert(dtos2.length == 1);
+    assert(dtos2[0].partnerName == "Acme");
+    assert(dtos2[0].partnerCompanyName == "Globex");
+
+    // And with no explicit load at all, the implicit dj* branch still works.
+    auto dtos3 = recRepo.query().select!SdDTO();
+    assert(dtos3.length == 1);
+    assert(dtos3[0].partnerName == "Acme");
+    assert(dtos3[0].partnerCompanyName == "Globex");
+
+    c.exec("DROP TABLE IF EXISTS sd_rec;");
+    c.exec("DROP TABLE IF EXISTS sd_org;");
 }

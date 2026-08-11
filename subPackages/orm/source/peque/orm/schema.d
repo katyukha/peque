@@ -51,14 +51,16 @@
   * struct Partner { ... }
   * ---
   *
-  * Index generation (appended after CREATE TABLE):
+  * Index generation (appended after CREATE TABLE). The field must also be a
+  * column — an index UDA on a non-column field is a compile error rather than a
+  * silently missing index:
   * ---
-  * @index                         string email;  // CREATE INDEX ON table (email)
-  * @index(where: "active = true") string email;  // partial index
-  * @uniqueIndex                   string slug;   // CREATE UNIQUE INDEX ON table (slug)
-  * @ginIndex                      string tags;   // CREATE INDEX … USING gin (tags)
-  * @gistIndex                     string loc;    // CREATE INDEX … USING gist (loc)
-  * @hashIndex                     string code;   // CREATE INDEX … USING hash (code)
+  * @field @index                         string email;  // CREATE INDEX ON table (email)
+  * @field @index(where: "active = true") string email;  // partial index
+  * @field @uniqueIndex                   string slug;   // CREATE UNIQUE INDEX ON table (slug)
+  * @field @pgType("TEXT[]") @ginIndex    string[] tags; // … USING gin (tags)
+  * @field @gistIndex                     string loc;    // … USING gist (loc)
+  * @field @hashIndex                     string code;   // … USING hash (code)
   *
   * @indexTogether!("partner_id", "status")
   * @model("sale_order")
@@ -67,6 +69,14 @@
   * @uniqueIndexTogether!("tenant_id", "email")
   * @model("users")
   * struct User { ... }          // CREATE UNIQUE INDEX ON users (tenant_id, email)
+  * ---
+  *
+  * Two indexes deriving the same name are a compile-time error (every statement
+  * carries IF NOT EXISTS, so the second would silently be a no-op). Disambiguate
+  * with an explicit name::
+  * ---
+  * @field @index(where: "a = 1")
+  *        @index(where: "b = 2", name: "idx_t_col_b") string col;
   * ---
   *
   * Index name convention (all checked against PostgreSQL's 63-byte limit at compile time):
@@ -89,12 +99,13 @@ private import std.uuid: UUID;
 
 private import peque.model:
     model, field, primaryKey, pgType,
-    OnDelete, many2one, hasMany2OneUDA,
+    OnDelete, many2one, hasMany2OneUDA, many2oneUDAType,
     unique, check, pgDefault, pgNotNull,
     uniqueTogether, checkConstraint,
     index, uniqueIndex, ginIndex, gistIndex, hashIndex,
     indexTogether, uniqueIndexTogether;
-private import peque.orm.sql: ormTableName, ormPkColName, _isColField, _colName;
+private import peque.orm.sql: ormTableName, ormTableNameRaw, ormPkColName,
+    _isColField, _colName, _sqlIdent, _identSlug;
 private import peque.orm.registry: Bind;
 
 
@@ -163,7 +174,7 @@ private string _buildColDef(M, string memberName)() {
     alias F = __traits(getMember, M, memberName);
     alias FType = typeof(F);
 
-    string colName = _colName!(F, memberName);
+    string colName = _sqlIdent(_colName!(F, memberName));
 
     // --- Determine type string ---
     string typeName;
@@ -215,7 +226,7 @@ private string _buildColDef(M, string memberName)() {
     // --- REFERENCES + ON DELETE ---
     static if (hasMany2OneUDA!F) {
         static foreach (uda; __traits(getAttributes, F)) {{
-            static if (is(uda) && is(uda == many2one!(T, od), T, OnDelete od)) {
+            static if (is(many2oneUDAType!uda == many2one!(T, od), T, OnDelete od)) {
                 static if (od == OnDelete.setNull)
                     static assert(_isNullable!FType,
                         "@many2one with OnDelete.setNull requires Nullable field type on `"
@@ -240,7 +251,7 @@ private string _buildTableConstraints(M)() {
             string cols;
             static foreach (col; uda.columns) {
                 if (cols.length) cols ~= ", ";
-                cols ~= col;
+                cols ~= _sqlIdent(col);
             }
             if (result.length) result ~= ",\n";
             result ~= "    UNIQUE (" ~ cols ~ ")";
@@ -248,7 +259,7 @@ private string _buildTableConstraints(M)() {
         // @checkConstraint("name", "expr")
         static if (is(typeof(uda) == checkConstraint)) {
             if (result.length) result ~= ",\n";
-            result ~= "    CONSTRAINT " ~ uda.name ~ " CHECK (" ~ uda.expr ~ ")";
+            result ~= "    CONSTRAINT " ~ _sqlIdent(uda.name) ~ " CHECK (" ~ uda.expr ~ ")";
         }
     }}
 
@@ -258,22 +269,25 @@ private string _buildTableConstraints(M)() {
 // Join a string[] with "_" — used to build index names from column lists.
 private string _joinUnderscore(string[] cols) pure {
     string r;
-    foreach (i, c; cols) { if (i) r ~= "_"; r ~= c; }
+    foreach (i, c; cols) { if (i) r ~= "_"; r ~= _identSlug(c); }
     return r;
 }
 
 private enum size_t PG_MAX_IDENT = 63;
 
 // Build one CREATE [UNIQUE] INDEX IF NOT EXISTS statement.
-// Called during CTFE — assert fires as a compile-time error when the name is too long.
+// enforce, not assert: modelDDL!M() is also callable at runtime (conn.exec(...)),
+// where -release would strip an assert. Under CTFE this still fails the build.
 // using_: access method; "btree" or "" → USING clause is omitted (btree is PG default).
 private string _buildOneIndex(
     bool isUnique, string using_,
     string tbl, string cols, string where_, string idxName) pure
 {
-    assert(idxName.length <= PG_MAX_IDENT,
+    import std.exception: enforce;
+    enforce(idxName.length <= PG_MAX_IDENT,
         "Generated index name \"" ~ idxName ~ "\" exceeds PostgreSQL's " ~
-        "63-byte identifier limit. Shorten the table or column name.");
+        "63-byte identifier limit. Shorten the table or column name, or pass " ~
+        "an explicit name: to the index UDA.");
     string s = "CREATE " ~ (isUnique ? "UNIQUE " : "") ~
                "INDEX IF NOT EXISTS " ~ idxName ~ " ON " ~ tbl;
     if (using_.length && using_ != "btree") s ~= " USING " ~ using_;
@@ -285,27 +299,56 @@ private string _buildOneIndex(
 // Emit one CREATE INDEX statement if `uda` matches UDAType (instance or type-value form).
 // Instance form: @UDAType(where: "cond") → typeof(uda) == UDAType, reads uda.where.
 // Type-value form: @UDAType (no parens)  → is(uda == UDAType),      where defaults to "".
+// `table` and `col` arrive raw: the ON clause needs them quoted, while the
+// generated index name must stay a bare identifier (idx_t_"order" is invalid).
+private string _fieldIndexName(alias uda, UDAType,
+                               string prefix, string table, string col)() {
+    enum derived = prefix ~ _identSlug(table) ~ "_" ~ _identSlug(col);
+    static if (is(typeof(uda) == UDAType))
+        return uda.name.length ? uda.name : derived;
+    else static if (is(uda == UDAType))
+        return derived;
+    else
+        return "";
+}
+
 private string _tryBuildFieldIndex(alias uda, UDAType,
                                    bool isUnique, string using_, string prefix,
                                    string table, string col)() {
     static if (is(typeof(uda) == UDAType))
-        return _buildOneIndex(isUnique, using_, table, col, uda.where,
-                              prefix ~ table ~ "_" ~ col);
+        return _buildOneIndex(isUnique, using_, _sqlIdent(table), _sqlIdent(col),
+                              uda.where,
+                              _fieldIndexName!(uda, UDAType, prefix, table, col)());
     else static if (is(uda == UDAType))
-        return _buildOneIndex(isUnique, using_, table, col, "",
-                              prefix ~ table ~ "_" ~ col);
+        return _buildOneIndex(isUnique, using_, _sqlIdent(table), _sqlIdent(col),
+                              "",
+                              _fieldIndexName!(uda, UDAType, prefix, table, col)());
     else
         return "";
+}
+
+// True when `uda` is one of the field-level index UDAs, in either spelling.
+private template _isFieldIndexUDA(alias uda) {
+    private template _m(UDAType) {
+        enum bool _m = is(typeof(uda) == UDAType) || is(uda == UDAType);
+    }
+    enum bool _isFieldIndexUDA =
+        _m!index || _m!uniqueIndex || _m!ginIndex || _m!gistIndex || _m!hashIndex;
 }
 
 // Build all CREATE INDEX statements for model M.
 // Handles field-level: @index, @uniqueIndex, @ginIndex, @gistIndex, @hashIndex
 //          model-level: @indexTogether, @uniqueIndexTogether
-// All support an optional WHERE clause for partial indexes.
-// Index names are deterministic; exceeding 63 bytes is a compile-time error.
+// All support an optional WHERE clause for partial indexes and an explicit
+// name: to disambiguate. Names are collected as they are generated so that
+// collisions become a compile-time error instead of a silently skipped index
+// (every statement carries IF NOT EXISTS, so a duplicate name is a no-op).
 private string _buildIndexSQL(M)() {
-    string result;
-    enum table = ormTableName!M;
+    import std.exception: enforce;
+
+    string   result;
+    string[] names;
+    enum table = ormTableNameRaw!M;
 
     // Field-level: for each UDA on a column field, try each known index type.
     static foreach (memberName; FieldNameTuple!M) {{
@@ -314,10 +357,24 @@ private string _buildIndexSQL(M)() {
             enum col = _colName!(F, memberName);
             static foreach (uda; __traits(getAttributes, F)) {{
                 result ~= _tryBuildFieldIndex!(uda, index,       false, "btree", "idx_",  table, col)();
+                names  ~= _fieldIndexName!(uda, index,       "idx_",  table, col)();
                 result ~= _tryBuildFieldIndex!(uda, uniqueIndex, true,  "btree", "uniq_", table, col)();
+                names  ~= _fieldIndexName!(uda, uniqueIndex, "uniq_", table, col)();
                 result ~= _tryBuildFieldIndex!(uda, ginIndex,    false, "gin",   "gin_",  table, col)();
+                names  ~= _fieldIndexName!(uda, ginIndex,    "gin_",  table, col)();
                 result ~= _tryBuildFieldIndex!(uda, gistIndex,   false, "gist",  "gist_", table, col)();
+                names  ~= _fieldIndexName!(uda, gistIndex,   "gist_", table, col)();
                 result ~= _tryBuildFieldIndex!(uda, hashIndex,   false, "hash",  "hash_", table, col)();
+                names  ~= _fieldIndexName!(uda, hashIndex,   "hash_", table, col)();
+            }}
+        } else {
+            // An index UDA here used to be dropped without a word, so the schema
+            // deployed "successfully" with the index missing.
+            static foreach (uda; __traits(getAttributes, F)) {{
+                static assert(!_isFieldIndexUDA!uda,
+                    "Index UDA on `" ~ M.stringof ~ "." ~ memberName ~ "` has no " ~
+                    "effect: only column fields can be indexed. Add @field (or " ~
+                    "@primaryKey / @many2one) to make it a column.");
             }}
         }
     }}
@@ -326,29 +383,45 @@ private string _buildIndexSQL(M)() {
     // Two branches per template: type-as-value (where="") and instance (where=uda.where).
     static foreach (uda; __traits(getAttributes, M)) {{
         static if (is(uda) && __traits(isSame, TemplateOf!uda, indexTogether)) {
-            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= c; }
-            enum _n = "idx_" ~ table ~ "_" ~ _joinUnderscore(uda.columns);
-            result ~= _buildOneIndex(false, "btree", table, _cols, "", _n);
+            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= _sqlIdent(c); }
+            enum _n = "idx_" ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
+            result ~= _buildOneIndex(false, "btree", _sqlIdent(table), _cols, "", _n);
+            names  ~= _n;
         }
         static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
                    __traits(isSame, TemplateOf!(typeof(uda)), indexTogether)) {
-            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= c; }
-            enum _n = "idx_" ~ table ~ "_" ~ _joinUnderscore(uda.columns);
-            result ~= _buildOneIndex(false, "btree", table, _cols, uda.where, _n);
+            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= _sqlIdent(c); }
+            enum _d = "idx_" ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
+            string _n = uda.name.length ? uda.name : _d;
+            result ~= _buildOneIndex(false, "btree", _sqlIdent(table), _cols, uda.where, _n);
+            names  ~= _n;
         }
 
         static if (is(uda) && __traits(isSame, TemplateOf!uda, uniqueIndexTogether)) {
-            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= c; }
-            enum _n = "uniq_" ~ table ~ "_" ~ _joinUnderscore(uda.columns);
-            result ~= _buildOneIndex(true, "btree", table, _cols, "", _n);
+            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= _sqlIdent(c); }
+            enum _n = "uniq_" ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
+            result ~= _buildOneIndex(true, "btree", _sqlIdent(table), _cols, "", _n);
+            names  ~= _n;
         }
         static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
                    __traits(isSame, TemplateOf!(typeof(uda)), uniqueIndexTogether)) {
-            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= c; }
-            enum _n = "uniq_" ~ table ~ "_" ~ _joinUnderscore(uda.columns);
-            result ~= _buildOneIndex(true, "btree", table, _cols, uda.where, _n);
+            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= _sqlIdent(c); }
+            enum _d = "uniq_" ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
+            string _n = uda.name.length ? uda.name : _d;
+            result ~= _buildOneIndex(true, "btree", _sqlIdent(table), _cols, uda.where, _n);
+            names  ~= _n;
         }
     }}
+
+    foreach (i, a; names) {
+        if (!a.length) continue;
+        foreach (b; names[i + 1 .. $])
+            enforce(a != b,
+                "Two indexes on " ~ M.stringof ~ " both generate the name \"" ~ a ~
+                "\". Every CREATE INDEX carries IF NOT EXISTS, so the second would " ~
+                "be silently skipped. Disambiguate with an explicit name:, e.g. " ~
+                "@index(where: \"...\", name: \"" ~ a ~ "_2\").");
+    }
 
     return result;
 }

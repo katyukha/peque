@@ -68,19 +68,19 @@ private void setup(ref Connection c) {
 
 unittest {
     auto ddl = modelDDL!JbEvent();
-    assert(ddl.indexOf("payload JSONB") >= 0,
-        "expected 'payload JSONB' in DDL, got: " ~ ddl);
+    assert(ddl.indexOf(`"payload" JSONB`) >= 0,
+        "expected quoted 'payload' JSONB in DDL, got: " ~ ddl);
 }
 
 unittest {
     auto ddl = modelDDL!JbLog();
-    assert(ddl.indexOf("before_ JSONB") >= 0,
-        "expected 'before_ JSONB' in DDL, got: " ~ ddl);
-    assert(ddl.indexOf("after_ JSONB") >= 0,
-        "expected 'after_ JSONB' in DDL, got: " ~ ddl);
+    assert(ddl.indexOf(`"before_" JSONB`) >= 0,
+        "expected quoted 'before_' JSONB in DDL, got: " ~ ddl);
+    assert(ddl.indexOf(`"after_" JSONB`) >= 0,
+        "expected quoted 'after_' JSONB in DDL, got: " ~ ddl);
     // explicit @pgType("JSON") override must be respected
-    assert(ddl.indexOf("raw JSON") >= 0,
-        "expected 'raw JSON' in DDL, got: " ~ ddl);
+    assert(ddl.indexOf(`"raw" JSON`) >= 0,
+        "expected quoted 'raw' JSON in DDL, got: " ~ ddl);
 }
 
 

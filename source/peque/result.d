@@ -343,7 +343,7 @@ struct Result {
 
     /** Hydrate all rows into a D array.
      *
-     * T must be a slice type (e.g. Partner[]). The element type is hydrated
+     * T must be a slice of structs (e.g. Partner[]). Each element is hydrated
      * via ResultRow.as!ElemType using the same dispatch chain as the single-row
      * method.
      *
@@ -353,14 +353,21 @@ struct Result {
      *                     .as!(Partner[]);
      * ---
      **/
-   T as(T)() if (is(T == E[], E)) {
-       import std.range: ElementType;
-       T results;
-       results.length = ntuples;
-       foreach (i; 0 .. ntuples)
-           results[i] = getRow(i).as!(ElementType!T);
-       return results;
-   }
+    T as(T)() if (is(T == E[], E)) {
+        // typeof(T.init[0]), not std.range.ElementType: the latter auto-decodes,
+        // so as!string would report dchar and fail deep inside ResultRow.as
+        // instead of at the static assert below.
+        alias Elem = typeof(T.init[0]);
+        static assert(is(Elem == struct),
+            "Result.as!(" ~ T.stringof ~ ") needs a struct element type, got " ~
+            Elem.stringof ~ ". Rows hydrate into structs; to read a single " ~
+            "value use result[row][col].get!T instead.");
+        T results;
+        results.length = ntuples;
+        foreach (i; 0 .. ntuples)
+            results[i] = getRow(i).as!Elem;
+        return results;
+    }
 
    /** Check if result is empty (or consumed by foreach loop)
       *

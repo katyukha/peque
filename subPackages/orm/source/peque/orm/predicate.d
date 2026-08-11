@@ -30,7 +30,7 @@ module peque.orm.predicate;
 private import std.conv: to;
 private import std.sumtype: SumType, match;
 private import peque.converter: PGValue;
-private import peque.exception: PequeException;
+private import peque.exception: PequeException, QueryError;
 private import std.exception: enforce;
 
 
@@ -216,7 +216,10 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
             n.subqueryParams,
         ),
         (ref PathNode n) {
-            assert(false,
+            // enforce, not assert(false): reachable whenever a predicate tree is
+            // serialised without going through QuerySet.where(), and assert would
+            // be compiled out under -release, halting with no diagnostic.
+            enforce!QueryError(false,
                 "PathNode for path '" ~ n.path ~ "' was not resolved before SQL serialization. " ~
                 "Pass F!\"path\" predicates through QuerySet.where() which resolves them.");
             return SerializedPred.init;
@@ -257,21 +260,169 @@ private bool _containsExistsNode(ref Predicate pred) {
 }
 
 
-// Offset all $N tokens in a SQL fragment by `offset`.
+// True when the quote at sql[i] opens an E'...' escape-string literal, where a
+// backslash escapes the following character. In standard (non-E) literals
+// backslashes are ordinary characters and only '' escapes a quote.
+private bool _isEscapeStringStart(string sql, size_t i) pure nothrow @safe @nogc {
+    if (i == 0) return false;
+    immutable char p = sql[i - 1];
+    if (p != 'E' && p != 'e') return false;
+    // The E must stand alone, not end an identifier (e.g. `type'x'`).
+    if (i >= 2) {
+        immutable char q = sql[i - 2];
+        immutable bool identChar =
+            (q >= 'a' && q <= 'z') || (q >= 'A' && q <= 'Z') ||
+            (q >= '0' && q <= '9') || q == '_';
+        if (identChar) return false;
+    }
+    return true;
+}
+
+// If sql[i] opens a dollar-quoted string, return its full tag ("$$", "$tag$");
+// otherwise return "". A digit after '$' means a parameter, never a tag.
+private string _dollarQuoteTag(string sql, size_t i) pure nothrow @safe @nogc {
+    if (i >= sql.length || sql[i] != '$') return "";
+    size_t j = i + 1;
+    if (j < sql.length && sql[j] == '$') return sql[i .. j + 1];
+    while (j < sql.length) {
+        immutable char c = sql[j];
+        immutable bool identChar =
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+            (j > i + 1 && c >= '0' && c <= '9');   // tag may not start with a digit
+        if (!identChar) break;
+        ++j;
+    }
+    if (j > i + 1 && j < sql.length && sql[j] == '$') return sql[i .. j + 1];
+    return "";
+}
+
+/** Offset all $N placeholder tokens in a SQL fragment by `offset`.
+  *
+  * Only real placeholders are rewritten. String literals ('...' and E'...'),
+  * quoted identifiers ("..."), dollar-quoted bodies ($$...$$, $tag$...$tag$)
+  * and comments (-- and nestable / * … * /) are copied through verbatim — a
+  * naive scan would silently corrupt e.g. whereRaw("tag = 'v$1x'") into
+  * 'v$2x' when the fragment is serialised at a non-zero offset.
+  **/
 package(peque) string _shiftParams(string sql, int offset) pure {
+    import std.string: indexOf;
+
     if (offset == 0) return sql;
     string result;
     size_t i = 0;
+
     while (i < sql.length) {
-        if (sql[i] == '$' && i + 1 < sql.length &&
-                sql[i + 1] >= '1' && sql[i + 1] <= '9') {
-            ++i;
-            size_t start = i;
-            while (i < sql.length && sql[i] >= '0' && sql[i] <= '9') ++i;
-            result ~= "$" ~ to!string(to!int(sql[start .. i]) + offset);
-        } else {
-            result ~= sql[i++];
+        immutable char c = sql[i];
+        immutable size_t start = i;
+
+        // -- line comment
+        if (c == '-' && i + 1 < sql.length && sql[i + 1] == '-') {
+            while (i < sql.length && sql[i] != '\n') ++i;
+            result ~= sql[start .. i];
+            continue;
         }
+
+        // /* block comment */ — nests in PostgreSQL
+        if (c == '/' && i + 1 < sql.length && sql[i + 1] == '*') {
+            int depth = 0;
+            while (i < sql.length) {
+                if (i + 1 < sql.length && sql[i] == '/' && sql[i + 1] == '*') {
+                    ++depth; i += 2;
+                } else if (i + 1 < sql.length && sql[i] == '*' && sql[i + 1] == '/') {
+                    --depth; i += 2;
+                    if (depth == 0) break;
+                } else ++i;
+            }
+            result ~= sql[start .. i];
+            continue;
+        }
+
+        // '...' string literal — '' escapes; backslash escapes only in E'...'
+        if (c == '\'') {
+            immutable bool escapes = _isEscapeStringStart(sql, i);
+            ++i;
+            while (i < sql.length) {
+                if (escapes && sql[i] == '\\' && i + 1 < sql.length) { i += 2; continue; }
+                if (sql[i] == '\'') {
+                    if (i + 1 < sql.length && sql[i + 1] == '\'') { i += 2; continue; }
+                    ++i;
+                    break;
+                }
+                ++i;
+            }
+            result ~= sql[start .. i];
+            continue;
+        }
+
+        // "..." quoted identifier — "" escapes
+        if (c == '"') {
+            ++i;
+            while (i < sql.length) {
+                if (sql[i] == '"') {
+                    if (i + 1 < sql.length && sql[i + 1] == '"') { i += 2; continue; }
+                    ++i;
+                    break;
+                }
+                ++i;
+            }
+            result ~= sql[start .. i];
+            continue;
+        }
+
+        if (c == '$') {
+            // $tag$ ... $tag$ dollar-quoted body
+            immutable string tag = _dollarQuoteTag(sql, i);
+            if (tag.length) {
+                i += tag.length;
+                immutable auto end = indexOf(sql[i .. $], tag);
+                i = (end < 0) ? sql.length : i + end + tag.length;
+                result ~= sql[start .. i];
+                continue;
+            }
+            // $N placeholder
+            if (i + 1 < sql.length && sql[i + 1] >= '1' && sql[i + 1] <= '9') {
+                ++i;
+                immutable size_t ds = i;
+                while (i < sql.length && sql[i] >= '0' && sql[i] <= '9') ++i;
+                result ~= "$" ~ to!string(to!int(sql[ds .. i]) + offset);
+                continue;
+            }
+        }
+
+        result ~= c;
+        ++i;
     }
     return result;
+}
+
+unittest {
+    // Plain placeholders shift.
+    assert(_shiftParams("a = $1 AND b = $2", 2) == "a = $3 AND b = $4");
+    assert(_shiftParams("a = $1", 0) == "a = $1");           // offset 0 is a no-op
+    assert(_shiftParams("a = $9 OR b = $10", 1) == "a = $10 OR b = $11");
+
+    // $N inside literals must NOT shift.
+    assert(_shiftParams("tag = 'v$1x' AND b = $1", 1) == "tag = 'v$1x' AND b = $2");
+    assert(_shiftParams("a = '$1'", 5) == "a = '$1'");
+    assert(_shiftParams(`a = "$1col" AND b = $1`, 1) == `a = "$1col" AND b = $2`);
+
+    // Escaped quotes keep the scanner inside/outside the literal correctly.
+    assert(_shiftParams("a = 'it''s $1' AND b = $1", 1) == "a = 'it''s $1' AND b = $2");
+    assert(_shiftParams(`a = "x""y$1" AND b = $1`, 1) == `a = "x""y$1" AND b = $2`);
+    assert(_shiftParams(`a = E'\'$1' AND b = $1`, 1) == `a = E'\'$1' AND b = $2`);
+
+    // Dollar-quoted bodies are opaque.
+    assert(_shiftParams("a = $$b $1 c$$ AND d = $1", 1) == "a = $$b $1 c$$ AND d = $2");
+    assert(_shiftParams("a = $tag$ $1 $tag$ AND d = $1", 3) == "a = $tag$ $1 $tag$ AND d = $4");
+    // An unterminated dollar quote consumes the rest rather than corrupting it.
+    assert(_shiftParams("a = $$ $1", 1) == "a = $$ $1");
+
+    // Comments are copied verbatim, including a nested block comment.
+    assert(_shiftParams("a = $1 -- keep $1\nb = $1", 1) == "a = $2 -- keep $1\nb = $2");
+    assert(_shiftParams("a = $1 /* $1 /* $1 */ $1 */ b = $1", 1) ==
+           "a = $2 /* $1 /* $1 */ $1 */ b = $2");
+
+    // Non-placeholder dollars pass through untouched.
+    assert(_shiftParams("cost $ = $1", 1) == "cost $ = $2");
+    assert(_shiftParams("a = $0", 1) == "a = $0");   // $0 is not a valid placeholder
 }

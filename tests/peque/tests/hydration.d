@@ -18,7 +18,7 @@ private import std.typecons: Nullable, nullable;
 
 private import peque.connection: Connection;
 private import peque.result: ResultRow;
-private import peque.model: model, field, primaryKey, autoHydrate;
+private import peque.model: model, field, primaryKey, autoHydrate, many2one;
 private import peque.hydration: camelToSnake;
 
 
@@ -334,4 +334,90 @@ unittest {
     auto res = c.exec("SELECT id, code FROM peque_hydration_items LIMIT 1");
     // ResultRow.as!Bare must not compile — dispatch chain has no matching case
     static assert(!__traits(compiles, res.getRow(0).as!Bare));
+}
+
+
+// ---------------------------------------------------------------------------
+// Result.as!(T[]) rejects non-struct element types (CORE-13)
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    setupTable(c);
+
+    auto res = c.exec("SELECT id, code FROM peque_hydration_items");
+
+    // A slice of structs is the only supported form.
+    static assert(__traits(compiles, res.as!(Item[])));
+
+    // string is immutable(char)[], so it satisfies `is(T == E[], E)` and used to
+    // reach the body, where std.range.ElementType auto-decoded it to dchar and
+    // the failure surfaced deep inside ResultRow.as. Now the static assert in
+    // Result.as catches it directly.
+    static assert(!__traits(compiles, res.as!string));
+    static assert(!__traits(compiles, res.as!(char[])));
+    static assert(!__traits(compiles, res.as!(int[])));
+}
+
+
+// ---------------------------------------------------------------------------
+// @many2one in instance form is a column field (CORE-10)
+// ---------------------------------------------------------------------------
+
+// The FK target is irrelevant to hydration — what matters is that both UDA
+// spellings mark the field as a DB column. The instance form used to be missed
+// by hasMany2OneUDA, so the field was silently skipped and left at .init.
+@model("peque_hydration_m2o_parent")
+private struct M2OParent {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("peque_hydration_m2o_child")
+private struct M2OChildTypeForm {
+    @primaryKey            int    id;
+    @field                 string code;
+    @many2one!(M2OParent)  int    parentId;    // type form
+}
+
+@model("peque_hydration_m2o_child")
+private struct M2OChildInstanceForm {
+    @primaryKey              int    id;
+    @field                   string code;
+    @many2one!(M2OParent)()  int    parentId;  // instance form — same meaning
+}
+
+unittest {
+    import peque.model: hasMany2OneUDA;
+
+    // Both spellings must be detected identically.
+    static assert(hasMany2OneUDA!(__traits(getMember, M2OChildTypeForm,     "parentId")));
+    static assert(hasMany2OneUDA!(__traits(getMember, M2OChildInstanceForm, "parentId")));
+
+    auto c = makeConn();
+    c.exec("DROP TABLE IF EXISTS peque_hydration_m2o_child");
+    c.exec("DROP TABLE IF EXISTS peque_hydration_m2o_parent");
+    c.exec("CREATE TABLE peque_hydration_m2o_parent (
+                id SERIAL PRIMARY KEY, name TEXT NOT NULL)");
+    c.exec("CREATE TABLE peque_hydration_m2o_child (
+                id        SERIAL PRIMARY KEY,
+                code      TEXT NOT NULL,
+                parent_id INTEGER NOT NULL REFERENCES peque_hydration_m2o_parent(id))");
+    c.exec("INSERT INTO peque_hydration_m2o_parent (name) VALUES ('p1')");
+    c.exec("INSERT INTO peque_hydration_m2o_child (code, parent_id)
+            SELECT 'c1', id FROM peque_hydration_m2o_parent");
+
+    auto sql = "SELECT id, code, parent_id FROM peque_hydration_m2o_child";
+
+    auto typed    = c.exec(sql).as!(M2OChildTypeForm[]);
+    auto instance = c.exec(sql).as!(M2OChildInstanceForm[]);
+
+    assert(typed.length == 1 && instance.length == 1);
+    assert(typed[0].parentId >= 1);
+    // The instance form must hydrate the FK, not leave it at .init.
+    assert(instance[0].parentId == typed[0].parentId);
+    assert(instance[0].code == "c1");
+
+    c.exec("DROP TABLE peque_hydration_m2o_child");
+    c.exec("DROP TABLE peque_hydration_m2o_parent");
 }
