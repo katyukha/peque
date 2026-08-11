@@ -910,15 +910,20 @@ if (isModel!M && isQueryContext!Ctx) {
         return qs;
     }
 
-    /// Set a row limit.
+    /// Set a row limit. Must not be negative — -1 is the "unset" sentinel, so a
+    /// miscomputed page size would otherwise silently return the whole table.
     QuerySet!(M, Ctx, JoinFields) limit(long n) {
+        enforce!QueryError(n >= 0,
+            "limit(" ~ to!string(n) ~ "): a row limit cannot be negative.");
         auto qs = this;
         qs._limitVal = n;
         return qs;
     }
 
-    /// Set a row offset.
+    /// Set a row offset. Must not be negative — see limit().
     QuerySet!(M, Ctx, JoinFields) offset(long n) {
+        enforce!QueryError(n >= 0,
+            "offset(" ~ to!string(n) ~ "): a row offset cannot be negative.");
         auto qs = this;
         qs._offsetVal = n;
         return qs;

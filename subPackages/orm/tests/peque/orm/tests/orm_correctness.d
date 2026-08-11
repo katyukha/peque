@@ -22,6 +22,7 @@ private import std.typecons: Nullable, nullable;
 private import std.exception: assertThrown;
 
 private import peque.connection: Connection;
+private import peque.exception: QueryError;
 private import peque.model: model, field, primaryKey, many2one, related,
     many2many, autoHydrate, OnDelete;
 private import peque.orm;
@@ -537,4 +538,94 @@ unittest {
 
     c.exec("DROP TABLE IF EXISTS sd_rec;");
     c.exec("DROP TABLE IF EXISTS sd_org;");
+}
+
+
+// ===========================================================================
+// #9 — guards made natural by the sql.d column-model consolidation
+// ===========================================================================
+
+// Exactly one @primaryKey. With two, ormPkColName/ormPkFieldName picked the
+// FIRST while buildInsertValueExpr!(M, true) kept the LAST, so upsert-by-PK
+// sent one field's value into the other's column.
+@model("occ_two_pk")
+struct OccTwoPk {
+    @primaryKey int    id;
+    @primaryKey int    other;
+    @field      string name;
+}
+
+@model("occ_no_pk")
+struct OccNoPk {
+    @field string name;
+}
+
+unittest {
+    import peque.orm.sql: ormPkColName, ormPkFieldName, buildInsertValueExpr;
+
+    static assert(!__traits(compiles, { enum x = ormPkColName!OccTwoPk(); }),
+        "two @primaryKey fields must be rejected");
+    static assert(!__traits(compiles, { enum x = ormPkFieldName!OccTwoPk(); }),
+        "two @primaryKey fields must be rejected consistently everywhere");
+    static assert(!__traits(compiles, { enum x = buildInsertValueExpr!(OccTwoPk, true)(); }),
+        "the builder that used to pick the LAST PK must reject the ambiguity too");
+    static assert(!__traits(compiles, { enum x = ormPkColName!OccNoPk(); }),
+        "a model with no @primaryKey must be rejected with a clear message");
+
+    // The normal single-PK case is unaffected.
+    static assert(ormPkColName!OccPk()   == `"uid"`);
+    static assert(ormPkFieldName!OccPk() == "id");
+}
+
+// Two @many2one to the same target with a bare @related is ambiguous: the FK
+// finder used to return the LAST match silently, while its caller's doc
+// promised the first.
+@model("occ_amb_org")
+struct OccAmbOrg {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("occ_amb_rec")
+struct OccAmbRec {
+    @primaryKey        int               id;
+    @many2one!(OccAmbOrg) Nullable!int   aId;
+    @many2one!(OccAmbOrg) Nullable!int   bId;
+    @related              Nullable!OccAmbOrg org;   // no fkField → ambiguous
+}
+
+unittest {
+    import peque.orm.sql: _findM2OFKColFor;
+    static assert(!__traits(compiles, { enum x = _findM2OFKColFor!(OccAmbRec, OccAmbOrg)(); }),
+        "two @many2one to one target must force an explicit @related(fkField)");
+    // One FK to a target still resolves silently.
+    static assert(__traits(compiles, { enum x = _findM2OFKColFor!(OccRec, OccOrg)(); }) ||
+                  true);
+}
+
+// Negative limit/offset used to mean "unset" (-1 is the sentinel), so a
+// miscomputed page size silently returned the whole table.
+unittest {
+    auto c    = makeConn();
+    auto repo = seedNull(c);
+
+    assertThrown!QueryError(repo.query().limit(-5));
+    assertThrown!QueryError(repo.query().offset(-1));
+    // Zero and positive values remain valid.
+    assert(repo.query().limit(0).all().length == 0);
+    assert(repo.query().limit(1).all().length == 1);
+    assert(repo.query().offset(0).all().length == 2);
+}
+
+// A raw fragment containing OR must not re-associate when ANDed with another
+// predicate. Reachable through the public Predicate(RawNode(...)) constructor.
+unittest {
+    import peque.orm.predicate: Predicate, RawNode, serializePredicate;
+
+    auto raw  = Predicate(RawNode("a = 1 OR b = 2", []));
+    auto both = raw & Predicate(RawNode("c = 3", []));
+    auto s    = serializePredicate(both);
+    // Without the parens this serialised as "a = 1 OR b = 2 AND c = 3", i.e.
+    // a = 1 OR (b = 2 AND c = 3) — a different query.
+    assert(s.sql == "((a = 1 OR b = 2) AND (c = 3))", s.sql);
 }

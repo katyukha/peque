@@ -198,7 +198,11 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
             return SerializedPred(n.colExpr ~ " IN (" ~ ph ~ ")", n.values);
         },
         (ref NullNode n)    => SerializedPred(n.colExpr ~ " IS NULL", []),
-        (ref RawNode n)     => SerializedPred(_shiftParams(n.sql, offset), n.params),
+        // Parenthesised: every other leaf serialises to a single comparison and
+        // is safe under AND precedence, but a raw fragment may contain OR, which
+        // would otherwise re-associate when embedded as an And/Or child.
+        (ref RawNode n)     => SerializedPred("(" ~ _shiftParams(n.sql, offset) ~ ")",
+                                              n.params),
         (ref LiteralNode n) => SerializedPred(n.value ? "TRUE" : "FALSE", []),
         (ref ExistsNode n) {
             enforce!PequeException(!_containsExistsNode(*n.inner),
