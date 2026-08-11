@@ -421,3 +421,41 @@ unittest {
     c.exec("DROP TABLE peque_hydration_m2o_child");
     c.exec("DROP TABLE peque_hydration_m2o_parent");
 }
+
+
+// ---------------------------------------------------------------------------
+// fromRow must return T to be selected by the dispatch chain
+// ---------------------------------------------------------------------------
+
+// A fromRow returning something else used to satisfy the "does it compile"
+// gate, after which the call failed with a bare "cannot implicitly convert"
+// instead of falling through to the dispatch-chain static assert.
+private struct WrongFromRow {
+    string label;
+    static int fromRow(ref ResultRow row) { return 42; }
+}
+
+// A correct one, to prove the gate still selects case 2.
+private struct RightFromRow {
+    string label;
+    static RightFromRow fromRow(ref ResultRow row) {
+        return RightFromRow(row["code"].as!string);
+    }
+}
+
+unittest {
+    auto c = makeConn();
+    setupTable(c);
+
+    auto res = c.exec(
+        "SELECT id, code, display_name, score FROM peque_hydration_items ORDER BY code");
+
+    // Correct signature is still picked up.
+    auto ok = res.getRow(0).as!RightFromRow;
+    assert(ok.label == "a1");
+
+    // Wrong return type: no dispatch case applies, so hydration is rejected
+    // outright rather than failing deep inside the call.
+    static assert(!__traits(compiles, res.getRow(0).as!WrongFromRow),
+        "fromRow returning a non-T must not satisfy the dispatch chain");
+}

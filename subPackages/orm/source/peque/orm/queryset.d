@@ -1246,7 +1246,12 @@ if (isModel!M && isQueryContext!Ctx) {
         return results[0].nullable;
     }
 
-    /** Return the number of matching rows (SELECT COUNT(*)). **/
+    /** Return the number of matching rows (SELECT COUNT(*)).
+      *
+      * Honours limit()/offset(): count() reports how many rows all() would
+      * return, so .limit(10).count() is at most 10. Ordering is irrelevant to a
+      * count and is not emitted.
+      **/
     long count() {
         Predicate[] resolved;
         string joinsSQL, orderBySql;
@@ -1256,8 +1261,19 @@ if (isModel!M && isQueryContext!Ctx) {
         PGValue[] params;
         _buildWhereFromArray(resolved, whereSQL, params);
 
-        string sql = "SELECT COUNT(*) FROM " ~ ormTableName!M ~ " _m"
-            ~ joinsSQL ~ whereSQL;
+        string sql;
+        if (_limitVal >= 0 || _offsetVal >= 0) {
+            // COUNT(*) ignores LIMIT/OFFSET applied to itself, so the bounded
+            // row set has to be materialised in a subquery and counted outside.
+            string inner = "SELECT 1 FROM " ~ ormTableName!M ~ " _m"
+                ~ joinsSQL ~ whereSQL;
+            if (_limitVal  >= 0) inner ~= " LIMIT "  ~ to!string(_limitVal);
+            if (_offsetVal >= 0) inner ~= " OFFSET " ~ to!string(_offsetVal);
+            sql = "SELECT COUNT(*) FROM (" ~ inner ~ ") _cnt";
+        } else {
+            sql = "SELECT COUNT(*) FROM " ~ ormTableName!M ~ " _m"
+                ~ joinsSQL ~ whereSQL;
+        }
         return _ctx.execParams(sql, params).getValue!long(0, 0);
     }
 
@@ -1301,7 +1317,11 @@ if (isModel!M && isQueryContext!Ctx) {
                    .getValue!(Nullable!(AggT.ResultType))(0, 0);
     }
 
-    /** Return true if at least one matching row exists. **/
+    /** Return true if at least one matching row exists.
+      *
+      * Honours limit()/offset(), so exists() agrees with all(): .limit(0)
+      * yields false, and .offset(n) is true only when more than n rows match.
+      **/
     bool exists() {
         Predicate[] resolved;
         string joinsSQL, orderBySql;
@@ -1311,8 +1331,12 @@ if (isModel!M && isQueryContext!Ctx) {
         PGValue[] params;
         _buildWhereFromArray(resolved, whereSQL, params);
 
+        // One row is enough to answer, but never more than limit() allows —
+        // .limit(0) must come back false rather than "there is a row".
+        immutable long probe = (_limitVal >= 0 && _limitVal < 1) ? _limitVal : 1;
         string sql = "SELECT 1 FROM " ~ ormTableName!M ~ " _m"
-            ~ joinsSQL ~ whereSQL ~ " LIMIT 1";
+            ~ joinsSQL ~ whereSQL ~ " LIMIT " ~ to!string(probe);
+        if (_offsetVal >= 0) sql ~= " OFFSET " ~ to!string(_offsetVal);
         return _ctx.execParams(sql, params).ntuples > 0;
     }
 
@@ -1366,6 +1390,17 @@ if (isModel!M && isQueryContext!Ctx) {
         return SubQuery!_FieldType(sql, params);
     }
 
+    // PostgreSQL has no LIMIT on DELETE/UPDATE, and silently dropping the bound
+    // would affect every matching row — the opposite of what the caller asked
+    // for, on a destructive statement. Reject instead of guessing.
+    private void _rejectLimitOffset(string what) {
+        enforce!QueryError(_limitVal < 0 && _offsetVal < 0,
+            what ~ " cannot be combined with limit()/offset(): PostgreSQL has no " ~
+            "row bound on DELETE/UPDATE, and ignoring it would affect every " ~
+            "matching row. Select the rows first (e.g. asSubquery!\"id\"() with " ~
+            "the limit) and filter on that instead.");
+    }
+
     /** Delete all matching rows and return the number of rows deleted.
       *
       * When the WHERE clause needs joins (F!"rel.field" predicates or a
@@ -1375,6 +1410,7 @@ if (isModel!M && isQueryContext!Ctx) {
       * matching rows with a NULL FK, which inner-join rewrites would miss).
       **/
     long delete_() {
+        _rejectLimitOffset("delete_()");
         Predicate[] resolved;
         string joinsSQL, orderBySql;
         _resolveQuery(resolved, joinsSQL, orderBySql);
@@ -1414,6 +1450,7 @@ if (isModel!M && isQueryContext!Ctx) {
       **/
     long update() {
         enforce!PequeException(_sets.length > 0, "update() called with no set!() assignments");
+        _rejectLimitOffset("update()");
 
         Predicate[] resolved;
         string joinsSQL, orderBySql;

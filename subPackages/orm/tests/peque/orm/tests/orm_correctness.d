@@ -629,3 +629,85 @@ unittest {
     // a = 1 OR (b = 2 AND c = 3) — a different query.
     assert(s.sql == "((a = 1 OR b = 2) AND (c = 3))", s.sql);
 }
+
+
+// ===========================================================================
+// #10 — limit/offset semantics on terminals, and the bind-parameter ceiling
+// ===========================================================================
+
+// count()/exists() used to ignore limit/offset, so .limit(0).exists() was true
+// while .limit(0).all() was empty. delete_()/update() ignored them too, which
+// meant .limit(10).delete_() deleted every matching row.
+unittest {
+    auto c    = makeConn();
+    auto repo = seedNull(c);        // two rows: "has-note" and "no-note"
+
+    assert(repo.query().count() == 2);
+    assert(repo.query().exists());
+
+    // count() now reports what all() would return.
+    assert(repo.query().limit(1).count() == 1);
+    assert(repo.query().limit(0).count() == 0);
+    assert(repo.query().limit(5).count() == 2);      // limit above the match count
+    assert(repo.query().offset(1).count() == 1);
+    assert(repo.query().offset(2).count() == 0);
+    assert(repo.query().limit(1).offset(1).count() == 1);
+
+    // exists() agrees with all() for the same bounds.
+    assert(!repo.query().limit(0).exists());
+    assert(repo.query().limit(1).exists());
+    assert(repo.query().offset(1).exists());
+    assert(!repo.query().offset(2).exists());
+
+    foreach (lim; [0, 1, 2, 3])
+        foreach (off; [0, 1, 2]) {
+            auto qs = repo.query().limit(lim).offset(off);
+            assert(qs.count() == qs.all().length,
+                "count() must equal all().length for limit/offset combinations");
+            assert(qs.exists() == (qs.all().length > 0),
+                "exists() must agree with all() for limit/offset combinations");
+        }
+
+    // Destructive terminals refuse the bound rather than silently ignoring it.
+    assertThrown!QueryError(repo.query().limit(1).delete_());
+    assertThrown!QueryError(repo.query().offset(1).delete_());
+    assertThrown!QueryError(repo.query().limit(1).set!"name"("x").update());
+    // Both rows are still there — the rejected calls changed nothing.
+    assert(repo.query().count() == 2);
+
+    // Unbounded delete_/update still work.
+    assert(repo.query().where!"name"("no-note").delete_() == 1);
+    assert(repo.query().count() == 1);
+}
+
+// PostgreSQL binds at most 65535 parameters per statement; exceeding it used to
+// surface as an opaque libpq protocol error far from the call site.
+unittest {
+    auto c    = makeConn();
+    auto repo = seedNull(c);
+
+    // Assert on the message, not just the type: libpq rejects an oversized
+    // parameter list too and peque wraps that as QueryError as well, so the
+    // exception type alone would not prove our guard is what fired.
+    import std.exception: collectExceptionMsg;
+    import std.algorithm.searching: canFind;
+
+    // deleteByRec binds one parameter per record.
+    auto tooMany = new OccNull[](65_536);
+    auto delMsg  = collectExceptionMsg!QueryError(repo.deleteByRec(tooMany));
+    assert(delMsg.canFind("over PostgreSQL's limit of 65535"),
+        "expected the bind-parameter guard, got: " ~ delMsg);
+    assert(delMsg.canFind("batches of at most 65535"), delMsg);
+
+    // OccNull has two non-PK columns, so insertMany binds 2 per record.
+    auto tooManyIns = new OccNull[](32_768);
+    auto insMsg     = collectExceptionMsg!QueryError(repo.insertMany(tooManyIns));
+    assert(insMsg.canFind("over PostgreSQL's limit of 65535"),
+        "expected the bind-parameter guard, got: " ~ insMsg);
+    assert(insMsg.canFind("batches of at most 32767"), insMsg);
+
+    // Comfortably-sized batches are unaffected.
+    auto small = new OccNull[](3);
+    foreach (i, ref r; small) r.name = "bulk";
+    assert(repo.insertMany(small).length == 3);
+}

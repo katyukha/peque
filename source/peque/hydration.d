@@ -73,8 +73,12 @@ T hydrateRow(T)(ref ResultRow row) if (is(T == struct)) {
     static if (is(typeof({ ResultRow r; return T(r); }))) {
         // Case 1: T has a constructor accepting ResultRow
         return T(row);
-    } else static if (is(typeof({ ResultRow r; return T.fromRow(r); }))) {
-        // Case 2: T has a static factory fromRow(ref ResultRow)
+    } else static if (is(typeof({ ResultRow r; return T.fromRow(r); }) : T function())) {
+        // Case 2: T has a static factory fromRow(ref ResultRow) returning T.
+        // The return type is part of the test: gating on "does it compile"
+        // alone matched a fromRow returning anything, and the call below then
+        // failed with a bare "cannot implicitly convert" instead of falling
+        // through to the dispatch-chain static assert.
         return T.fromRow(row);
     } else static if (hasUDA!(T, model)) {
         // Case 3: @model struct — only @field/@primaryKey annotated fields

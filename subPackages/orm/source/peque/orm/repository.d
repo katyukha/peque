@@ -85,6 +85,32 @@ if (isModel!M && isQueryContext!Ctx) {
     import peque.orm.sql;
 
     // Compile-time SQL constants — computed once, stored as enum strings.
+    /** PostgreSQL's extended-protocol Bind message carries an int16 parameter
+      * count, so a single statement can bind at most 65535 values.
+      *
+      * The bulk helpers below check against it explicitly: exceeding it
+      * otherwise surfaces as an opaque protocol error from libpq, far from the
+      * call that caused it. Chunking is deliberately left to the caller — doing
+      * it here would silently turn one statement into several and change the
+      * atomicity of the operation for anyone not already inside a transaction.
+      **/
+    private enum size_t PG_MAX_BIND_PARAMS = 65535;
+
+    private static void _checkBindParams(size_t nParams, size_t nRows,
+                                         string what, size_t perRow) {
+        // Local imports: CRUDMixin is mixed into the host struct, so lookup
+        // happens in that module's scope rather than this one.
+        import std.exception: enforce;
+        import peque.exception: QueryError;
+        enforce!QueryError(nParams <= PG_MAX_BIND_PARAMS,
+            what ~ " would bind " ~ to!string(nParams) ~ " parameters for " ~
+            to!string(nRows) ~ " records, over PostgreSQL's limit of " ~
+            to!string(PG_MAX_BIND_PARAMS) ~ " per statement. Split the input " ~
+            "into batches of at most " ~
+            to!string(perRow == 0 ? nRows : PG_MAX_BIND_PARAMS / perRow) ~
+            " records (wrap them in a transaction if they must apply together).");
+    }
+
     private enum _crudTable = ormTableName!M;
     private enum _crudSel   = buildSelectList!M();
     private enum _crudPk    = ormPkColName!M();
@@ -191,6 +217,9 @@ if (isModel!M && isQueryContext!Ctx) {
             foreach (ref r; records) r.applyDefaults();
 
         enum _nf = countNonPkFields!M();
+        static if (_nf > 0)
+            _checkBindParams(_nf * records.length, records.length,
+                             "insertMany", _nf);
         static if (_nf == 0) {
             // PK-only model: no values to bind, one (DEFAULT) tuple per record.
             string rows;
@@ -337,6 +366,7 @@ if (isModel!M && isQueryContext!Ctx) {
         import peque.converter: PGValue, convertToPG;
 
         if (records.length == 0) return 0;
+        _checkBindParams(records.length, records.length, "deleteByRec", 1);
 
         enum _pkField = ormPkFieldName!M();
         PGValue[] pkParams;
