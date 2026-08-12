@@ -18,7 +18,7 @@ scope, without depending on the GC.
 - Savepoint support for partial rollbacks within a transaction
 - Static or dynamic (`bindbc-loader`) loading of `libpq`
 - **`peque:orm`** — compile-time ORM with type-safe WHERE predicates, QuerySet, and schema generation
-- **`peque:migrate`** — compile-time D-struct migration runner with rollback and checksum verification
+- **`peque:migrate`** — compile-time D-struct migration runner with rollback and opt-in checksum pinning
 - **`peque:vibe`** — vibe.d fiber-aware integration (`VibeWaitStrategy` + `VibeConnectionPool`)
 
 ## Supported types
@@ -509,28 +509,33 @@ Migrations are plain D structs compiled into the application binary. Each
 struct has `up()` and optionally `down()`. Version numbers are assigned by
 position in `MigrationList` — never reorder migrations.
 
+`up()`/`down()` take `ref Transaction`: each migration runs inside its own
+transaction together with the row that records it, so the two commit or roll back
+as one. `ref Connection` is still accepted for compatibility, but it lets a
+migration end that transaction early and break the guarantee.
+
 ```d
 import peque;
 import peque.migrate;
 
 struct V1_CreateUsers {
     enum description = "create users table";
-    void up(ref Connection conn) {
-        conn.exec(`CREATE TABLE users (
+    void up(ref Transaction tx) {
+        tx.exec(`CREATE TABLE users (
             id    serial PRIMARY KEY,
             name  text   NOT NULL,
             email text   NOT NULL DEFAULT ''
         )`);
     }
-    void down(ref Connection conn) {
-        conn.exec(`DROP TABLE users`);
+    void down(ref Transaction tx) {
+        tx.exec(`DROP TABLE users`);
     }
 }
 
 struct V2_AddIndex {
     enum description = "index users.email";
-    void up(ref Connection conn) {
-        conn.exec(`CREATE INDEX ON users (email)`);
+    void up(ref Transaction tx) {
+        tx.exec(`CREATE INDEX ON users (email)`);
     }
     // no down() — irreversible; rollback throws MigrationError
 }
@@ -573,9 +578,55 @@ Migrator!(AppMigrations)(&conn, "myapp").migrate();
 
 ### Checksum verification
 
-Each migration's checksum (SHA-256 of its fully-qualified name + description)
-is stored on first apply. Re-running `migrate()` after editing an already-applied
-migration throws `MigrationError` rather than silently re-applying or skipping.
+Checksums are **opt-in**. A migration that declares one:
+
+```d
+struct M3_AddIndex {
+    enum description = "index sale_order.partner_id";
+    enum checksum    = "2024-06-01a";   // bump when the SQL below changes
+    void up(ref Transaction tx) { tx.exec("CREATE INDEX ..."); }
+}
+```
+
+has that value stored on first apply, and any later run — `migrate()` **or**
+`rollback()` — throws `MigrationError` if the declared value no longer matches
+what the database recorded.
+
+The checksum is a value *you* declare, not a hash of the SQL: `up()` is ordinary
+D code and D offers no way to read a function body, so peque cannot compute one
+for you. Bump it whenever you change the migration's effect. A migration that
+declares no checksum is simply not checked, which means renaming its module or
+struct, or editing its description, can never brick a deployed database.
+
+### Migrations the runner refuses to run
+
+`migrate()`, `status()` and `rollback()` all reject a database state the compiled
+list cannot describe:
+
+- a recorded version beyond the end of the list — the database was migrated by a
+  newer build, so this one would mis-attribute versions;
+- a gap, e.g. v2 recorded while v1 is not — since versions are list positions,
+  that means the list was reordered or extended in the middle, and applying the
+  missing one now would run it out of order.
+
+### Statements that cannot run in a transaction
+
+Each migration runs inside its own transaction. For statements PostgreSQL refuses
+there — `CREATE INDEX CONCURRENTLY`, `ALTER TYPE ... ADD VALUE` — opt out:
+
+```d
+struct M4_ConcurrentIndex {
+    enum description   = "concurrent index";
+    enum transactional = false;
+    void up(ref Connection conn) {
+        conn.exec("CREATE INDEX CONCURRENTLY ... ");
+    }
+}
+```
+
+Such a migration is not atomic with its own bookkeeping row, so write it
+idempotently (`IF NOT EXISTS`): a crash between the two leaves the change applied
+but unrecorded, and the next run retries it.
 
 ---
 

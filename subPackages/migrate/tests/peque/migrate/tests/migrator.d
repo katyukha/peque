@@ -16,7 +16,8 @@ module peque.migrate.tests.migrator;
 
 private import std.process: environment;
 private import std.exception: assertThrown;
-private import peque.connection: Connection;
+private import std.conv: to;
+private import peque.connection: Connection, Transaction;
 private import peque.migrate;
 
 
@@ -78,7 +79,7 @@ private void cleanup(ref Connection c, string ns) {
     c.exec(`DROP TABLE IF EXISTS mig_foo`);
     c.exec(`DROP TABLE IF EXISTS mig_baz`);
     ensureVersionTable(c);
-    c.execParams(`DELETE FROM schema_versions WHERE namespace = $1`, ns);
+    c.execParams(`DELETE FROM __peque_migrations WHERE namespace = $1`, ns);
 }
 
 
@@ -236,17 +237,36 @@ unittest {
 unittest {
     auto c = makeConn();
     cleanup(c, "mig_test_cs");
-    auto m = Migrator!(TestMigs)(&c, "mig_test_cs");
+    auto m = Migrator!(CsMigs)(&c, "mig_test_cs");
 
     m.migrate();
 
     // Corrupt the stored checksum for v1 to simulate an edited migration.
     c.execParams(
-        `UPDATE schema_versions SET checksum = 'deadbeef' WHERE namespace = $1 AND version = $2`,
+        `UPDATE __peque_migrations SET checksum = 'deadbeef' WHERE namespace = $1 AND version = $2`,
         "mig_test_cs", 1,
     );
 
     assertThrown!MigrationError(m.migrate());
+    // rollback() used to skip checksum validation entirely, so down() ran
+    // against state the runner had never verified.
+    assertThrown!MigrationError(m.rollback(1));
+}
+
+// A migration that declares no checksum is not validated, so renaming it or
+// editing its description can never brick a deployed database.
+unittest {
+    auto c = makeConn();
+    cleanup(c, "mig_test_nocs");
+    auto m = Migrator!(TestMigs)(&c, "mig_test_nocs");
+
+    m.migrate();
+    c.execParams(
+        `UPDATE __peque_migrations SET checksum = 'whatever' WHERE namespace = $1`,
+        "mig_test_nocs",
+    );
+    m.migrate();                      // must not throw
+    assert(m.status()[0].applied);
 }
 
 
@@ -320,7 +340,7 @@ unittest {
     cleanup(c, "mig_test_fail");
     c.exec(`DROP TABLE IF EXISTS mig_foo`);
     c.exec(`DROP TABLE IF EXISTS mig_baz`);
-    c.execParams(`DELETE FROM schema_versions WHERE namespace = $1`, "mig_test_fail");
+    c.execParams(`DELETE FROM __peque_migrations WHERE namespace = $1`, "mig_test_fail");
 
     alias FailMigs = MigrationList!(M1_CreateFoo, M_Fail);
     auto m = Migrator!(FailMigs)(&c, "mig_test_fail");
@@ -332,5 +352,206 @@ unittest {
     auto st = m.status();
     assert(st.length == 2);
     assert( st[0].applied, "M1 committed before the failing migration must remain applied");
-    assert(!st[1].applied, "failed migration must not be recorded in schema_versions");
+    assert(!st[1].applied, "failed migration must not be recorded in __peque_migrations");
+}
+
+
+// ---------------------------------------------------------------------------
+// Migrations used by the checksum tests — these opt in via `enum checksum`
+// ---------------------------------------------------------------------------
+
+struct CsM1 {
+    enum description = "checksummed create";
+    enum checksum    = "cs-v1";
+    void up(ref Transaction tx)   { tx.exec(`CREATE TABLE IF NOT EXISTS mig_cs (id serial PRIMARY KEY)`); }
+    void down(ref Transaction tx) { tx.exec(`DROP TABLE IF EXISTS mig_cs`); }
+}
+alias CsMigs = MigrationList!(CsM1);
+
+
+// ---------------------------------------------------------------------------
+// up(ref Transaction) is preferred over up(ref Connection)
+// ---------------------------------------------------------------------------
+
+// Passing the raw Connection let a migration COMMIT out of the transaction that
+// was supposed to make up-SQL and the bookkeeping insert atomic. Transaction
+// deliberately exposes no commit/rollback, so taking it closes that hole.
+struct TxM1 {
+    enum description = "transaction-scoped migration";
+    void up(ref Transaction tx) {
+        tx.exec(`CREATE TABLE IF NOT EXISTS mig_tx (id serial PRIMARY KEY)`);
+    }
+    void down(ref Transaction tx) {
+        tx.exec(`DROP TABLE IF EXISTS mig_tx`);
+    }
+}
+alias TxMigs = MigrationList!(TxM1);
+
+// Transaction.commit/rollback are package(peque), so a migration written in an
+// application module cannot end the transaction early. That cannot be asserted
+// from here — this test module is itself inside the peque package — so the
+// property under test is the one that matters in practice: up() really does run
+// inside the transaction that also records the migration.
+struct TxFailM {
+    enum description = "creates a table then fails";
+    void up(ref Transaction tx) {
+        tx.exec(`CREATE TABLE mig_tx_rollback (id serial PRIMARY KEY)`);
+        throw new Exception("boom");
+    }
+}
+alias TxFailMigs = MigrationList!(TxFailM);
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS mig_tx_rollback`);
+    cleanup(c, "mig_tx_fail");
+
+    auto m = Migrator!(TxFailMigs)(&c, "mig_tx_fail");
+    assertThrown!Exception(m.migrate());
+
+    // Both halves rolled back together: no table, and nothing recorded.
+    assert(!c.exec(`SELECT to_regclass('mig_tx_rollback') IS NOT NULL`).getValue!bool(0, 0),
+        "up() must run inside the transaction that records the migration");
+    assert(!m.status()[0].applied);
+}
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS mig_tx`);
+    cleanup(c, "mig_tx_ns");
+
+    auto m = Migrator!(TxMigs)(&c, "mig_tx_ns");
+    m.migrate();
+    assert(m.status()[0].applied);
+    assert(c.exec(`SELECT to_regclass('mig_tx') IS NOT NULL`).getValue!bool(0, 0));
+
+    m.rollback(1);
+    assert(!m.status()[0].applied);
+    assert(!c.exec(`SELECT to_regclass('mig_tx') IS NOT NULL`).getValue!bool(0, 0));
+}
+
+
+// ---------------------------------------------------------------------------
+// enum transactional = false — statements PostgreSQL refuses inside a block
+// ---------------------------------------------------------------------------
+
+struct NonTxM1 {
+    enum description   = "create table for concurrent index";
+    void up(ref Transaction tx) {
+        tx.exec(`CREATE TABLE IF NOT EXISTS mig_conc (id serial PRIMARY KEY, name text)`);
+    }
+    void down(ref Transaction tx) { tx.exec(`DROP TABLE IF EXISTS mig_conc`); }
+}
+
+struct NonTxM2 {
+    enum description   = "concurrent index";
+    enum transactional = false;      // CREATE INDEX CONCURRENTLY cannot run in a transaction
+    void up(ref Connection conn) {
+        conn.exec(`CREATE INDEX CONCURRENTLY IF NOT EXISTS mig_conc_name_idx ON mig_conc (name)`);
+    }
+    void down(ref Connection conn) { conn.exec(`DROP INDEX IF EXISTS mig_conc_name_idx`); }
+}
+alias NonTxMigs = MigrationList!(NonTxM1, NonTxM2);
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP INDEX IF EXISTS mig_conc_name_idx`);
+    c.exec(`DROP TABLE IF EXISTS mig_conc`);
+    cleanup(c, "mig_conc_ns");
+
+    auto m = Migrator!(NonTxMigs)(&c, "mig_conc_ns");
+    // Before the opt-out this failed with "CREATE INDEX CONCURRENTLY cannot run
+    // inside a transaction block".
+    m.migrate();
+
+    foreach (s; m.status()) assert(s.applied);
+    assert(c.exec(`SELECT to_regclass('mig_conc_name_idx') IS NOT NULL`).getValue!bool(0, 0));
+
+    c.exec(`DROP INDEX IF EXISTS mig_conc_name_idx`);
+    c.exec(`DROP TABLE IF EXISTS mig_conc`);
+}
+
+
+// ---------------------------------------------------------------------------
+// Database states the compiled list cannot describe
+// ---------------------------------------------------------------------------
+
+unittest {
+    auto c = makeConn();
+    cleanup(c, "mig_gap");
+
+    // A gap: v2 applied while v1 is not. With position-based versioning this
+    // means the list was reordered or grown in the middle; migrate() used to
+    // silently apply v1 *after* v2.
+    c.execParams(
+        `INSERT INTO __peque_migrations (namespace, version, description, checksum)
+         VALUES ($1, 2, 'out of order', '')`,
+        "mig_gap",
+    );
+    auto m = Migrator!(TestMigs)(&c, "mig_gap");
+    assertThrown!MigrationError(m.migrate());
+    assertThrown!MigrationError(m.status());
+    assertThrown!MigrationError(m.rollback(1));
+
+    // A version beyond the compiled list: the database was migrated by a newer
+    // build. Previously invisible to migrate()/status(), and rollback() counted
+    // it as rolled back without doing anything.
+    cleanup(c, "mig_newer");
+    c.execParams(
+        `INSERT INTO __peque_migrations (namespace, version, description, checksum)
+         VALUES ($1, 1, 'a', ''), ($1, 2, 'b', ''), ($1, 99, 'from the future', '')`,
+        "mig_newer",
+    );
+    auto m2 = Migrator!(TestMigs)(&c, "mig_newer");
+    assertThrown!MigrationError(m2.migrate());
+    assertThrown!MigrationError(m2.status());
+    assertThrown!MigrationError(m2.rollback(1));
+
+    cleanup(c, "mig_gap");
+    cleanup(c, "mig_newer");
+}
+
+
+// ---------------------------------------------------------------------------
+// Two Migrators racing the advisory lock (long-standing test gap)
+// ---------------------------------------------------------------------------
+
+unittest {
+    import core.thread: Thread;
+
+    auto setup = makeConn();
+    setup.exec(`DROP TABLE IF EXISTS mig_foo`);
+    cleanup(setup, "mig_race");
+    // Drop the tracking table too, so both threads race to create it as well —
+    // that creation now happens under the lock rather than before it.
+    setup.exec(`DROP TABLE IF EXISTS __peque_migrations`);
+
+    shared string[] failures;
+    void runOne() {
+        try {
+            auto conn = makeConn();
+            auto m    = Migrator!(TestMigs)(&conn, "mig_race");
+            m.migrate();
+        } catch (Exception e) {
+            synchronized { failures ~= e.msg; }
+        }
+    }
+
+    auto threads = new Thread[4];
+    foreach (ref t; threads) t = new Thread(&runOne);
+    foreach (t; threads) t.start();
+    foreach (t; threads) t.join();
+
+    assert(failures.length == 0,
+        "concurrent migrate() raced: " ~ (failures.length ? failures[0] : ""));
+
+    // Exactly one row per migration — no duplicates from the race.
+    auto check = makeConn();
+    auto n = check.execParams(
+        `SELECT COUNT(*) FROM __peque_migrations WHERE namespace = $1`, "mig_race")
+        .getValue!long(0, 0);
+    assert(n == 2, "expected 2 recorded migrations, got " ~ n.to!string);
+
+    auto m = Migrator!(TestMigs)(&check, "mig_race");
+    foreach (s; m.status()) assert(s.applied);
 }

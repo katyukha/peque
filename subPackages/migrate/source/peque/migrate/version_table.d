@@ -12,7 +12,7 @@ struct AppliedMigration {
 
 void ensureVersionTable(ref Connection conn) {
     conn.exec(`
-        CREATE TABLE IF NOT EXISTS schema_versions (
+        CREATE TABLE IF NOT EXISTS __peque_migrations (
             namespace    TEXT        NOT NULL DEFAULT 'default',
             version      INTEGER     NOT NULL,
             description  TEXT        NOT NULL,
@@ -26,7 +26,7 @@ void ensureVersionTable(ref Connection conn) {
 AppliedMigration[] loadApplied(ref Connection conn, string namespace) {
     auto result = conn.execParams(
         `SELECT version, description, applied_at::text, checksum
-         FROM schema_versions
+         FROM __peque_migrations
          WHERE namespace = $1
          ORDER BY version ASC`,
         namespace,
@@ -52,7 +52,7 @@ void recordMigration(
     string checksum,
 ) {
     conn.execParams(
-        `INSERT INTO schema_versions (namespace, version, description, checksum)
+        `INSERT INTO __peque_migrations (namespace, version, description, checksum)
          VALUES ($1, $2, $3, $4)`,
         namespace, ver, description, checksum,
     );
@@ -60,7 +60,7 @@ void recordMigration(
 
 void removeMigration(ref Connection conn, string namespace, int ver) {
     conn.execParams(
-        `DELETE FROM schema_versions WHERE namespace = $1 AND version = $2`,
+        `DELETE FROM __peque_migrations WHERE namespace = $1 AND version = $2`,
         namespace, ver,
     );
 }
