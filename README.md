@@ -41,21 +41,23 @@ scope, without depending on the GC.
 `dub.json`:
 ```json
 "dependencies": {
-    "peque": "~>0.1.0"
+    "peque": "~>0.2.0"
 }
 ```
 
 `dub.sdl`:
 ```
-dependency "peque" version="~>0.1.0"
+dependency "peque" version="~>0.2.0"
 ```
 
-Sub-packages are opt-in:
+Sub-packages are opt-in. Note that `peque:orm` and `peque:migrate` are not part
+of any tagged release yet — they land in the next one; until then depend on the
+repository directly if you want them:
 
 ```
-dependency "peque:orm"     version="~>0.1.0"   // ORM layer
-dependency "peque:migrate" version="~>0.1.0"   // migration runner
-dependency "peque:vibe"    version="~>0.1.0"   // vibe.d integration
+dependency "peque:orm"     version="~>0.2.0"   // ORM layer
+dependency "peque:migrate" version="~>0.2.0"   // migration runner
+dependency "peque:vibe"    version="~>0.2.0"   // vibe.d integration
 ```
 
 Choose a configuration depending on how you want to link `libpq`:
@@ -249,6 +251,45 @@ Index name convention (all checked against PostgreSQL's 63-byte limit at compile
 | `@indexTogether` | `idx_` | btree |
 | `@uniqueIndexTogether` | `uniq_` | btree |
 
+### Identifier quoting
+
+Every identifier peque emits — table, column, junction table and its keys,
+constraint names — is double-quoted in the generated SQL. That means a field
+called `order`, `end`, `user` or `check` just works, with no keyword list to
+fall out of date as PostgreSQL reserves new words:
+
+```d
+@model("order")                       // reserved word, fine
+struct Order {
+    @primaryKey int    id;
+    @field      string check;         // reserved word, fine
+    @field      int    end;           // reserved word, fine
+}
+// CREATE TABLE IF NOT EXISTS "order" ("id" SERIAL PRIMARY KEY, "check" TEXT …)
+```
+
+The consequence to know: **quoted identifiers are case-exact**, so the string
+you write in `@model`/`@field` *is* the identifier. For the usual snake_case
+model that changes nothing, since `"email_address"` and a bare `email_address`
+address the same column. It matters when mapping a table you did not create:
+
+```sql
+-- Written by someone else, unquoted, so PostgreSQL folded it to lowercase:
+CREATE TABLE SaleOrder (OrderDate date);   -- actually stored as saleorder / orderdate
+```
+
+```d
+@model("saleorder")                        // the folded name, not "SaleOrder"
+struct SaleOrder {
+    @field("orderdate") Date orderDate;
+}
+```
+
+Getting this wrong fails loudly with `column "OrderDate" does not exist` rather
+than silently reading the wrong data. peque's own synthetic identifiers — table
+aliases, joined-column aliases, generated index names — are left unquoted, since
+they cannot collide with a keyword.
+
 ### Column defaults
 
 peque's `insert` always names **every** column and binds the D field's value.
@@ -340,7 +381,10 @@ auto many = repo.insertMany([
 // Upsert by primary key — plain INSERT when PK is 0/init, ON CONFLICT UPDATE otherwise
 auto saved = repo.upsert(p);
 
-// Upsert by natural key — conflict on any UNIQUE column(s)
+// Upsert by natural key — conflict on any UNIQUE column(s).
+// The target column must actually carry a unique constraint, or PostgreSQL
+// rejects the ON CONFLICT clause. For the model above that means:
+//     @field @unique string email;
 auto saved2 = repo.upsert!"email"(p);
 
 // Delete a record by value (extracts PK internally)
@@ -380,6 +424,11 @@ auto first = repo.query().where!"name"("Acme Ltd").first();
 // relation-path predicates like F!"partner.name".isNull (LEFT JOIN semantics).
 long deleted = repo.query().where!"active"(false).delete_();
 
+// Without a where() these affect EVERY row — there is no truncation guard.
+// repo.query().delete_() empties the table; make sure that is what you meant.
+// Neither accepts limit()/offset(): PostgreSQL has no row bound on DELETE or
+// UPDATE, so peque rejects the combination rather than silently ignoring it.
+
 // Partial update — set only named fields
 long updated = repo.query()
     .where!"active"(false)
@@ -390,7 +439,9 @@ long updated = repo.query()
 auto qs = allowedIds.empty ? repo.query().none()
                            : repo.query().whereIn!"id"(allowedIds);
 
-// select!DTO() — project into a different struct
+// select!DTO() — project into a different struct.
+// The DTO needs @autoHydrate (or @model) so its fields can be mapped.
+@autoHydrate
 struct PartnerSummary { int id; string name; }
 PartnerSummary[] summaries = repo.query()
     .where!"active"(true)
@@ -686,7 +737,7 @@ vibe.d applications. Instead of blocking the OS thread while waiting for
 PostgreSQL, control yields to the vibe.d event loop.
 
 ```d
-dependency "peque:vibe" version="~>0.1.0"
+dependency "peque:vibe" version="~>0.2.0"
 ```
 
 ```d

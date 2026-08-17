@@ -37,7 +37,8 @@
   * repo.query().where(UF!"status"("active") | UF!"status"("pending"))
   * ---
   *
-  * For joined-model field conditions, see QuerySet.whereJoin!.
+  * For joined-model field conditions, use a relation path: F!"partner.name",
+  * resolved by the QuerySet against the model at SQL-build time.
   **/
 module peque.orm.field;
 
@@ -480,7 +481,7 @@ private size_t _pathDotCount(string s) pure nothrow @safe @nogc {
   * repo.query().where(F!"partner.name"("Acme"))      // 1-level join, implicit JOIN
   * repo.query().where(F!"partner.company.rate"(5))   // 2-level join, implicit JOINs
   * repo.query().where(F!"invoiceId".ne(F!"orderId")) // column-to-column !=
-  * repo.query().orderBy(F!"partner.name" ~ " ASC")  // join path in ORDER BY
+  * repo.query().orderBy(F!"partner.name".asc)        // join path in ORDER BY
   * ---
   *
   * Note: plain-field resolution uses camelToSnake without model validation.

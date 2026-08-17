@@ -1011,6 +1011,11 @@ if (isModel!M && isQueryContext!Ctx) {
       *
       * Returns the same QuerySet type (JoinFields unchanged).
       *
+      * ORDER: the fetched children arrive in whatever order PostgreSQL returns
+      * them. No ORDER BY is emitted and the target model's @defaultOrder is NOT
+      * applied, so the order is undefined and may change between runs. Sort the
+      * array yourself if it matters.
+      *
       * Example:
       * ---
       * partnerRepo.query().prefetch!("invoices").all();
@@ -1402,6 +1407,10 @@ if (isModel!M && isQueryContext!Ctx) {
     }
 
     /** Delete all matching rows and return the number of rows deleted.
+      *
+      * WITHOUT a where() this deletes EVERY row in the table — there is no
+      * accidental-truncation guard. `repo.query().delete_()` is a valid way to
+      * empty a table; make sure that is what you meant.
       *
       * When the WHERE clause needs joins (F!"rel.field" predicates or a
       * load!/joinOne! alias), matching rows are selected by primary key in a

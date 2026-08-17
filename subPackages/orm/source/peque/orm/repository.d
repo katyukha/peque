@@ -7,6 +7,12 @@
   *
   * The host struct must expose a `private Ctx* _ctx` field before the mixin.
   *
+  * LIFETIME: that is a bare pointer to a context the caller owns — typically a
+  * Connection or Transaction living on the stack. The repository does not keep
+  * the context alive, so it must not outlive what it points at, and the context
+  * must not be moved while a repository refers to it. Build repositories where
+  * you use them rather than storing them in long-lived structures.
+  *
   * Example — extend with custom queries:
   * ---
   * struct PartnerRepo {
@@ -415,7 +421,10 @@ if (isModel!M && isQueryContext!Ctx) {
   * auto repo   = Repository!(Partner, Connection)(&conn);
   * auto all    = repo.findAll();
   * auto byId   = repo.findById(42);
-  * auto newRow = repo.insert(Partner(0, "Acme", "acme@example.com"));
+  *
+  * // insert takes `ref M`, so the record must be an lvalue.
+  * auto seed   = Partner(0, "Acme", "acme@example.com");
+  * auto newRow = repo.insert(seed);
   * repo.update(newRow);
   * repo.deleteById(newRow.id);
   * ---

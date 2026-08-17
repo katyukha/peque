@@ -1,0 +1,62 @@
+/** What `import peque;` alone must provide.
+  *
+  * The core package used to re-export 4 of model.d's 24 UDAs — omitting
+  * many2one, which core hydration itself uses to recognise FK columns — and
+  * peque.orm re-exported none at all, so every documented ORM example failed at
+  * "undefined identifier `many2one`". Nothing caught that because nothing
+  * compiled the examples. This module pins the surface the docs rely on.
+  **/
+module peque.tests.doc_imports;
+
+import std.typecons: Nullable;
+
+import peque;   // and nothing else — that is the point
+
+
+@model("doc_imports_partner")
+struct DocPartner {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+// A model using the relation UDAs must compile against the core package alone:
+// @many2one marks a real column that core hydration reads, and a model that
+// declares @related / @one2many / @many2many must still be expressible here.
+@model("doc_imports_order")
+struct DocOrder {
+    @primaryKey             int                 id;
+    @field                  string              title;
+    @many2one!(DocPartner)  Nullable!int        partnerId;
+    @related                Nullable!DocPartner partner;
+    @one2many!(DocLine, "orderId") DocLine[]    lines;
+}
+
+@model("doc_imports_line")
+struct DocLine {
+    @primaryKey          int id;
+    @many2one!(DocOrder) int orderId;
+}
+
+@autoHydrate
+struct DocSummary { int id; string name; }
+
+unittest {
+    // Hydration-relevant UDAs are reachable from `import peque;`.
+    static assert(__traits(compiles, model("t")));
+    static assert(__traits(compiles, field("c")));
+    static assert(__traits(compiles, primaryKey.init));
+    static assert(__traits(compiles, autoHydrate.init));
+    static assert(__traits(compiles, OnDelete.cascade));
+    static assert(hasMany2OneUDA!(__traits(getMember, DocOrder, "partnerId")),
+        "core must recognise a @many2one field as a column");
+    static assert(!hasMany2OneUDA!(__traits(getMember, DocOrder, "title")));
+
+    // camelToSnake is part of the documented core surface.
+    static assert(camelToSnake("partnerId") == "partner_id");
+
+    // Schema-only UDAs deliberately stay behind `import peque.orm;` — they mean
+    // nothing without the ORM, and exporting names like `check`/`index` from the
+    // top-level package would collide with user symbols.
+    static assert(!__traits(compiles, pgDefault("0")));
+    static assert(!__traits(compiles, uniqueIndex.init));
+}

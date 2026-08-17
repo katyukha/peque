@@ -38,7 +38,10 @@
   *     // … add currentUser, logger, tenantId, etc. as needed …
   *
   *     auto repo(M)() {
-  *         return RegistryRepoFor!(AppReg, M)!Connection(conn);
+  *         // D cannot chain ! instantiations, so resolve the lookup into a
+  *         // plain alias first, then instantiate it.
+  *         alias RepoTpl = RegistryRepoFor!(AppReg, M);
+  *         return RepoTpl!Connection(conn);
   *     }
   *
   *     auto withTransaction(T)(scope T delegate(ref TxEnv) fun) {
@@ -51,7 +54,8 @@
   *     struct TxEnv {
   *         Transaction* tx;
   *         auto repo(M)() {
-  *             return RegistryRepoFor!(AppReg, M)!Transaction(tx);
+  *             alias RepoTpl = RegistryRepoFor!(AppReg, M);
+  *             return RepoTpl!Transaction(tx);
   *         }
   *     }
   * }
@@ -66,6 +70,12 @@
   * ---
   **/
 module peque.orm;
+
+// Every model UDA, so `import peque.orm;` alone is enough to declare a model.
+// Without this the package exported ZERO UDAs and every documented example
+// failed at "undefined identifier `many2one`" — the tests worked around it with
+// their own `import peque.model;`, which no example ever showed.
+public import peque.model;
 
 public import peque.orm.repository: isModel, CRUDMixin, Repository;
 public import peque.orm.sql:
