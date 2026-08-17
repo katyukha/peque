@@ -249,6 +249,55 @@ Index name convention (all checked against PostgreSQL's 63-byte limit at compile
 | `@indexTogether` | `idx_` | btree |
 | `@uniqueIndexTogether` | `uniq_` | btree |
 
+### Column defaults
+
+peque's `insert` always names **every** column and binds the D field's value.
+That has one consequence worth knowing before you reach for `@pgDefault`: a
+database-level `DEFAULT` never fires on the peque path, because peque always
+supplies a value for the column.
+
+So a default belongs in one of three places, depending on what it is:
+
+| Kind of default | Where it goes |
+|---|---|
+| Compile-time constant | a D field initialiser — `bool active = true;` |
+| Computed per insert | `applyDefaults()` on the model |
+| Database-level only | `@pgDefault("…")` |
+
+```d
+@model("res_partner")
+struct Partner {
+    @primaryKey int     id;
+    @field      string  name;
+    @field      bool    active = true;      // sent on every insert
+    @field      SysTime createdAt;
+
+    // Runtime values: called by insert() before the row is written.
+    void applyDefaults() {
+        if (createdAt == SysTime.init) createdAt = Clock.currTime;
+    }
+}
+```
+
+`@pgDefault` is a **schema declaration**, not an insert behaviour. It puts a
+`DEFAULT` in the generated DDL for the benefit of other applications writing to
+the table, a later `ALTER TABLE … ADD COLUMN`, and anyone reading the schema —
+peque itself overrides it every time.
+
+The trap that follows from this:
+
+```d
+@field @pgDefault("now()") SysTime createdAt;   // does NOT give you now()
+```
+
+peque sends `SysTime.init`, so the row gets year 1 rather than the server's
+clock. Use `applyDefaults` for that, and treat `@pgDefault` as documentation of
+what the *database* does when someone else inserts.
+
+(This mirrors how SQLAlchemy splits `default=` from `server_default=`, and
+Django `default=` from `db_default=` — a client-side default and a
+database-side default are different features.)
+
 ### Registry and schema
 
 A `Registry` maps models to repository templates. `schemaSQL` generates

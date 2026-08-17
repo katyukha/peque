@@ -698,3 +698,49 @@ unittest {
     assert(c.exec("SELECT 10::numeric ^ 50 + 1").ensureQueryOk
         [0][0].get!double == 1e50);
 }
+
+
+// ---------------------------------------------------------------------------
+// timestamptz values that PostgreSQL renders in local mean time
+// ---------------------------------------------------------------------------
+
+// The session timezone decides how a timestamptz comes back, so it is pinned
+// here rather than left to the server's default: with a zone that used local
+// mean time (all of them, before the 1880s) PostgreSQL emits a UTC offset with
+// SECONDS, and with a negative one it also pushes year 1 into the BC era.
+// Both forms are rejected by std.datetime's parser, so these rows used to be
+// completely unreadable — SysTime.init written to a column was enough.
+unittest {
+    import std.datetime;
+
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
+    c.exec(`DROP TABLE IF EXISTS peque_tz_lmt`);
+    c.exec(`CREATE TABLE peque_tz_lmt (id serial PRIMARY KEY, ts timestamptz)`);
+
+    auto historical = SysTime(DateTime(1883, 11, 18, 12, 0, 0), UTC());
+
+    foreach (tz; ["UTC",                  // whole-hour offset
+                  "Europe/Kyiv",          // LMT +02:02:04 — seconds in offset
+                  "America/New_York",     // LMT -04:56:02 — seconds + BC era
+                  "Asia/Kolkata"]) {      // +05:30 — whole-minute, not whole-hour
+        c.exec(`SET TimeZone = '` ~ tz ~ `'`);
+        c.exec(`DELETE FROM peque_tz_lmt`);
+        c.execParams(`INSERT INTO peque_tz_lmt (ts) VALUES ($1)`, SysTime.init);
+        c.execParams(`INSERT INTO peque_tz_lmt (ts) VALUES ($1)`, historical);
+
+        auto rows = c.exec(`SELECT ts FROM peque_tz_lmt ORDER BY id`);
+        assert(rows.getValue!SysTime(0, 0) == SysTime.init,
+               "SysTime.init must round-trip under TimeZone=" ~ tz);
+        assert(rows.getValue!SysTime(1, 0) == historical,
+               "a pre-1880s timestamp must round-trip under TimeZone=" ~ tz);
+    }
+
+    c.exec(`SET TimeZone = 'UTC'`);
+    c.exec(`DROP TABLE IF EXISTS peque_tz_lmt`);
+}

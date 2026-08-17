@@ -128,6 +128,77 @@ pure @trusted if (is(T == DateTime)) {
 }
 
 /// ditto
+// Parse "+HH", "+HH:MM" or "+HH:MM:SS" into a signed Duration.
+private Duration _parseUtcOffset(scope const(char)[] off) {
+    immutable sign = (off[0] == '-') ? -1 : 1;
+    immutable h    = to!int(off[1 .. 3]);
+    immutable m    = (off.length >= 6) ? to!int(off[4 .. 6]) : 0;
+    immutable sec  = (off.length >= 9) ? to!int(off[7 .. 9]) : 0;
+    return dur!"seconds"(sign * (h * 3600 + m * 60 + sec));
+}
+
+/** Parse a PostgreSQL `timestamptz` rendering into a SysTime.
+  *
+  * Normally delegates straight to SysTime.fromISOExtString. Two renderings it
+  * cannot handle are dealt with here, both produced by ordinary values:
+  *
+  *  - a UTC offset carrying SECONDS, e.g. "1883-11-18 14:02:04+02:02:04".
+  *    PostgreSQL renders timestamps predating the zone's adoption of standard
+  *    time in local mean time, whose offset is not a whole number of minutes,
+  *    and std.datetime rejects a seconds component outright.
+  *  - a " BC" era suffix, e.g. "0001-12-31 19:03:58-04:56:02 BC". Any zone with
+  *    a negative offset pushes year 1 back across the era boundary.
+  *
+  * Neither is exotic: SysTime.init round-tripped through a timestamptz column
+  * hits the first in Europe/Kyiv and both in America/New_York, and any
+  * historical date before the 1880s hits the first.
+  *
+  * For those cases the offset is parsed here and the wall-clock part is read as
+  * UTC and shifted by it, which is exact. PostgreSQL's BC years are converted
+  * to astronomical numbering (1 BC == year 0), which D represents natively.
+  * The result is in UTC rather than a fixed-offset zone — the same instant —
+  * while the ordinary whole-minute path is left untouched.
+  **/
+private SysTime _parseTimestampTz(scope const(char)[] str) @trusted {
+    import std.datetime.timezone: UTC;
+
+    auto s = str;
+    bool bc = false;
+    if (s.length > 3 && s[$ - 3 .. $] == " BC") {
+        bc = true;
+        s = s[0 .. $ - 3];
+    }
+
+    // The date part carries '-' separators, so only look past it.
+    ptrdiff_t ofs = -1;
+    if (s.length > 10)
+        foreach_reverse (i; 10 .. s.length)
+            if (s[i] == '+' || s[i] == '-') { ofs = i; break; }
+
+    immutable secondsOffset = ofs > 0 && (s.length - ofs) == 9;
+    if (!bc && !secondsOffset)
+        return SysTime.fromISOExtString(s[0 .. 10] ~ "T" ~ s[11 .. $]);
+
+    immutable delta = (ofs > 0) ? _parseUtcOffset(s[ofs .. $]) : Duration.zero;
+    auto localPart  = (ofs > 0) ? s[0 .. ofs] : s;
+
+    // Year field runs to the first '-'; PostgreSQL counts BC years from 1,
+    // astronomical numbering from 0.
+    size_t dash = 0;
+    while (dash < localPart.length && localPart[dash] != '-') ++dash;
+    int year = to!int(localPart[0 .. dash]);
+    if (bc) year = 1 - year;
+
+    auto rest = localPart[dash .. $];        // "-MM-DD HH:MM:SS[.frac]"
+    size_t sp = 0;
+    while (sp < rest.length && rest[sp] != ' ') ++sp;
+
+    // Years outside 0..9999 need an explicit sign in ISO extended format.
+    immutable ys = (year < 0) ? format("-%04d", -year) : format("%04d", year);
+    return SysTime.fromISOExtString(
+        ys ~ rest[0 .. sp] ~ "T" ~ rest[sp + 1 .. $] ~ "Z") - delta;
+}
+
 T convertTextTypeToD(T)(
         scope const char* data,
         in int length,
@@ -145,11 +216,11 @@ T convertTextTypeToD(T)(
                 return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
             else
                 // timezone suffix present: parse as timestamp with timezone
-                return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
+                return _parseTimestampTz(data[0 .. length]);
         case PGType.TIMESTAMP:
             return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
         case PGType.TIMESTAMPTZ:
-            return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
+            return _parseTimestampTz(data[0 .. length]);
         default:
             throw new ConversionError(
                 "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
@@ -375,4 +446,52 @@ unittest {
     assert(!nstrs[0].isNull);
     assert(nstrs[0] == "NULL".nullable);
     assert(nstrs[1] == "b".nullable);
+}
+
+// timestamptz with a seconds-bearing UTC offset. PostgreSQL renders timestamps
+// predating the zone's switch to standard time in local mean time, whose offset
+// is not a whole number of minutes; std.datetime's parser rejects it outright,
+// so such rows used to be unreadable.
+unittest {
+    import std.datetime.timezone: UTC;
+
+    // Europe/Kyiv LMT is +02:02:04. Year 1 — what SysTime.init round-trips to.
+    enum y1 = "0001-01-01 02:02:04+02:02:04";
+    assert(convertTextTypeToD!SysTime(y1.ptr, cast(int)y1.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1, 1, 1, 0, 0, 0), UTC()));
+
+    // Not just year 1: anything before the 1880s renders the same way.
+    enum hist = "1883-11-18 14:02:04+02:02:04";
+    assert(convertTextTypeToD!SysTime(hist.ptr, cast(int)hist.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1883, 11, 18, 12, 0, 0), UTC()));
+
+    // Negative seconds-bearing offset (e.g. America/New_York LMT -04:56:02).
+    enum neg = "1883-11-18 07:03:58-04:56:02";
+    assert(convertTextTypeToD!SysTime(neg.ptr, cast(int)neg.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1883, 11, 18, 12, 0, 0), UTC()));
+
+    // Fractional seconds alongside a seconds-bearing offset.
+    enum frac = "1883-11-18 14:02:04.5+02:02:04";
+    assert(convertTextTypeToD!SysTime(frac.ptr, cast(int)frac.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1883, 11, 18, 12, 0, 0), msecs(500), UTC()));
+
+    // " BC" era suffix: any negative offset pushes year 1 across the era
+    // boundary, so SysTime.init round-trips through BC in the Americas.
+    // PostgreSQL counts BC from 1; D uses astronomical numbering (1 BC == 0).
+    enum bcNy = "0001-12-31 19:03:58-04:56:02 BC";
+    assert(convertTextTypeToD!SysTime(bcNy.ptr, cast(int)bcNy.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1, 1, 1, 0, 0, 0), UTC()));
+
+    // BC combined with a whole-minute offset also needs the manual path.
+    enum bcPlain = "0002-06-15 10:00:00+02:00 BC";
+    assert(convertTextTypeToD!SysTime(bcPlain.ptr, cast(int)bcPlain.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(-1, 6, 15, 8, 0, 0), UTC()));
+
+    // Ordinary whole-hour and whole-minute offsets keep the existing path.
+    enum modern = "2026-08-14 11:01:34.013441+03";
+    assert(convertTextTypeToD!SysTime(modern.ptr, cast(int)modern.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(2026, 8, 14, 8, 1, 34), usecs(13441), UTC()));
+    enum halfHour = "2026-08-14 14:31:34+05:30";
+    assert(convertTextTypeToD!SysTime(halfHour.ptr, cast(int)halfHour.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(2026, 8, 14, 9, 1, 34), UTC()));
 }

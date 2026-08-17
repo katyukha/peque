@@ -11,6 +11,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`peque:orm`** — ORM-layer that provides compile-time model registry,
   schema-generation, QuerySets and basic CRUD implementation.
 - **`peque:migrate`** — Minimal migration runner infrastructure.
+- **Struct hydration** in the core package, usable without `peque:orm`:
+  `ResultRow.as!T` / `Result.as!(T[])` with a documented dispatch chain
+  (user constructor, `fromRow` factory, `@model` strict mapping,
+  `@autoHydrate` convention mapping).
+
+### Fixed
+
+- `timestamptz` values that PostgreSQL renders in **local mean time** could not
+  be read back at all. Timestamps predating a zone's adoption of standard time
+  carry a UTC offset with *seconds* (`+02:02:04`), and with a negative offset
+  year 1 is pushed into the `BC` era — both rejected by `std.datetime`'s parser.
+  Writing `SysTime.init` to a column was enough to trigger it, as was any date
+  before the 1880s. Such values now parse correctly, with PostgreSQL's BC years
+  mapped to astronomical numbering (1 BC = year 0).
+
+### Documentation
+
+- Documented **where a column default belongs**: a D field initialiser for
+  compile-time constants, `applyDefaults()` for computed values, and
+  `@pgDefault` for database-level declarations only. `@pgDefault` never affects
+  what peque inserts — peque always names every column — which was previously
+  undocumented and led to `@pgDefault("now()")` silently storing `SysTime.init`.
 
 ---
 

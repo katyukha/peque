@@ -328,11 +328,35 @@ struct check {
 
 /** Add a DEFAULT clause to a column in the generated DDL.
   *
-  * The expression is passed verbatim to PostgreSQL.
+  * This is a DATABASE-LEVEL declaration and nothing more. The expression is
+  * passed verbatim to PostgreSQL and describes the column; it does not take
+  * part in INSERT.
+  *
+  * peque's insert always names every column and binds the D field's value, so
+  * a DEFAULT here never fires on the peque path. It applies to rows written by
+  * other applications, to a later ALTER TABLE ... ADD COLUMN, and it documents
+  * the column in the schema.
+  *
+  * The trap this makes explicit:
+  * ---
+  * @field @pgDefault("now()") SysTime createdAt;   // does NOT give you now()
+  * ---
+  * peque sends SysTime.init, so the row gets year 1 — not the server's clock.
+  * Set the value in D instead:
+  * ---
+  * @field SysTime createdAt;
+  * void applyDefaults() { createdAt = Clock.currTime; }
+  * ---
+  *
+  * Where a default belongs:
+  *   compile-time constant  → a D field initialiser (`bool active = true;`),
+  *                            which peque sends on every insert
+  *   computed per insert    → applyDefaults()
+  *   database-level only    → @pgDefault
   *
   * Example:
   * ---
-  * @pgDefault("now()")  SysTime createdAt;
+  * @pgDefault("now()")  SysTime createdAt;   // for other writers, not peque
   * @pgDefault("true")   bool    active;
   * ---
   **/
