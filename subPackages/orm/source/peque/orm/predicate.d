@@ -30,7 +30,7 @@ module peque.orm.predicate;
 private import std.conv: to;
 private import std.sumtype: SumType, match;
 private import peque.converter: PGValue;
-private import peque.exception: PequeException, QueryError;
+private import peque.exception: NotSupportedError, PequeException, QueryClientError, QueryError;
 private import std.exception: enforce;
 
 
@@ -205,7 +205,7 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
                                               n.params),
         (ref LiteralNode n) => SerializedPred(n.value ? "TRUE" : "FALSE", []),
         (ref ExistsNode n) {
-            enforce!PequeException(!_containsExistsNode(*n.inner),
+            enforce!NotSupportedError(!_containsExistsNode(*n.inner),
                 "Nested EXISTS subqueries are not supported: both levels would " ~
                 "alias their inner table to _sq, producing incorrect SQL. " ~
                 "Rewrite using a JOIN or a single-level exists!() instead.");
@@ -223,7 +223,7 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
             // enforce, not assert(false): reachable whenever a predicate tree is
             // serialised without going through QuerySet.where(), and assert would
             // be compiled out under -release, halting with no diagnostic.
-            enforce!QueryError(false,
+            enforce!QueryClientError(false,
                 "PathNode for path '" ~ n.path ~ "' was not resolved before SQL serialization. " ~
                 "Pass F!\"path\" predicates through QuerySet.where() which resolves them.");
             return SerializedPred.init;

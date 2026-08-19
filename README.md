@@ -573,7 +573,7 @@ partnerRepo.query()
 ```
 
 Note: single-level `exists!()` only. Nested `exists!()` calls conflict on the
-`_sq` alias and throw `PequeException` at serialisation time.
+`_sq` alias and throw `NotSupportedError` at serialisation time.
 
 ### IN subqueries
 
@@ -818,6 +818,98 @@ Caveats worth knowing:
   strategy without it keeps working for queries and `getNotifications()`.
 
 ---
+
+## Error handling
+
+Every peque exception derives from `PequeException`, and each carries structured
+fields — acting on an error never requires parsing its message. That matters
+because PostgreSQL localises its messages via `lc_messages`, which a
+non-superuser cannot override, so text matching is unsound in principle.
+
+```
+PequeException                  root — never thrown directly
+├── ConnectionError             the link is unusable
+├── NotSupportedError           peque will not do this, in any context
+├── ConversionError             a value could not be converted, either direction
+├── QueryError                  category — scoped to running a query
+│   ├── QueryClientError        your call is wrong
+│   │   └── QueryEscapingError  …an identifier/JSON key that cannot be escaped
+│   └── QueryServerError        PostgreSQL rejected it — carries SQLSTATE
+│       ├── IntegrityError      SQLSTATE class 23
+│       └── SerializationError  SQLSTATE class 40
+└── ResultError                 the result has no such row or column
+    ├── RowNotExistsError
+    └── ColNotExistsError
+```
+
+### Constraint violations
+
+`QueryServerError` carries the backend's diagnostics, captured as the exception
+is built — the underlying result is freed while the stack unwinds, so they
+cannot be read afterwards.
+
+```d
+try {
+    repo.insert(user);
+} catch (IntegrityError e) {
+    final switch (e.kind) {
+        case IntegrityKind.unique:     return conflict(e.constraintName);
+        case IntegrityKind.foreignKey: return badReference(e.constraintName);
+        case IntegrityKind.notNull:    return missingField(e.columnName);
+        case IntegrityKind.check:
+        case IntegrityKind.exclusion:
+        case IntegrityKind.restrict:
+        case IntegrityKind.other:      return unprocessable(e.messagePrimary);
+    }
+}
+```
+
+Which fields the server populates depends on the violation, and the asymmetry is
+PostgreSQL's, not peque's:
+
+| SQLSTATE | violation | `constraintName` | `columnName` |
+|---|---|:--:|:--:|
+| 23502 | not null | — | ✓ |
+| 23503 | foreign key | ✓ | — |
+| 23505 | unique | ✓ | — |
+
+For unique and foreign-key violations the offending columns appear only inside
+the localised `DETAIL` text, which peque deliberately does not parse. Map the
+constraint name to your own fields instead. A field the server did not supply is
+an empty string.
+
+### Retrying
+
+Retry-ability cuts across SQLSTATE classes, so it is a predicate rather than a
+branch of the tree:
+
+```d
+foreach (attempt; 0 .. 3) {
+    try {
+        conn.transaction!(OnSuccess.commit, IsolationLevel.serializable)((ref tx) { … });
+        break;
+    } catch (QueryServerError e) {
+        if (!e.isRetriable() || attempt == 2) throw e;
+    } catch (ConnectionError e) {
+        // The link is gone, so this needs a fresh connection rather than a
+        // replay on the same one — take one from the pool before retrying.
+        if (attempt == 2) throw e;
+    }
+}
+```
+
+`ConnectionError` is a sibling of `QueryError`, not a subclass, so a loop that
+catches only `QueryServerError` will not see a dropped connection.
+
+`isRetriable()` covers serialization failures, deadlocks and lock timeouts,
+which can be retried on the same connection, plus connection-class failures,
+which need a fresh one. Codes with an unknown outcome — `40003`, and `57014`
+for a cancellation you requested — are deliberately excluded.
+
+`sqlstate` is always populated on a `QueryServerError`, and the exception type is
+chosen from the SQLSTATE *class*, never the full code — so an unrecognised
+class-23 code still arrives as an `IntegrityError` with `kind == other` rather
+than falling back to the base type.
 
 ## Running tests
 

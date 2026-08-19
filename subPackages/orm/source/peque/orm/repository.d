@@ -107,8 +107,8 @@ if (isModel!M && isQueryContext!Ctx) {
         // Local imports: CRUDMixin is mixed into the host struct, so lookup
         // happens in that module's scope rather than this one.
         import std.exception: enforce;
-        import peque.exception: QueryError;
-        enforce!QueryError(nParams <= PG_MAX_BIND_PARAMS,
+        import peque.exception: QueryClientError, QueryError;
+        enforce!QueryClientError(nParams <= PG_MAX_BIND_PARAMS,
             what ~ " would bind " ~ to!string(nParams) ~ " parameters for " ~
             to!string(nRows) ~ " records, over PostgreSQL's limit of " ~
             to!string(PG_MAX_BIND_PARAMS) ~ " per statement. Split the input " ~

@@ -365,7 +365,7 @@ PGValue[] buildInsertParamsMany(M)(in M[] records) {
 package(peque.orm) string _fieldColNameRuntime(M)(string memberName) {
     import std.exception: enforce;
     import std.string: indexOf;
-    import peque.exception: QueryError;
+    import peque.exception: QueryClientError, QueryError;
 
     static foreach (mn; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, mn);
@@ -376,7 +376,7 @@ package(peque.orm) string _fieldColNameRuntime(M)(string memberName) {
     // A leaf name containing '.' means a relation path reached a place expecting
     // a plain field. camelToSnake would pass it straight through and the caller
     // would splice it into SQL as a qualified name (fj1.c.d → schema.table.col).
-    enforce!QueryError(indexOf(memberName, '.') < 0,
+    enforce!QueryClientError(indexOf(memberName, '.') < 0,
         "'" ~ memberName ~ "' is not a column on " ~ M.stringof ~ " and contains a " ~
         "'.', so it cannot be a column name either — a relation path was passed " ~
         "where a field name was expected.");

@@ -4,7 +4,7 @@ private import core.sys.posix.poll;
 private import core.stdc.errno;
 private import core.time: Duration, MonoTime;
 
-private import peque.exception;
+private import peque.exception: ConnectionError;
 
 
 /** What socket readiness to wait for. Bit flags: readWrite = read | write.
@@ -92,7 +92,7 @@ struct PollWaitStrategy {
             if (r > 0) return true;
             if (r == 0 && MonoTime.currTime >= deadline) return false;
             if (r < 0 && errno != EINTR)
-                throw new PequeException("poll() failed while waiting with timeout");
+                throw new ConnectionError("poll() failed while waiting with timeout");
             // else: EINTR, or r == 0 before the (clamped) deadline — retry
         }
     }
@@ -104,7 +104,7 @@ struct PollWaitStrategy {
             // r == 0: impossible with timeout=-1 (no timeout)
             // r < 0, errno == EINTR: signal interrupted the wait — retry
             if (r < 0 && errno != EINTR)
-                throw new PequeException("poll() failed");
+                throw new ConnectionError("poll() failed");
         }
     }
 }

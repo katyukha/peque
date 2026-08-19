@@ -72,10 +72,8 @@
 module peque.orm;
 
 // Every model UDA, so `import peque.orm;` alone is enough to declare a model.
-// Without this the package exported ZERO UDAs and every documented example
-// failed at "undefined identifier `many2one`" — the tests worked around it with
-// their own `import peque.model;`, which no example ever showed.
 public import peque.model;
+public import peque.exception;
 
 public import peque.orm.repository: isModel, CRUDMixin, Repository;
 public import peque.orm.sql:

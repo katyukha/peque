@@ -1,11 +1,4 @@
-/** What `import peque;` alone must provide.
-  *
-  * The core package used to re-export 4 of model.d's 24 UDAs — omitting
-  * many2one, which core hydration itself uses to recognise FK columns — and
-  * peque.orm re-exported none at all, so every documented ORM example failed at
-  * "undefined identifier `many2one`". Nothing caught that because nothing
-  * compiled the examples. This module pins the surface the docs rely on.
-  **/
+/** What `import peque;` alone must provide — the surface the docs rely on. **/
 module peque.tests.doc_imports;
 
 import std.typecons: Nullable;
@@ -50,6 +43,13 @@ unittest {
     static assert(hasMany2OneUDA!(__traits(getMember, DocOrder, "partnerId")),
         "core must recognise a @many2one field as a column");
     static assert(!hasMany2OneUDA!(__traits(getMember, DocOrder, "title")));
+
+    // The exception tree is reachable too.
+    static assert(__traits(compiles, { try {} catch (QueryError e) {} }));
+    static assert(__traits(compiles, { try {} catch (IntegrityError e) {} }));
+    static assert(__traits(compiles, { try {} catch (ConnectionError e) {} }));
+    static assert(__traits(compiles, { try {} catch (NotSupportedError e) {} }));
+    static assert(__traits(compiles, { try {} catch (ResultError e) {} }));
 
     // camelToSnake is part of the documented core surface.
     static assert(camelToSnake("partnerId") == "partner_id");

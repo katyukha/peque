@@ -49,7 +49,7 @@ private import std.conv: to;
 private import std.traits: hasUDA, FieldNameTuple, Fields;
 private import std.string: indexOf;
 private import std.exception: enforce;
-private import peque.exception: PequeException, QueryError;
+private import peque.exception: PequeException, QueryClientError, QueryError;
 
 private import peque.model: model, defaultOrder, field, primaryKey, related,
     one2many, many2many, many2one, OnDelete, hasMany2OneUDA, many2oneUDAType,
@@ -363,7 +363,7 @@ private string _resolveOneLevel(M, JoinFields...)(
     // enforce, not assert: relName arrives from a runtime string (type-free
     // F!"rel.field"), so a typo is user input, not a logic error. Under -release
     // an assert would vanish and the empty result would be spliced into the SQL.
-    enforce!QueryError(result.length > 0,
+    enforce!QueryClientError(result.length > 0,
         "No @related or @many2one field '" ~ relName ~ "' on " ~ M.stringof);
     return result;
 }
@@ -425,7 +425,7 @@ private string _resolveTwoLevel(M, JoinFields...)(
     }}
 
     // enforce, not assert — see _resolveOneLevel.
-    enforce!QueryError(result.length > 0,
+    enforce!QueryClientError(result.length > 0,
         "Cannot resolve path '" ~ rel1 ~ "." ~ rel2 ~ "." ~ fieldName ~ "' on " ~ M.stringof);
     return result;
 }
@@ -449,7 +449,7 @@ private string _resolvePathToCol(M, JoinFields...)(
     // The resolver handles at most two relation segments. A deeper path used to
     // fall through with the remainder as the "leaf", so "a.b.c.d" emitted
     // `fj1.c.d` — which PostgreSQL reads as schema fj1, table c, column d.
-    enforce!QueryError(indexOf(leaf, '.') < 0,
+    enforce!QueryClientError(indexOf(leaf, '.') < 0,
         "Relation path '" ~ path ~ "' on " ~ M.stringof ~ " is deeper than the two " ~
         "relation segments supported (rel.field or rel1.rel2.field). Query from " ~
         "the far side of the relation instead.");
@@ -913,7 +913,7 @@ if (isModel!M && isQueryContext!Ctx) {
     /// Set a row limit. Must not be negative — -1 is the "unset" sentinel, so a
     /// miscomputed page size would otherwise silently return the whole table.
     QuerySet!(M, Ctx, JoinFields) limit(long n) {
-        enforce!QueryError(n >= 0,
+        enforce!QueryClientError(n >= 0,
             "limit(" ~ to!string(n) ~ "): a row limit cannot be negative.");
         auto qs = this;
         qs._limitVal = n;
@@ -922,7 +922,7 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /// Set a row offset. Must not be negative — see limit().
     QuerySet!(M, Ctx, JoinFields) offset(long n) {
-        enforce!QueryError(n >= 0,
+        enforce!QueryClientError(n >= 0,
             "offset(" ~ to!string(n) ~ "): a row offset cannot be negative.");
         auto qs = this;
         qs._offsetVal = n;
@@ -1399,7 +1399,7 @@ if (isModel!M && isQueryContext!Ctx) {
     // would affect every matching row — the opposite of what the caller asked
     // for, on a destructive statement. Reject instead of guessing.
     private void _rejectLimitOffset(string what) {
-        enforce!QueryError(_limitVal < 0 && _offsetVal < 0,
+        enforce!QueryClientError(_limitVal < 0 && _offsetVal < 0,
             what ~ " cannot be combined with limit()/offset(): PostgreSQL has no " ~
             "row bound on DELETE/UPDATE, and ignoring it would affect every " ~
             "matching row. Select the rows first (e.g. asSubquery!\"id\"() with " ~
@@ -1458,7 +1458,7 @@ if (isModel!M && isQueryContext!Ctx) {
       * ---
       **/
     long update() {
-        enforce!PequeException(_sets.length > 0, "update() called with no set!() assignments");
+        enforce!QueryClientError(_sets.length > 0, "update() called with no set!() assignments");
         _rejectLimitOffset("update()");
 
         Predicate[] resolved;

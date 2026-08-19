@@ -16,8 +16,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (user constructor, `fromRow` factory, `@model` strict mapping,
   `@autoHydrate` convention mapping).
 
+### Changed
+
+- **Exception tree redesigned** (breaking). Every exception now derives from
+  `PequeException`, including `MigrationError`, which previously derived from
+  `Exception` and so escaped `catch (PequeException)`.
+
+  New types: `QueryClientError` (your call is wrong) and `QueryServerError`
+  (PostgreSQL rejected it) under `QueryError`; `IntegrityError` (SQLSTATE class
+  23, with an `IntegrityKind`) and `SerializationError` (class 40) under that;
+  `NotSupportedError`; and `ResultError` grouping `RowNotExistsError` and
+  `ColNotExistsError`. `QueryEscapingError` moved under `QueryClientError`.
+
+  Reclassified: libpq transport failures (`PQsendQuery`, `PQflush`,
+  `PQconsumeInput`, `poll()`) now raise `ConnectionError` — the link is broken,
+  not the statement. COPY TO/FROM STDOUT, nested `exists!()` and
+  `waitNotifications` without a timed `WaitStrategy` raise `NotSupportedError`.
+
+  Exceptions now carry structured fields rather than only a message:
+  `QueryServerError` has `sqlstate`, the backend diagnostics
+  (`constraintName`, `columnName`, `tableName`, …) and `isRetriable()`;
+  `ConversionError` has the source and target types and the offending value;
+  the result errors carry the index or name, the result size, and the columns
+  that were available.
+- **Conversion failures no longer escape peque's hierarchy** (breaking).
+  `std.conv.ConvException`, `core.time.TimeException`, `std.json.JSONException`
+  and `std.uuid.UUIDParsingException` used to propagate out of value conversion
+  for `int`, `Date`, `DateTime`, `SysTime`, `JSONValue` and `UUID` — so
+  `catch (PequeException)` missed malformed text for most of the type table.
+  All of them are now translated to `ConversionError`, preserving the original
+  message. Notably, `get!byte` on an out-of-range value now raises
+  `ConversionError` instead of `ConvOverflowException`.
+- `ConversionError` now reports `sourceType`, `targetType` and the offending
+  `value` at every throw site, in both directions.
+- The exception types are now re-exported from `peque` and `peque.orm`;
+  `catch (QueryError)` after `import peque;` was previously an undefined
+  identifier.
+
+
 ### Fixed
 
+- **`infinity` / `-infinity` timestamps crashed.** These are ordinary
+  `timestamp`/`timestamptz`/`date` values but only 8-9 bytes long, and the
+  parser sliced them as if they were `YYYY-MM-DD` — an `ArraySliceError` in a
+  debug build (uncatchable, since it is an `Error`) and a **segfault under
+  `-release`**. They now map to the D type's `.max`/`.min`.
+- **`BC` dates silently returned the wrong year** for `Date`, `DateTime` and
+  naive `timestamp` → `SysTime`: the suffix was dropped and the year kept its
+  positive value, so `0044-03-15 BC` read back as year 44 instead of -43.
+  PostgreSQL counts BC years from 1 and D uses astronomical numbering
+  (1 BC = year 0); all timestamp paths now convert consistently.
+- A year outside D's representable range (it stores a year in a `short`, while
+  PostgreSQL reaches 294276) now reports that plainly instead of `Invalid
+  format`. A malformed UTC offset such as `+0230` is rejected rather than
+  silently read as `+02:00`.
 - `timestamptz` values that PostgreSQL renders in **local mean time** could not
   be read back at all. Timestamps predating a zone's adoption of standard time
   carry a UTC offset with *seconds* (`+02:02:04`), and with a negative offset

@@ -2,9 +2,10 @@ module peque.migrate.migrator;
 
 private import std.format: format;
 private import peque.connection: Connection, Transaction;
+private import peque.exception: PequeException;
 private import peque.migrate.version_table;
 
-class MigrationError : Exception {
+class MigrationError : PequeException {
     this(string msg, string file = __FILE__, size_t line = __LINE__) {
         super(msg, file, line);
     }

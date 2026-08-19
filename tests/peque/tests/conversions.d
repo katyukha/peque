@@ -4,6 +4,7 @@ private import std.exception;
 private import std.conv;
 private import std.process: environment;
 private import std.math: isClose;
+private import std.string: indexOf;
 
 private import peque.connection: Connection;
 private import peque.result: Result;
@@ -44,8 +45,9 @@ unittest {
     assert(res.getValue(0, 0).get!string == "7842");
     assert(res.getValue(0, 0).get!int == 7842);
 
-    // 7842 is too big for type byt, thus ensure that error is thrown
-    res.getValue(0, 0).get!byte.assertThrown!ConvOverflowException;
+    // 7842 is too big for byte. std.conv's overflow is translated to
+    // ConversionError like every other conversion failure, message preserved.
+    res.getValue(0, 0).get!byte.assertThrown!ConversionError;
 
     res = c.exec("SELECT 'hello world!'");
     assert(!res.getValue(0, 0).isNull);
@@ -743,4 +745,55 @@ unittest {
 
     c.exec(`SET TimeZone = 'UTC'`);
     c.exec(`DROP TABLE IF EXISTS peque_tz_lmt`);
+}
+
+
+// ---------------------------------------------------------------------------
+// Timestamp edge values PostgreSQL produces routinely
+// ---------------------------------------------------------------------------
+
+// These share one path (_pgTimestampToISO). Before it existed, `infinity` —
+// 8 bytes, shorter than a date — was sliced as if it were "YYYY-MM-DD", which
+// is an Error rather than an Exception and a segfault under -release.
+unittest {
+    import std.datetime;
+    import peque.exception: ConversionError;
+
+    auto c = Connection(
+            dbname: environment.get("POSTGRES_DB", "peque-test"),
+            user: environment.get("POSTGRES_USER", "peque"),
+            password: environment.get("POSTGRES_PASSWORD", "peque"),
+            host: environment.get("POSTGRES_HOST", "localhost"),
+            port: environment.get("POSTGRES_PORT", "5432"),
+    );
+    c.exec("SET TimeZone = 'Europe/Kyiv'");
+
+    // Infinite sentinels map to the D type's extremes.
+    assert(c.exec("SELECT 'infinity'::timestamptz").getValue!SysTime(0, 0)  == SysTime.max);
+    assert(c.exec("SELECT '-infinity'::timestamptz").getValue!SysTime(0, 0) == SysTime.min);
+    assert(c.exec("SELECT 'infinity'::timestamp").getValue!SysTime(0, 0)    == SysTime.max);
+    assert(c.exec("SELECT 'infinity'::timestamp").getValue!DateTime(0, 0)   == DateTime.max);
+    assert(c.exec("SELECT 'infinity'::date").getValue!Date(0, 0)            == Date.max);
+    assert(c.exec("SELECT '-infinity'::date").getValue!Date(0, 0)           == Date.min);
+
+    // " BC" years: PostgreSQL counts from 1, D from 0 (astronomical numbering),
+    // so 44 BC is year -43. Date and DateTime used to drop the suffix and
+    // silently return the positive year.
+    assert(c.exec("SELECT '0001-01-01 BC'::date").getValue!Date(0, 0)
+           == Date(0, 1, 1));
+    assert(c.exec("SELECT '0044-03-15 12:00:00 BC'::timestamp").getValue!DateTime(0, 0)
+           == DateTime(-43, 3, 15, 12, 0, 0));
+    assert(c.exec("SELECT '0044-03-15 12:00:00 BC'::timestamp").getValue!SysTime(0, 0)
+           == SysTime(DateTime(-43, 3, 15, 12, 0, 0), UTC()));
+
+    // D stores a year in a short, so PostgreSQL's upper range is unreachable.
+    // The error must say that rather than "Invalid format".
+    auto tooBig = collectException!ConversionError(
+        c.exec("SELECT '294276-01-01'::timestamptz").getValue!SysTime(0, 0));
+    assert(tooBig !is null);
+    assert(tooBig.msg.indexOf("outside the range D can represent") >= 0, tooBig.msg);
+
+    // Ordinary values are unaffected.
+    assert(c.exec("SELECT now()").getValue!SysTime(0, 0).year >= 2020);
+    c.exec("SET TimeZone = 'UTC'");
 }

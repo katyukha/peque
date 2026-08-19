@@ -343,7 +343,7 @@ struct Connection {
       *     `bool wait(int fd, WaitMask mask, Duration timeout)` overload.
       **/
     Notification[] waitNotifications(Duration timeout) {
-        enforce!PequeException(
+        enforce!NotSupportedError(
             _asyncHooks.waitTimed !is null,
             "waitNotifications requires a WaitStrategy providing "
             ~ "`bool wait(int fd, WaitMask mask, Duration timeout)`; the strategy "
@@ -429,9 +429,9 @@ struct Connection {
             while (true) {
                 int r = PQflush(conn._pg_conn);
                 if (r == 0) return;
-                enforce!QueryError(r > 0, "PQflush failed: " ~ errorMessage);
+                enforce!ConnectionError(r > 0, "PQflush failed: " ~ errorMessage);
                 _asyncHooks.wait(fd, WaitMask.readWrite);
-                enforce!QueryError(
+                enforce!ConnectionError(
                     PQconsumeInput(conn._pg_conn) == 1,
                     "PQconsumeInput failed during flush: " ~ errorMessage);
             }
@@ -450,7 +450,7 @@ struct Connection {
     private void _waitWhileBusy(PGconn* pg) @trusted {
         while (PQisBusy(pg) == 1) {
             _asyncHooks.wait(PQsocket(pg), WaitMask.read);
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQconsumeInput(pg) == 1,
                 "PQconsumeInput failed: " ~ errorMessage);
         }
@@ -488,7 +488,7 @@ struct Connection {
                 _abortCopy(pg, st2);
         }
 
-        throw new QueryError(
+        throw new NotSupportedError(
             "COPY TO/FROM STDOUT/STDIN is not supported by peque. "
             ~ "Use COPY with a server-side file, or psql's \\copy.");
     }
@@ -539,7 +539,7 @@ struct Connection {
         _connection.borrow!((auto ref conn) @trusted {
             while (true) {
                 _asyncHooks.wait(fd, WaitMask.read);
-                enforce!QueryError(
+                enforce!ConnectionError(
                     PQconsumeInput(conn._pg_conn) == 1,
                     "PQconsumeInput failed: " ~ errorMessage);
                 if (PQisBusy(conn._pg_conn) == 0) return;
@@ -557,7 +557,7 @@ struct Connection {
     private Result _collectResult() @trusted {
         return _connection.borrow!((auto ref conn) @trusted {
             auto cur = PQgetResult(conn._pg_conn);
-            enforce!QueryError(cur !is null,
+            enforce!ConnectionError(cur !is null,
                 "PQgetResult returned null — query send failed");
             // Free the in-flight result if the walk throws mid-way
             // (_rejectCopy nulls cur before throwing, so no double-free).
@@ -628,7 +628,7 @@ struct Connection {
       **/
     auto exec(in string query) {
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendQuery(conn._pg_conn, query.toStringz) == 1,
                 "PQsendQuery failed: " ~ errorMessage);
         });
@@ -652,7 +652,7 @@ struct Connection {
       **/
     auto execMulti(in string query) {
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendQuery(conn._pg_conn, query.toStringz) == 1,
                 "PQsendQuery failed: " ~ errorMessage);
         });
@@ -675,7 +675,7 @@ struct Connection {
       **/
     auto execParams(in string query) {
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendQueryParams(
                     conn._pg_conn,
                     query.toStringz,
@@ -718,6 +718,16 @@ struct Connection {
     Result execParams(string query, in PGValue[] params) {
         if (params.length == 0) return execParams(query);
 
+        // The Bind message carries an int16 parameter count. Over the limit
+        // libpq fails client-side without touching the socket, so this is a
+        // caller error, not a broken link — the distinction matters to anyone
+        // retrying on ConnectionError.
+        enforce!QueryClientError(
+            params.length <= 65535,
+            format!("Query binds %s parameters, over PostgreSQL's limit of " ~
+                    "65535 per statement. Split the values into batches.")(
+                    params.length));
+
         auto pTypes   = new uint[params.length];
         auto pValues  = new const(char)*[params.length];
         auto pLengths = new int[params.length];
@@ -736,7 +746,7 @@ struct Connection {
         }
 
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendQueryParams(
                     conn._pg_conn,
                     query.toStringz,
@@ -771,14 +781,14 @@ struct Connection {
     auto prepare(in string name, in string query) {
         import std.ascii: isAlpha, isAlphaNum;
         import std.algorithm: all;
-        enforce!QueryError(
+        enforce!QueryClientError(
             name.length > 0 &&
             (name[0] == '_' || isAlpha(name[0])) &&
             name[1 .. $].all!(c => c == '_' || isAlphaNum(c)),
             "PreparedStatement name must be alphanumeric+underscore, got: " ~ name);
 
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendPrepare(
                     conn._pg_conn,
                     name.toStringz,
@@ -964,7 +974,7 @@ struct PreparedStatement {
     auto exec(T...)(T params) {
         static if (T.length == 0) {
             _conn._connection.borrow!((auto ref conn) @trusted {
-                enforce!QueryError(
+                enforce!ConnectionError(
                     PQsendQueryPrepared(
                         conn._pg_conn,
                         _name.toStringz,
@@ -1000,7 +1010,7 @@ struct PreparedStatement {
             }
 
             _conn._connection.borrow!((auto ref conn) @trusted {
-                enforce!QueryError(
+                enforce!ConnectionError(
                     PQsendQueryPrepared(
                         conn._pg_conn,
                         _name.toStringz,
