@@ -408,8 +408,9 @@ T convertTextTypeToD(T)(
                 if (!backslash && !quoted) {
                     if (quoted_value ) {
 
-                        // TODO: determine if backslashes were found in base loop
-                        //       and if there is no backslashes in array, then there is no need to unescape them
+                        // Possible optimisation: track in the outer loop whether
+                        // any backslash was seen, and skip unescaping entirely
+                        // when the array contains none.
                         char[] tmp_value;
                         tmp_value.reserve(pos - start);
                         uint ts = start + 1; // start iteration just after first quote

@@ -220,7 +220,6 @@ struct ResultRow {
   * from postgresql
   **/
 struct Result {
-    // TODO: Add ability to return number of affected rows
     private ResultInternal _result;
 
     // Current row index. Used for Range api.

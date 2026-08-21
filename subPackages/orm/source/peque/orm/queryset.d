@@ -201,10 +201,8 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
 
                     auto result = ctx.execParams(sql, pgParams);
 
-                    // Bucket children by their FK in one pass, then assign in a
-                    // second — O(parents + children) rather than a scan of every
-                    // child for every parent. Children keep result order within
-                    // each bucket, as they did before.
+                    // Bucket by FK, then assign: O(parents + children).
+                    // Children keep the child query's result order.
                     enum invFkField = invField;             // D field name on TargetM
                     alias ElemType = typeof(FieldType.init[0]);
                     alias FkT      = typeof(__traits(getMember, TargetM, invFkField));
@@ -214,10 +212,9 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                         auto t = result.getRow(i).as!TargetM;
                         auto fk = __traits(getMember, t, invFkField);
                         static if (is(FkT == Nullable!FkU, FkU)) {
-                            // Unwrap: a Nullable cannot key an AA. The null case
-                            // is unreachable through this path — the child query
-                            // filters `fk IN (…)`, which no SQL NULL matches — so
-                            // this is only a guard for a hand-built result.
+                            // A Nullable cannot key an AA. Null is unreachable
+                            // here anyway: the child query filters `fk IN (…)`,
+                            // which no SQL NULL matches.
                             if (fk.isNull) continue;
                             byFk[fk.get] ~= t;
                         } else {
@@ -271,13 +268,11 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
 
                     auto result = ctx.execParams(sql, pgParams);
 
-                    // Bucket targets by the junction's self key in one pass. The
-                    // previous shape re-scanned every row for every parent and
-                    // re-hydrated shared targets once per parent; each row is now
-                    // hydrated exactly once. Order within a bucket is unchanged.
+                    // Bucket by the junction's self key, then assign. Each row is
+                    // hydrated once, even when several parents share a target.
                     alias ElemType = typeof(FieldType.init[0]);
-                    // Resolve the self-key column once: looking it up by name
-                    // inside the loop was a scan of the field list per row.
+                    // Resolve the self-key column once — a name lookup scans the
+                    // field list.
                     auto selfKeyNum = result.fieldNumber(selfKeyAlias);
                     enforce!QueryClientError(!selfKeyNum.isNull,
                         "prefetch: junction self-key column '" ~ selfKeyAlias ~

@@ -71,7 +71,7 @@ alias SchemaReg = Registry!(
 
 
 // ---------------------------------------------------------------------------
-// Test models — Phase 2 features
+// Test models — constraints and indexes
 // ---------------------------------------------------------------------------
 
 @model("schema_categories")
@@ -97,7 +97,7 @@ struct Product {
     @field @uniqueIndex                                         string       slug;
 }
 
-alias Phase2Reg = Registry!(
+alias ConstraintReg = Registry!(
     Bind!(Category, ModelRepo!Category),
     Bind!(Product,  ModelRepo!Product),
 );
@@ -349,7 +349,7 @@ unittest {
 }
 
 unittest {
-    enum sql = schemaSQL!Phase2Reg();
+    enum sql = schemaSQL!ConstraintReg();
     assert(sql.contains("CREATE TABLE IF NOT EXISTS schema_categories"));
     assert(sql.contains("CREATE TABLE IF NOT EXISTS schema_products"));
     // categories must appear before products (FK dependency)
@@ -392,7 +392,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// End-to-end: Phase 2 models (constraints, indexes, OnDelete)
+// End-to-end: constraint and index models (OnDelete)
 // ---------------------------------------------------------------------------
 
 unittest {
@@ -402,7 +402,7 @@ unittest {
         DROP TABLE IF EXISTS schema_categories;
     `);
 
-    enum sql = schemaSQL!Phase2Reg();
+    enum sql = schemaSQL!ConstraintReg();
     c.exec(sql);
 
     auto catRepo  = Repository!(Category, Connection)(&c);

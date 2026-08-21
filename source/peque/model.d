@@ -25,8 +25,8 @@ module peque.model;
   * Only fields annotated with @field or @primaryKey are hydrated.
   * Unannotated fields are left at their zero/init value.
   *
-  * The table name argument is optional for Phase 4a (hydration-only).
-  * It will be used by the query builder (Phase 4c/4d) to generate FROM clauses.
+  * The table name is optional when the struct is only used for hydration; the
+  * query builder needs it to generate FROM clauses.
   **/
 struct model {
     string tableName = "";
@@ -308,7 +308,7 @@ template hasMany2OneUDA(alias sym) {
 
 
 // ---------------------------------------------------------------------------
-// Schema Phase 2 — column and table constraint UDAs
+// Column and table constraint UDAs
 // ---------------------------------------------------------------------------
 
 /** Add a UNIQUE constraint to a column in the generated DDL. **/

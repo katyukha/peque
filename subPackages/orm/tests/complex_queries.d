@@ -1,7 +1,10 @@
 /** Complex enterprise-like query tests for peque:orm.
   *
-  * This file is a design specification for the following upcoming features.
-  * Tests are gated with version(PequeOrmComplexQueries) until implemented:
+  * Started as a design specification for the implicit-join features; they are
+  * implemented now and these tests run with the normal suite. Remaining gaps
+  * are marked inline (see Test 14).
+  *
+  * Features exercised here:
   *
   *  - F!"field"               — type-free main-table field ref (_m.col via camelToSnake)
   *  - F!"rel.field"           — join-path field ref, join added implicitly

@@ -1,4 +1,4 @@
-/** Integration tests for peque:orm Phase 4c — Registry, @defaultOrder.
+/** Integration tests for peque:orm — Registry, @defaultOrder.
   *
   * Covers:
   *  - ModelRepo!M as a Bind target

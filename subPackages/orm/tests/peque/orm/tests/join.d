@@ -381,8 +381,7 @@ unittest {
 // prefetch! stitching: order, empty parents, NULL FKs, shared targets
 // ---------------------------------------------------------------------------
 
-// The stitch buckets children by key in one pass instead of rescanning every
-// child for every parent. These pin the properties that rewrite had to keep.
+// Properties the bucket-and-assign stitch must hold for both relation kinds.
 @model("pf_partner")
 struct PfPartner {
     @primaryKey int    id;
@@ -427,16 +426,16 @@ unittest {
     PfPartner b; b.name = "B"; auto pb = pRepo.insert(b);   // no children at all
     PfTag shared_; shared_.name = "shared"; auto ts = tRepo.insert(shared_);
 
-    // Children inserted in a known order, so result order is checkable.
+    // Inserted in a known order so the result order is checkable.
     foreach (code; ["i1", "i2", "i3"]) {
         PfInvoice inv; inv.code = code; inv.partnerId = pa.id.nullable;
         iRepo.insert(inv);
     }
-    // A NULL FK belongs to no parent and must simply be dropped.
+    // Belongs to no parent.
     PfInvoice orphan; orphan.code = "orphan";
     iRepo.insert(orphan);
 
-    // One tag shared by both partners — it must be hydrated for each.
+    // One tag shared by both partners.
     c.execParams(`INSERT INTO pf_partner_tag VALUES ($1, $2), ($3, $4)`,
                  pa.id, ts.id, pb.id, ts.id);
 
@@ -450,12 +449,11 @@ unittest {
     assert(got[0].invoices[1].code == "i2");
     assert(got[0].invoices[2].code == "i3");
 
-    // A parent with no children gets an empty array, not stale or null data.
+    // A parent with no children gets an empty array.
     assert(got[1].invoices.length == 0);
 
-    // A NULL-FK child is attached to nobody. Note this holds for a reason the
-    // stitch never sees: the child query filters `partner_id IN (…)` and no SQL
-    // NULL matches IN, so such a row is never fetched at all.
+    // A NULL-FK child belongs to nobody — though the stitch never sees one:
+    // `partner_id IN (…)` matches no SQL NULL, so the row is never fetched.
     foreach (ref p; got)
         foreach (ref inv; p.invoices)
             assert(inv.code != "orphan");
@@ -464,7 +462,7 @@ unittest {
     assert(got[0].tags.length == 1 && got[0].tags[0].name == "shared");
     assert(got[1].tags.length == 1 && got[1].tags[0].name == "shared");
 
-    // Prefetch over zero parents must not blow up.
+    // Zero parents.
     auto none = pRepo.query().where!"name"("nobody")
                      .prefetch!"invoices"().prefetch!"tags"().all();
     assert(none.length == 0);

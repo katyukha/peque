@@ -203,7 +203,6 @@ unittest {
 
     res = c.execParams("SELECT $1::float[]", [1.1f, 2.2f, 3.3f, 4.4f]).ensureQueryOk;
     assert(res[0][0].get!(float[]) == [1.1f, 2.2f, 3.3f, 4.4f]);
-    //assert(res[0][0].get!string == "{1.1,2.2,3.3,4.4}");
 
     res = c.execParams("SELECT $1::text[]", ["str1", "str2"]).ensureQueryOk;
     assert(res[0][0].get!(string[]) == ["str1", "str2"]);
@@ -234,19 +233,18 @@ unittest {
     ]);
     assert(res[0][0].get!string == "{\"2023-08-17 07:09:10+04\",\"2023-09-12 10:12:13+04\"}");
 
-    /// Test multi-dimentional array conversions
+    // Multi-dimensional arrays: they round-trip as text, but decoding into a
+    // nested D array is not supported and is rejected rather than mis-parsed.
     res = c.execParams("SELECT $1::int[][]", [[1, 2], [3, 4]]).ensureQueryOk;
     assert(res.getValue(0, 0).get!string == "{{1,2},{3,4}}");
-    //assert(res.getValue(0, 0).get!(int[][]) == [[1, 2], [3, 4]]);
+    res.getValue(0, 0).get!(int[][]).assertThrown!ConversionError;
 
     res = c.execParams("SELECT $1::int[][][]", [[[1, 2], [3, 4]], [[6, 7], [8, 9]]]).ensureQueryOk;
     assert(res.getValue(0, 0).get!string == "{{{1,2},{3,4}},{{6,7},{8,9}}}");
-    //assert(res.getValue(0, 0).get!(int[][][]) == [[[1, 2], [3, 4]], [[6, 7], [8, 9]]]);
+    res.getValue(0, 0).get!(int[][][]).assertThrown!ConversionError;
 
-    /// Test multi-dimentional array conversions
     res = c.execParams("SELECT $1::text[][]", [["t1", "t2"], ["t3", "t,4"]]).ensureQueryOk;
     assert(res.getValue(0, 0).get!string == "{{t1,t2},{t3,\"t,4\"}}");
-    //assert(res.getValue(0, 0).get!(int[][]) == [[1, 2], [3, 4]]);
 }
 
 
