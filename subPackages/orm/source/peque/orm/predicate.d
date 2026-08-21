@@ -10,14 +10,15 @@
   * // equality
   * F!(User, "status")("active")
   *
-  * // comparison
-  * F!(User, "age") >= 18
+  * // comparison — named methods, because D routes >= through opCmp, which
+  * // must return int and so cannot build a Predicate
+  * F!(User, "age").gte(18)
   *
   * // OR
   * F!(User, "status")("active") | F!(User, "status")("pending")
   *
   * // AND (between .where() calls is implicit; explicit & inside a predicate)
-  * F!(User, "dept")("eng") & F!(User, "level") >= 3
+  * F!(User, "dept")("eng") & F!(User, "level").gte(3)
   *
   * // NOT
   * ~F!(User, "isAdmin")(false)

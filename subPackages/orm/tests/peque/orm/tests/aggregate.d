@@ -386,3 +386,44 @@ unittest {
     // aggregate!() only accepts AggBuilder specs
     static assert(!__traits(compiles, qs.aggregate!(F!(AggInvoice, "amount"))));
 }
+
+
+// ---------------------------------------------------------------------------
+// aggregate! honours limit()/offset()
+// ---------------------------------------------------------------------------
+
+// It was the one terminal that neither honoured the bounds nor rejected them:
+// count() on the same builder returned 2 while sum() summed every row. Django,
+// Ecto and SQLAlchemy all aggregate over the bounded set via a subquery, which
+// is what count() already did here.
+unittest {
+    auto c = makeConn();
+    seed(c);                       // amounts 100, 200, 50, 150, 400
+
+    auto repo = Repository!(AggInvoice, Connection)(&c);
+
+    // Unbounded is unchanged.
+    assert(repo.query().aggregate!(F!(AggInvoice, "amount").sum)().get == 900.0);
+
+    // With a bound, the aggregate covers exactly the rows all() returns.
+    foreach (lim; [0, 1, 3, 9])
+        foreach (off; [0, 2]) {
+            auto qs = repo.query().orderBy!("amount")().limit(lim).offset(off);
+            double expect = 0;
+            foreach (ref r; qs.all()) expect += r.amount;
+            auto got = qs.aggregate!(F!(AggInvoice, "amount").sum)();
+            if (qs.all().length == 0)
+                assert(got.isNull, "SUM over zero rows is NULL");
+            else
+                assert(got.get == expect,
+                    "aggregate must cover the rows all() returns");
+            assert(qs.count() == qs.all().length);
+        }
+
+    // ORDER BY decides which rows a limit selects, so it must reach the
+    // subquery: the top two by amount are 400 + 200, not 50 + 100.
+    assert(repo.query().orderBy(F!(AggInvoice, "amount").desc).limit(2)
+               .aggregate!(F!(AggInvoice, "amount").sum)().get == 600.0);
+    assert(repo.query().orderBy(F!(AggInvoice, "amount").asc).limit(2)
+               .aggregate!(F!(AggInvoice, "amount").sum)().get == 150.0);
+}

@@ -85,6 +85,7 @@ public import peque.orm.registry:
 public import peque.orm.schema: modelDDL, schemaSQL;
 public import peque.orm.queryset: QuerySet, GroupedQuerySet;
 public import peque.orm.predicate: Predicate, SerializedPred, serializePredicate;
-public import peque.orm.field: FieldBuilder, PathBuilder, AggBuilder, isAggBuilder, F, SF, exists;
+public import peque.orm.field: FieldBuilder, PathBuilder, AggBuilder, isAggBuilder,
+    SetExpr, F, SF, exists;
 public import peque.orm.ordering: Ordering, OrderDir, OrderNulls;
 public import peque.orm.subquery: SubQuery;

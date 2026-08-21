@@ -42,11 +42,23 @@ private struct ResultInternalData {
     // Return the column index for name.
     // Delegates to PQfnumber on the first access per distinct name (O(F)),
     // then serves subsequent accesses for that name from the cache (O(1)).
-    // PQfnumber handles identifier case-folding, so this matches its semantics
-    // exactly without any custom lowercasing logic.
+    /** Column index for a name, or -1.
+      *
+      * Two kinds of name reach here and they need different matching, so both
+      * are tried. Model columns are emitted quoted and so keep their exact case
+      * — `@field("MyCol")` really is `MyCol` in the result — and PQfnumber only
+      * matches those when the name it is given is quoted too. Synthetic join
+      * aliases (`__partner_name`) are emitted bare and therefore folded, which
+      * is what an unquoted lookup matches.
+      *
+      * Exact first: a quoted lookup cannot accidentally match a folded column,
+      * whereas the reverse can.
+      **/
     package int _colIdx(in string name) @trusted {
         if (auto p = name in _colCache) return *p;
-        immutable idx = PQfnumber(_pg_result, name.toStringz);
+        auto idx = PQfnumber(_pg_result, ('"' ~ name ~ '"').toStringz);
+        if (idx < 0)
+            idx = PQfnumber(_pg_result, name.toStringz);
         _colCache[name] = idx;
         return idx;
     }

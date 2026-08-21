@@ -429,6 +429,20 @@ long deleted = repo.query().where!"active"(false).delete_();
 // Neither accepts limit()/offset(): PostgreSQL has no row bound on DELETE or
 // UPDATE, so peque rejects the combination rather than silently ignoring it.
 
+// Expression assignment — a column computed from its own current value.
+// Operands are bound, never inlined, so the expression is injection-safe.
+repo.query().where!"state"("queued")
+    .set!"attempts"(F!"attempts" + 1)
+    .set!"backoff"((F!"backoff" + 10) * 2)
+    .update();
+
+// setRaw!() for anything arithmetic cannot express — a function call, a CASE.
+long claimed = repo.query().where!"state"("queued")
+    .setRaw!"attempts"("attempts + 1")
+    .setRaw!"lockedAt"("now()")
+    .setRaw!"backoff"("LEAST(backoff * $1, $2)", 4, 3600)   // $n are this call's args
+    .update();
+
 // Partial update — set only named fields
 long updated = repo.query()
     .where!"active"(false)

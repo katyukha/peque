@@ -60,6 +60,7 @@ private import peque.orm.repository: isModel;
 private import peque.orm.sql;
 private import peque.orm.predicate;
 private import peque.orm.field: FieldBuilder, PathBuilder, AggBuilder, isAggBuilder, F, toOrdering;
+private import peque.orm.field: SetExpr, _isFieldBuilderType;
 private import peque.orm.ordering: Ordering, OrderKind, OrderDir, OrderNulls;
 private import peque.orm.predicate: PathNode, LiteralNode, InSubqueryNode;
 private import peque.orm.subquery: SubQuery;
@@ -722,9 +723,18 @@ private string[] _neededRelsCTFE(M, DTO)() {
 }
 
 
+/** One SET assignment for a bulk UPDATE.
+  *
+  * Either a bound value (`col = $n`) or a raw SQL expression, which may itself
+  * carry bound values — `attempts + 1` has none, `GREATEST(attempts, $1)` has
+  * one. The expression form is what lets a column be computed from its own
+  * current value or from a server-side function.
+  **/
 private struct _QSSet {
-    string  colName;
-    PGValue value;
+    string    colName;
+    bool      isExpr;
+    string    expr;       // raw SQL, when isExpr
+    PGValue[] params;     // bound values: exactly one unless isExpr
 }
 
 
@@ -741,7 +751,7 @@ private struct _QSSet {
   * Obtain one from a repository via .query():
   * ---
   * auto rows = repo.query()
-  *                 .where("active = $1", true)
+  *                 .where!"active"(true)
   *                 .orderBy("name ASC")
   *                 .limit(20)
   *                 .all();
@@ -945,11 +955,39 @@ if (isModel!M && isQueryContext!Ctx) {
       *
       * Example:
       * ---
-      * repo.query().where("id=$1", id).set!("name")("New name").update();
-      * repo.query().where("active=$1", false).set!("active")(true).update();
+      * repo.query().where!"id"(id).set!"name"("New name").update();
+      * repo.query().where!"active"(false).set!"active"(true).update();
       * ---
       **/
-    QuerySet!(M, Ctx, JoinFields) set(string fieldName, V)(V value) {
+    /** ditto — assign a SQL expression built from field builders.
+      *
+      * `set!"attempts"(F!"attempts" + 1)` emits `attempts = (_m.attempts + $1)`.
+      * Operands are bound, so the expression is injection-safe however it was
+      * composed. For anything arithmetic cannot express — a function call such
+      * as now(), or a CASE — use setRaw!.
+      **/
+    QuerySet!(M, Ctx, JoinFields) set(string fieldName, V)(V value)
+    if (is(V == SetExpr) || _isFieldBuilderType!V) {
+        enum colName = _fieldColName!(M, fieldName)();
+        static assert(colName.length > 0,
+            "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof);
+
+        static if (is(V == SetExpr))
+            auto e = value;
+        else
+            auto e = SetExpr(V.colExprOf, []);   // bare column copy: set!"a"(F!"b")
+
+        auto qs = this;
+        _QSSet[] merged;                          // last write wins, as elsewhere
+        foreach (ref st; qs._sets)
+            if (st.colName != colName) merged ~= st;
+        merged ~= _QSSet(colName, true, e.sql, e.params);
+        qs._sets = merged;
+        return qs;
+    }
+
+    QuerySet!(M, Ctx, JoinFields) set(string fieldName, V)(V value)
+    if (!is(V == SetExpr) && !_isFieldBuilderType!V) {
         enum colName = _fieldColName!(M, fieldName)();
         static assert(colName.length > 0,
             "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof);
@@ -962,7 +1000,49 @@ if (isModel!M && isQueryContext!Ctx) {
         _QSSet[] merged;
         foreach (ref s; qs._sets)
             if (s.colName != colName) merged ~= s;
-        merged ~= _QSSet(colName, convertToPG(value));
+        merged ~= _QSSet(colName, false, "", [convertToPG(value)]);
+        qs._sets = merged;
+        return qs;
+    }
+
+    /** Accumulate a SET assignment whose value is a raw SQL expression.
+      *
+      * The escape hatch for anything a bound value cannot express: a column
+      * computed from its own current value, or a server-side function.
+      *
+      * `$1`, `$2`, … inside sqlExpr refer to this call's own args and are
+      * renumbered for the final statement, exactly as in whereRaw.
+      *
+      * Column references may be bare or qualified with `_m`, the alias of the
+      * row being updated; both resolve the same way.
+      *
+      * sqlExpr is emitted verbatim, so never build it from user input.
+      *
+      * Example:
+      * ---
+      * repo.query().where!"id"(id)
+      *     .setRaw!"attempts"("attempts + 1")
+      *     .setRaw!"lockedAt"("now()")
+      *     .setRaw!"backoff"("LEAST(backoff * 2, $1)", 3600)
+      *     .update();
+      * ---
+      **/
+    QuerySet!(M, Ctx, JoinFields) setRaw(string fieldName, Args...)(
+            string sqlExpr, Args args) {
+        enum colName = _fieldColName!(M, fieldName)();
+        static assert(colName.length > 0,
+            "'" ~ fieldName ~ "' is not a DB column field on " ~ M.stringof);
+        enforce!QueryClientError(sqlExpr.length > 0,
+            "setRaw!\"" ~ fieldName ~ "\" was given an empty expression");
+
+        PGValue[] ps;
+        foreach (a; args) ps ~= convertToPG(a);
+
+        auto qs = this;
+        _QSSet[] merged;                       // last write wins, as in set!
+        foreach (ref st; qs._sets)
+            if (st.colName != colName) merged ~= st;
+        merged ~= _QSSet(colName, true, sqlExpr, ps);
         qs._sets = merged;
         return qs;
     }
@@ -1198,6 +1278,13 @@ if (isModel!M && isQueryContext!Ctx) {
     M[] all() {
         import peque.hydration: _hydrateAnnotated;
 
+        // A SELECT terminal cannot apply set!/setRaw! assignments. Silently
+        // dropping them turns a forgotten .update() into a query that looks like
+        // it worked, so say so instead.
+        enforce!QueryClientError(_sets.length == 0,
+            "all() cannot apply set!()/setRaw!() assignments — call update() to " ~
+            "write them, or drop them to read.");
+
         // Resolve predicates/orderBy and the join suffix they need
         Predicate[] resolved;
         string joinsSQL, orderBySql;
@@ -1265,6 +1352,9 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** Fetch the first matching row, or Nullable.init if none. **/
     Nullable!M first() {
+        // limit(0) means "no rows" — do not override it with LIMIT 1, which
+        // would make first() disagree with all(), count() and exists().
+        if (_limitVal == 0) return Nullable!M.init;
         auto results = limit(1).all();
         if (results.length == 0) return Nullable!M.init;
         return results[0].nullable;
@@ -1311,8 +1401,9 @@ if (isModel!M && isQueryContext!Ctx) {
       * fields) or double (floating), avg → double, min/max → the field's own
       * D type, count → long.
       *
-      * Like count(), ignores orderBy/limit/offset — the aggregate always runs
-      * over the full match set.
+      * Honours limit()/offset(): the aggregate runs over the rows all() would
+      * return, so .orderBy(...).limit(10).aggregate!(...sum) sums the top ten
+      * rather than everything.
       *
       * ---
       * // SELECT SUM(_m.amount) FROM invoices _m WHERE (_m.active = $1)
@@ -1329,14 +1420,28 @@ if (isModel!M && isQueryContext!Ctx) {
 
         Predicate[] resolved;
         string joinsSQL, orderBySql;
-        _resolveQuery(resolved, joinsSQL, orderBySql);
+        _resolveQuery!true(resolved, joinsSQL, orderBySql);
 
         string whereSQL;
         PGValue[] params;
         _buildWhereFromArray(resolved, whereSQL, params);
 
-        string sql = "SELECT " ~ AggT.expr ~ " FROM " ~ ormTableName!M ~ " _m"
-            ~ joinsSQL ~ whereSQL;
+        string sql;
+        if (_limitVal >= 0 || _offsetVal >= 0) {
+            // Aggregate over the bounded row set, as count() does: the bound has
+            // to be applied before the aggregate, not after it. ORDER BY is
+            // carried too — with a limit it decides WHICH rows are aggregated.
+            string inner = "SELECT * FROM " ~ ormTableName!M ~ " _m"
+                ~ joinsSQL ~ whereSQL;
+            if (orderBySql.length) inner ~= " ORDER BY " ~ orderBySql;
+            if (_limitVal  >= 0)   inner ~= " LIMIT "  ~ to!string(_limitVal);
+            if (_offsetVal >= 0)   inner ~= " OFFSET " ~ to!string(_offsetVal);
+            // The aggregate refers to _m.col, so the subquery keeps that alias.
+            sql = "SELECT " ~ AggT.expr ~ " FROM (" ~ inner ~ ") _m";
+        } else {
+            sql = "SELECT " ~ AggT.expr ~ " FROM " ~ ormTableName!M ~ " _m"
+                ~ joinsSQL ~ whereSQL;
+        }
         return _ctx.execParams(sql, params)
                    .getValue!(Nullable!(AggT.ResultType))(0, 0);
     }
@@ -1473,7 +1578,7 @@ if (isModel!M && isQueryContext!Ctx) {
       *
       * Example:
       * ---
-      * repo.query().where("id=$1", id).set!("name")("New").update();
+      * repo.query().where!"id"(id).set!"name"("New").update();
       * ---
       **/
     long update() {
@@ -1484,25 +1589,38 @@ if (isModel!M && isQueryContext!Ctx) {
         string joinsSQL, orderBySql;
         _resolveQuery(resolved, joinsSQL, orderBySql);
 
-        // Build SET clause: col1=$1, col2=$2, ...
+        // Build the SET clause. An expression assignment may bind zero, one or
+        // several values, so placeholder numbers are accumulated rather than
+        // derived from the assignment's index.
         string setClause;
         PGValue[] setParams;
         foreach (i, ref s; _sets) {
             if (i > 0) setClause ~= ", ";
-            setClause ~= s.colName ~ " = $" ~ to!string(i + 1);
-            setParams ~= s.value;
+            setClause ~= s.colName ~ " = ";
+            if (s.isExpr) {
+                // The expression numbers its own args from $1; shift them past
+                // whatever earlier assignments already bound.
+                setClause ~= "(" ~ _shiftParams(s.expr, cast(int)setParams.length) ~ ")";
+                setParams ~= s.params;
+            } else {
+                setClause ~= "$" ~ to!string(setParams.length + 1);
+                setParams ~= s.params[0];
+            }
         }
 
         string whereSQL;
         PGValue[] whereParams;
-        _buildWhereFromArray(resolved, whereSQL, whereParams, cast(int)_sets.length);
+        _buildWhereFromArray(resolved, whereSQL, whereParams, cast(int)setParams.length);
 
         enum _table = ormTableName!M;
         enum _pkCol = ormPkColName!M();
         string sql;
+        // The target is aliased _m in both shapes so a SET expression can refer
+        // to the row being updated as _m.col either way. The subquery's own _m
+        // shadows it there, which is what its resolved predicates expect.
         if (joinsSQL.length)
-            sql = "UPDATE " ~ _table ~ " SET " ~ setClause ~
-                  " WHERE " ~ _pkCol ~ " IN (SELECT _m." ~ _pkCol ~
+            sql = "UPDATE " ~ _table ~ " _m SET " ~ setClause ~
+                  " WHERE _m." ~ _pkCol ~ " IN (SELECT _m." ~ _pkCol ~
                   " FROM " ~ _table ~ " _m" ~ joinsSQL ~ whereSQL ~ ")";
         else
             sql = "UPDATE " ~ _table ~ " _m SET " ~ setClause ~ whereSQL;
@@ -1851,6 +1969,21 @@ if (is(QS == QuerySet!Args, Args...)) {
     // SQL SELECT expression for one DTO member — "_m.col" for a group key,
     // the registered expression for an annotation, "" if unmatched.
     private static string _groupedExprFor(string memberName)() {
+        // Group keys come first in Specs and annotations after, so a name
+        // claimed by both would silently resolve to the key and drop the
+        // aggregate — valid SQL, wrong answer. Reject it instead.
+        enum _keyCount = () {
+            size_t n = 0;
+            static foreach (S; Specs)
+                static if (is(typeof(S) == string)) { if (S == memberName) ++n; }
+                else                                { if (S._name == memberName) ++n; }
+            return n;
+        }();
+        static assert(_keyCount <= 1,
+            "select!DTO: '" ~ memberName ~ "' is both a groupBy!() key and an " ~
+            "annotate!() alias. The aggregate would be silently ignored — give " ~
+            "the annotation a different alias.");
+
         string expr = "";
         static foreach (S; Specs) {{
             static if (is(typeof(S) == string)) {

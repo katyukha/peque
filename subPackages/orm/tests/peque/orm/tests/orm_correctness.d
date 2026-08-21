@@ -666,6 +666,10 @@ unittest {
                 "count() must equal all().length for limit/offset combinations");
             assert(qs.exists() == (qs.all().length > 0),
                 "exists() must agree with all() for limit/offset combinations");
+            // first() used to call limit(1) unconditionally, so limit(0) —
+            // which every other terminal reads as "no rows" — returned one.
+            assert(qs.first().isNull == (qs.all().length == 0),
+                "first() must agree with all() for limit/offset combinations");
         }
 
     // Destructive terminals refuse the bound rather than silently ignoring it.

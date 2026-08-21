@@ -287,3 +287,41 @@ unittest {
     c.exec(`DROP TABLE IF EXISTS doc_res_partner`);
     c.exec(`DROP TABLE IF EXISTS doc_tag`);
 }
+
+
+// --- README: expression assignments in the QuerySet section -----------------
+
+@model("doc_expr_job")
+struct DocExprJob {
+    @primaryKey int    id;
+    @field      string state;
+    @field      int    attempts;
+    @field      int    backoff;
+}
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS doc_expr_job`);
+    c.exec(modelDDL!DocExprJob());
+
+    auto repo = Repository!(DocExprJob, Connection)(&c);
+    DocExprJob j; j.state = "queued"; j.attempts = 0; j.backoff = 100;
+    repo.insert(j);
+
+    repo.query().where!"state"("queued")
+        .set!"attempts"(F!"attempts" + 1)
+        .set!"backoff"((F!"backoff" + 10) * 2)
+        .update();
+
+    long claimed = repo.query().where!"state"("queued")
+        .setRaw!"attempts"("attempts + 1")
+        .setRaw!"backoff"("LEAST(backoff * $1, $2)", 4, 3600)
+        .update();
+
+    assert(claimed == 1);
+    auto got = repo.query().all()[0];
+    assert(got.attempts == 2);                 // +1 then +1
+    assert(got.backoff == 880);                // (100+10)*2 = 220, then LEAST(880, 3600)
+
+    c.exec(`DROP TABLE IF EXISTS doc_expr_job`);
+}

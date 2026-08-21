@@ -221,3 +221,68 @@ unittest {
     assert(orderRepo.query().where!"end"(99).delete_() == 2);
     assert(orderRepo.query().count() == 1);
 }
+
+
+// ---------------------------------------------------------------------------
+// Case-exact column names
+// ---------------------------------------------------------------------------
+
+// @field("MyCol") means the column really is MyCol, since peque quotes every
+// identifier. Two things have to agree for that to be usable: the FK column of
+// an explicit @related("field") must be quoted like every other identifier, and
+// the result lookup must match case-exactly — PQfnumber folds an unquoted name,
+// so a bare lookup misses the very column it is looking at.
+@model("rw_case_co")
+struct RwCaseCo {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("rw_case_t")
+struct RwCaseT {
+    @primaryKey             int             id;
+    @field("MyCol")         string          mixed;
+    // The FK column is mixed-case too: that is what exercises the explicit-FK
+    // path's quoting. A lowercase FK would work unquoted and hide the bug.
+    @field("MyFk") @many2one!(RwCaseCo) Nullable!int coId;
+    @related("coId")        Nullable!RwCaseCo co;
+}
+
+alias RwCaseReg = Registry!(
+    Bind!(RwCaseCo, ModelRepo!RwCaseCo),
+    Bind!(RwCaseT,  ModelRepo!RwCaseT),
+);
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS rw_case_t`);
+    c.exec(`DROP TABLE IF EXISTS rw_case_co`);
+    c.exec(schemaSQL!RwCaseReg());
+
+    auto coRepo = Repository!(RwCaseCo, Connection)(&c);
+    auto coSeed = RwCaseCo(0, "acme");
+    auto co     = coRepo.insert(coSeed);
+
+    auto repo = Repository!(RwCaseT, Connection)(&c);
+    RwCaseT t;
+    t.mixed = "v";
+    t.coId  = co.id.nullable;
+    auto saved = repo.insert(t);          // RETURNING hydrates the mixed-case column
+    assert(saved.mixed == "v");
+
+    assert(repo.query().all().length == 1);
+    assert(repo.query().where!"mixed"("v").count() == 1);
+
+    // The explicit-FK join: its column used to be the one unquoted identifier
+    // in the whole join pipeline, so this failed with `column _m.mycol does not
+    // exist` while the inferred-FK path worked.
+    auto joined = repo.query().load!"co"().all();
+    assert(joined.length == 1);
+    assert(!joined[0].co.isNull && joined[0].co.get.name == "acme");
+
+    // Relation paths resolve through the same FK.
+    assert(repo.query().where(F!"co.name"("acme")).count() == 1);
+
+    c.exec(`DROP TABLE IF EXISTS rw_case_t`);
+    c.exec(`DROP TABLE IF EXISTS rw_case_co`);
+}

@@ -56,7 +56,7 @@ private import peque.hydration: camelToSnake;
 
 /// true if T is a FieldBuilder instantiation — used to keep the generic
 /// value overloads (opCall/ne) from competing with the column-to-column ones.
-private enum _isFieldBuilderType(T) = is(T == FieldBuilder!(e, FT), string e, FT);
+package(peque.orm) enum _isFieldBuilderType(T) = is(T == FieldBuilder!(e, FT), string e, FT);
 
 
 // ---------------------------------------------------------------------------
@@ -146,7 +146,86 @@ struct JsonFieldBuilder {
   * inference of the aggregate builders (.sum/.avg/.min/.max/.count), which are
   * therefore only available on typed field references.
   **/
+// ---------------------------------------------------------------------------
+// SetExpr — a SQL value expression for UPDATE ... SET
+// ---------------------------------------------------------------------------
+
+/** A SQL expression usable as the value of a SET assignment.
+  *
+  * Built by arithmetic on field builders — `F!"attempts" + 1` — and consumed by
+  * QuerySet.set!. Operands are bound as parameters rather than inlined, so an
+  * expression is injection-safe however it was composed.
+  *
+  * `sql` numbers its parameters from $1; QuerySet renumbers them for the final
+  * statement, the same contract setRaw! uses.
+  **/
+struct SetExpr {
+    string    sql;
+    PGValue[] params;
+
+    /// Compose: (F!"a" + 1) * 2, or F!"a" + F!"b" * 2.
+    SetExpr opBinary(string op, V)(V rhs) const
+    if (op == "+" || op == "-" || op == "*" || op == "/") {
+        return _combine(this, op, _toSetExpr(rhs));
+    }
+
+    /// Value on the left: 100 - F!"used".
+    SetExpr opBinaryRight(string op, V)(V lhs) const
+    if ((op == "+" || op == "-" || op == "*" || op == "/") && !is(V == SetExpr)) {
+        return _combine(_toSetExpr(lhs), op, this);
+    }
+}
+
+// Lift a field builder or a plain value into a SetExpr.
+private SetExpr _toSetExpr(V)(V v) {
+    static if (is(V == SetExpr))
+        return v;
+    else static if (_isFieldBuilderType!V)
+        return SetExpr(V.colExprOf, []);
+    else {
+        import peque.converter: convertToPG;
+        return SetExpr("$1", [convertToPG(v)]);
+    }
+}
+
+// Join two expressions, renumbering the right-hand side past the left's params.
+private SetExpr _combine(SetExpr lhs, string op, SetExpr rhs) {
+    import peque.orm.predicate: _shiftParams;
+    return SetExpr(
+        "(" ~ lhs.sql ~ " " ~ op ~ " " ~
+              _shiftParams(rhs.sql, cast(int)lhs.params.length) ~ ")",
+        lhs.params ~ rhs.params);
+}
+
 struct FieldBuilder(string colExpr, FieldT = void) {
+    /// The SQL column expression this builder refers to, e.g. "_m.attempts".
+    enum colExprOf = colExpr;
+
+    /** Arithmetic, for building a SET value expression.
+      *
+      * `set!"attempts"(F!"attempts" + 1)` emits `attempts = (_m.attempts + $1)`.
+      * The operand is bound, never inlined.
+      *
+      * Only arithmetic is available as an operator: D routes comparisons
+      * through opCmp, which must return int, which is why the comparison forms
+      * are named methods (.gte, .lt, …) instead.
+      **/
+    SetExpr opBinary(string op, V)(V rhs) const
+    if (op == "+" || op == "-" || op == "*" || op == "/") {
+        static if (!is(FieldT == void))
+            static assert(isNumeric!_BaseT,
+                "arithmetic on " ~ colExpr ~ " requires a numeric column, got " ~
+                FieldT.stringof);
+        return _combine(SetExpr(colExpr, []), op, _toSetExpr(rhs));
+    }
+
+    /// ditto — value on the left: 100 - F!"used".
+    SetExpr opBinaryRight(string op, V)(V lhs) const
+    if ((op == "+" || op == "-" || op == "*" || op == "/") &&
+        !_isFieldBuilderType!V && !is(V == SetExpr)) {
+        return _combine(_toSetExpr(lhs), op, SetExpr(colExpr, []));
+    }
+
     /// Equality: F!(M, "field")(val)
     Predicate opCall(V)(V val) const
     if (!_isFieldBuilderType!V) {

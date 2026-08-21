@@ -502,7 +502,7 @@ package(peque.orm) string _fkColForRelatedField(M, string relFieldName, RelType)
                && relatedUDAs[0].fkField.length > 0) {
         enum fkFN = relatedUDAs[0].fkField;
         alias FKDecl = __traits(getMember, M, fkFN);
-        return _colName!(FKDecl, fkFN);
+        return _sqlIdent(_colName!(FKDecl, fkFN));
     } else {
         return _findM2OFKColFor!(M, RelType)();
     }
