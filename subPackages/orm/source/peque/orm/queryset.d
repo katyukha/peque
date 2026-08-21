@@ -201,21 +201,33 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
 
                     auto result = ctx.execParams(sql, pgParams);
 
-                    // Stitch: for each target row, find matching M row(s)
-                    TargetM[] targets;
-                    targets.length = result.ntuples;
-                    foreach (i; 0 .. result.ntuples)
-                        targets[i] = result.getRow(i).as!TargetM;
+                    // Bucket children by their FK in one pass, then assign in a
+                    // second — O(parents + children) rather than a scan of every
+                    // child for every parent. Children keep result order within
+                    // each bucket, as they did before.
+                    enum invFkField = invField;             // D field name on TargetM
+                    alias ElemType = typeof(FieldType.init[0]);
+                    alias FkT      = typeof(__traits(getMember, TargetM, invFkField));
 
-                    enum invFkField = invField; // D field name on TargetM
-                    foreach (ref m; rows) {
-                        alias ElemType = typeof(FieldType.init[0]);
-                        ElemType[] arr;
-                        foreach (ref t; targets) {
-                            if (__traits(getMember, t, invFkField) == __traits(getMember, m, ormPkFieldName!M()))
-                                arr ~= t;
+                    ElemType[][PkType] byFk;
+                    foreach (i; 0 .. result.ntuples) {
+                        auto t = result.getRow(i).as!TargetM;
+                        auto fk = __traits(getMember, t, invFkField);
+                        static if (is(FkT == Nullable!FkU, FkU)) {
+                            // Unwrap: a Nullable cannot key an AA. The null case
+                            // is unreachable through this path — the child query
+                            // filters `fk IN (…)`, which no SQL NULL matches — so
+                            // this is only a guard for a hand-built result.
+                            if (fk.isNull) continue;
+                            byFk[fk.get] ~= t;
+                        } else {
+                            byFk[fk] ~= t;
                         }
-                        __traits(getMember, m, memberName) = arr;
+                    }
+
+                    foreach (ref m; rows) {
+                        auto p = __traits(getMember, m, ormPkFieldName!M()) in byFk;
+                        __traits(getMember, m, memberName) = p ? *p : ElemType[].init;
                     }
                 }
             }}
@@ -259,18 +271,28 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
 
                     auto result = ctx.execParams(sql, pgParams);
 
-                    // Decode target rows + selfKey column (read via its alias)
+                    // Bucket targets by the junction's self key in one pass. The
+                    // previous shape re-scanned every row for every parent and
+                    // re-hydrated shared targets once per parent; each row is now
+                    // hydrated exactly once. Order within a bucket is unchanged.
+                    alias ElemType = typeof(FieldType.init[0]);
+                    // Resolve the self-key column once: looking it up by name
+                    // inside the loop was a scan of the field list per row.
+                    auto selfKeyNum = result.fieldNumber(selfKeyAlias);
+                    enforce!QueryClientError(!selfKeyNum.isNull,
+                        "prefetch: junction self-key column '" ~ selfKeyAlias ~
+                        "' missing from the result");
+                    immutable selfKeyIdx = selfKeyNum.get;
+
+                    ElemType[][PkType] bySelfKey;
+                    foreach (i; 0 .. result.ntuples) {
+                        auto row = result.getRow(i);
+                        bySelfKey[row[selfKeyIdx].as!PkType] ~= row.as!TargetM;
+                    }
+
                     foreach (ref m; rows) {
-                        alias ElemType = typeof(FieldType.init[0]);
-                        ElemType[] arr;
-                        foreach (i; 0 .. result.ntuples) {
-                            auto row = result.getRow(i);
-                            auto selfKeyVal = row[selfKeyAlias].as!PkType;
-                            if (selfKeyVal == __traits(getMember, m, ormPkFieldName!M())) {
-                                arr ~= row.as!TargetM;
-                            }
-                        }
-                        __traits(getMember, m, memberName) = arr;
+                        auto p = __traits(getMember, m, ormPkFieldName!M()) in bySelfKey;
+                        __traits(getMember, m, memberName) = p ? *p : ElemType[].init;
                     }
                 }
             }}

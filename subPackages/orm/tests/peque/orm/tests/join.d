@@ -375,3 +375,102 @@ unittest {
     static assert(!__traits(compiles, repo.query().orderBy!("nosuchrel.name")));
     static assert(!__traits(compiles, repo.query().orderBy!("partner.nosuchcol")));
 }
+
+
+// ---------------------------------------------------------------------------
+// prefetch! stitching: order, empty parents, NULL FKs, shared targets
+// ---------------------------------------------------------------------------
+
+// The stitch buckets children by key in one pass instead of rescanning every
+// child for every parent. These pin the properties that rewrite had to keep.
+@model("pf_partner")
+struct PfPartner {
+    @primaryKey int    id;
+    @field      string name;
+    @one2many!(PfInvoice, "partnerId") PfInvoice[] invoices;
+    @many2many!(PfTag, "pf_partner_tag", "partner_id", "tag_id") PfTag[] tags;
+}
+
+@model("pf_invoice")
+struct PfInvoice {
+    @primaryKey            int          id;
+    @field                 string       code;
+    @many2one!(PfPartner)  Nullable!int partnerId;   // NULL = belongs to nobody
+}
+
+@model("pf_tag")
+struct PfTag {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+alias PfReg = Registry!(
+    Bind!(PfTag,     ModelRepo!PfTag),
+    Bind!(PfPartner, ModelRepo!PfPartner),
+    Bind!(PfInvoice, ModelRepo!PfInvoice),
+);
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS pf_partner_tag`);
+    c.exec(`DROP TABLE IF EXISTS pf_invoice`);
+    c.exec(`DROP TABLE IF EXISTS pf_tag`);
+    c.exec(`DROP TABLE IF EXISTS pf_partner`);
+    c.exec(schemaSQL!PfReg());
+    c.exec(`CREATE TABLE pf_partner_tag (partner_id int, tag_id int)`);
+
+    auto pRepo = Repository!(PfPartner, Connection)(&c);
+    auto iRepo = Repository!(PfInvoice, Connection)(&c);
+    auto tRepo = Repository!(PfTag, Connection)(&c);
+
+    PfPartner a; a.name = "A"; auto pa = pRepo.insert(a);
+    PfPartner b; b.name = "B"; auto pb = pRepo.insert(b);   // no children at all
+    PfTag shared_; shared_.name = "shared"; auto ts = tRepo.insert(shared_);
+
+    // Children inserted in a known order, so result order is checkable.
+    foreach (code; ["i1", "i2", "i3"]) {
+        PfInvoice inv; inv.code = code; inv.partnerId = pa.id.nullable;
+        iRepo.insert(inv);
+    }
+    // A NULL FK belongs to no parent and must simply be dropped.
+    PfInvoice orphan; orphan.code = "orphan";
+    iRepo.insert(orphan);
+
+    // One tag shared by both partners — it must be hydrated for each.
+    c.execParams(`INSERT INTO pf_partner_tag VALUES ($1, $2), ($3, $4)`,
+                 pa.id, ts.id, pb.id, ts.id);
+
+    auto got = pRepo.query().orderBy!("name")()
+                    .prefetch!"invoices"().prefetch!"tags"().all();
+    assert(got.length == 2);
+
+    // Order within a parent's children follows the child query's result order.
+    assert(got[0].invoices.length == 3);
+    assert(got[0].invoices[0].code == "i1");
+    assert(got[0].invoices[1].code == "i2");
+    assert(got[0].invoices[2].code == "i3");
+
+    // A parent with no children gets an empty array, not stale or null data.
+    assert(got[1].invoices.length == 0);
+
+    // A NULL-FK child is attached to nobody. Note this holds for a reason the
+    // stitch never sees: the child query filters `partner_id IN (…)` and no SQL
+    // NULL matches IN, so such a row is never fetched at all.
+    foreach (ref p; got)
+        foreach (ref inv; p.invoices)
+            assert(inv.code != "orphan");
+
+    // A target shared by two parents is present under both.
+    assert(got[0].tags.length == 1 && got[0].tags[0].name == "shared");
+    assert(got[1].tags.length == 1 && got[1].tags[0].name == "shared");
+
+    // Prefetch over zero parents must not blow up.
+    auto none = pRepo.query().where!"name"("nobody")
+                     .prefetch!"invoices"().prefetch!"tags"().all();
+    assert(none.length == 0);
+
+    c.exec(`DROP TABLE IF EXISTS pf_partner_tag`);
+    c.exec(`DROP TABLE IF EXISTS pf_invoice`);
+    c.exec(`DROP TABLE IF EXISTS pf_tag`);
+    c.exec(`DROP TABLE IF EXISTS pf_partner`);
+}
