@@ -13,26 +13,8 @@
   * must not be moved while a repository refers to it. Build repositories where
   * you use them rather than storing them in long-lived structures.
   *
-  * Example — extend with custom queries:
-  * ---
-  * struct PartnerRepo {
-  *     private Connection* _ctx;
-  *     mixin CRUDMixin!(Partner, Connection);
-  *
-  *     Partner[] findActive() {
-  *         return _ctx.execParams(
-  *             "SELECT " ~ buildSelectList!Partner() ~ " FROM res_partner WHERE active = $1",
-  *             true).as!(Partner[]);
-  *     }
-  * }
-  * ---
-  *
-  * Example — direct use:
-  * ---
-  * auto repo = Repository!(Partner, Connection)(&conn);
-  * auto all  = repo.findAll();
-  * auto one  = repo.findById(42);
-  * ---
+  * See CRUDMixin for a worked example of the host-struct pattern, and
+  * Repository for the ready-made form.
   **/
 module peque.orm.repository;
 
@@ -403,6 +385,42 @@ if (isModel!M && isQueryContext!Ctx) {
         import peque.orm.queryset: QuerySet;
         return QuerySet!(M, Ctx)(_ctx);
     }
+}
+
+
+/// The host-struct contract: a `private Ctx* _ctx` field before the mixin.
+unittest {
+    import peque.connection: Connection;
+    import peque.model: model, field, primaryKey;
+
+    static @model("doc_crud_partner") struct Partner {
+        @primaryKey int    id;
+        @field      string name;
+        @field      bool   active;
+    }
+
+    // Extend the generated CRUD with your own queries.
+    static struct PartnerRepo {
+        private Connection* _ctx;
+        mixin CRUDMixin!(Partner, Connection);
+
+        Partner[] findActive() {
+            return _ctx.execParams(
+                "SELECT " ~ buildSelectList!Partner() ~
+                " FROM doc_crud_partner WHERE active = $1",
+                true).as!(Partner[]);
+        }
+    }
+    static assert(is(PartnerRepo));
+    static assert(__traits(hasMember, PartnerRepo, "findAll"));
+    static assert(__traits(hasMember, PartnerRepo, "findActive"));
+
+    // Or use the ready-made struct.
+    static assert(is(Repository!(Partner, Connection)));
+
+    // Omitting the _ctx field fails to compile — the mixin body references it
+    // directly. Not asserted here: a mixin-template error escapes
+    // __traits(compiles), so the check would fail the build rather than pass.
 }
 
 

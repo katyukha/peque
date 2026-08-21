@@ -448,6 +448,100 @@ PartnerSummary[] summaries = repo.query()
     .select!PartnerSummary();
 ```
 
+### Relations
+
+Relations are declared with UDAs and loaded explicitly — peque never fetches a
+relation you did not ask for, so there is no lazy-loading N+1 surprise.
+
+```d
+@model("res_partner")
+struct Partner {
+    @primaryKey int       id;
+    @field      string    name;
+
+    // Inverse side of Invoice.partnerId. No column of its own; filled by
+    // prefetch!, empty otherwise.
+    @one2many!(Invoice, "partnerId") Invoice[] invoices;
+
+    // Many-to-many through a junction table.
+    @many2many!(Tag, "partner_tag_rel", "partner_id", "tag_id") Tag[] tags;
+}
+
+@model("account_invoice")
+struct Invoice {
+    @primaryKey           int              id;
+    @field                string           number;
+
+    // The foreign key itself — an ordinary column.
+    @many2one!(Partner)   Nullable!int     partnerId;
+
+    // The object it points at. Not a column; filled by load!.
+    @related              Nullable!Partner partner;
+}
+```
+
+| UDA | Side | Column? | Filled by |
+|---|---|---|---|
+| `@many2one!(T)` | many | yes — the FK | always (it is a column) |
+| `@related` | many | no | `load!` / `joinOne!` |
+| `@one2many!(T, "fk")` | one | no | `prefetch!` |
+| `@many2many!(T, junction, selfKey, targetKey)` | — | no | `prefetch!` |
+
+#### `load!` — one query, LEFT JOIN
+
+`load!"field"` adds a `LEFT JOIN` and hydrates the `@related` object in the same
+round trip. Use it for to-one relations.
+
+```d
+auto invoices = invoiceRepo.query()
+    .load!"partner"()
+    .where!"number"("INV-001")
+    .all();
+
+// invoices[0].partner is populated; .isNull when the FK is NULL
+```
+
+Because it is a `LEFT JOIN`, rows with a NULL foreign key are still returned —
+their `@related` field is simply null. Relation paths in `where` and `orderBy`
+work whether or not you called `load!`; peque adds whatever join the predicate
+needs:
+
+```d
+invoiceRepo.query().where(F!"partner.name"("Acme")).all();
+invoiceRepo.query().orderBy(F!"partner.name".asc).all();
+```
+
+If a model has two foreign keys to the same table, each `@related` must name its
+backing field, or the join is ambiguous and peque rejects it at compile time:
+
+```d
+@many2one!(Partner)           Nullable!int     invoiceAddressId;
+@related("invoiceAddressId")  Nullable!Partner invoiceAddress;
+
+@many2one!(Partner)           Nullable!int     deliveryAddressId;
+@related("deliveryAddressId") Nullable!Partner deliveryAddress;
+```
+
+#### `prefetch!` — a second query, no row multiplication
+
+To-many relations cannot be joined without duplicating parent rows, so
+`prefetch!` runs one extra query after the main one and stitches the results
+together — two queries total, regardless of how many parents matched.
+
+```d
+auto partners = partnerRepo.query()
+    .where!"active"(true)
+    .prefetch!"invoices"()
+    .prefetch!"tags"()
+    .all();
+
+// partners[0].invoices and .tags are filled
+```
+
+The order of prefetched children is **undefined** — no `ORDER BY` is emitted and
+the child model's `@defaultOrder` is not applied. Sort the array yourself if it
+matters.
+
 ### Aggregation
 
 Scalar aggregates run through `aggregate!()` with a typed field builder.

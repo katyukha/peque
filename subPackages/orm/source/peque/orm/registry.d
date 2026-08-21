@@ -77,16 +77,46 @@ struct Bind(M, alias RepoTpl) if (isModel!M) {}
 
 /** Compile-time registry of model→repository bindings.
   *
-  * Pass Bind!(M, RepoTpl) instances as template arguments:
-  * ---
-  * alias AppRegistry = Registry!(
-  *     Bind!(Partner, ModelRepo!Partner),
-  *     Bind!(Order,   OrderRepo),
-  * );
-  * ---
+  * Pass Bind!(M, RepoTpl) instances as template arguments.
   **/
 struct Registry(Bindings...) {
     alias _bindings = Bindings;
+}
+
+/// Composing a registry and looking a model up in it.
+unittest {
+    import peque.connection: Connection;
+    import peque.model: model, field, primaryKey;
+
+    static @model("doc_reg_partner") struct Partner {
+        @primaryKey int    id;
+        @field      string name;
+    }
+    static @model("doc_reg_order") struct Order {
+        @primaryKey int    id;
+        @field      string code;
+    }
+
+    alias AppRegistry = Registry!(
+        Bind!(Partner, ModelRepo!Partner),
+        Bind!(Order,   ModelRepo!Order),
+    );
+
+    // The lookup is resolved entirely at compile time.
+    static assert(__traits(isSame, RegistryRepoFor!(AppRegistry, Partner),
+                                   ModelRepo!Partner));
+
+    // D cannot chain ! instantiations, so resolve the lookup into an alias
+    // first, then instantiate it with the context type.
+    alias RepoTpl = RegistryRepoFor!(AppRegistry, Partner);
+    static assert(is(RepoTpl!Connection));
+
+    // A model that was never bound is a compile-time error, not a runtime one.
+    static @model("doc_reg_unbound") struct Unbound {
+        @primaryKey int id;
+        @field      string name;
+    }
+    static assert(!__traits(compiles, RegistryRepoFor!(AppRegistry, Unbound)));
 }
 
 
@@ -97,12 +127,8 @@ struct Registry(Bindings...) {
 /** Return the repository template bound to model M in registry Reg.
   *
   * Compile-time error if M is not registered or appears more than once.
-  *
-  * Example:
-  * ---
-  * alias RepoTpl = RegistryRepoFor!(AppRegistry, Partner);
-  * auto repo = RepoTpl!Connection(&conn);
-  * ---
+  * See the Registry example for usage — note that D cannot chain `!`
+  * instantiations, so the lookup must be resolved into an alias first.
   **/
 template RegistryRepoFor(Reg, M) if (isModel!M) {
     // CTFE AA lookup: avoids recursive template instantiation that Filter! would cause.

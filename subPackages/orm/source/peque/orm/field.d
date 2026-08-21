@@ -455,6 +455,35 @@ Predicate exists(M)(Predicate inner) {
 // Type-free F and SF — no explicit model type required
 // ---------------------------------------------------------------------------
 
+/// Building predicates and order terms with the type-free form.
+unittest {
+    import peque.orm.predicate: serializePredicate;
+    import peque.orm.ordering: OrderDir;
+
+    // Plain field: resolved by camelToSnake against the main table. The
+    // reference is always qualified with the table alias, which is why the
+    // column name needs no quoting here even for a reserved word.
+    auto p = F!"status"("active");
+    assert(serializePredicate(p).sql == "_m.status = $1");
+
+    // A dotted path is left unresolved here — QuerySet resolves it against the
+    // model at SQL-build time, adding the LEFT JOINs it needs.
+    static assert(is(typeof(F!"partner.name") == PathBuilder!"partner.name"));
+    static assert(is(typeof(F!"partner.company.rate") == PathBuilder!"partner.company.rate"));
+
+    // Column-to-column comparison binds no parameter.
+    auto cmp = F!"invoiceId".ne(F!"orderId");
+    assert(serializePredicate(cmp).params.length == 0);
+
+    // Order terms.
+    assert(F!"partner.name".asc.dir == OrderDir.asc);
+    assert(F!"partner.name".desc.dir == OrderDir.desc);
+
+    // At most two relation segments are supported; deeper paths are rejected
+    // at compile time rather than emitting a schema-qualified name.
+    static assert(!__traits(compiles, F!"a.b.c.d"));
+}
+
 private bool _pathHasDot(string s) pure nothrow @safe @nogc {
     foreach (c; s) if (c == '.') return true;
     return false;
@@ -474,15 +503,6 @@ private size_t _pathDotCount(string s) pure nothrow @safe @nogc {
   * For join paths (one or two dots): returns a PathBuilder that carries the
   * unresolved path. The QuerySet resolves it against the model at SQL-build time,
   * adding implicit LEFT JOINs as needed.
-  *
-  * Usage:
-  * ---
-  * repo.query().where(F!"status"("active"))          // plain field
-  * repo.query().where(F!"partner.name"("Acme"))      // 1-level join, implicit JOIN
-  * repo.query().where(F!"partner.company.rate"(5))   // 2-level join, implicit JOINs
-  * repo.query().where(F!"invoiceId".ne(F!"orderId")) // column-to-column !=
-  * repo.query().orderBy(F!"partner.name".asc)        // join path in ORDER BY
-  * ---
   *
   * Note: plain-field resolution uses camelToSnake without model validation.
   * Typos in field names become runtime PostgreSQL errors rather than compile-time

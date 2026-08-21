@@ -171,3 +171,119 @@ unittest {
     static assert(ddl.canFind(`"check" TEXT`), ddl);
     static assert(ddl.canFind(`"end" INTEGER`), ddl);
 }
+
+
+// --- README: "Relations" ----------------------------------------------------
+
+@model("doc_tag")
+struct Tag {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("doc_res_partner")
+struct RelPartner {
+    @primaryKey int       id;
+    @field      string    name;
+    @field      bool      active;
+
+    @one2many!(RelInvoice, "partnerId") RelInvoice[] invoices;
+    @many2many!(Tag, "doc_partner_tag_rel", "partner_id", "tag_id") Tag[] tags;
+}
+
+@model("doc_account_invoice")
+struct RelInvoice {
+    @primaryKey           int                 id;
+    @field                string              number;
+    @many2one!(RelPartner) Nullable!int       partnerId;
+    @related              Nullable!RelPartner partner;
+}
+
+// Two FKs to the same table: each @related must name its backing field.
+@model("doc_shipment")
+struct Shipment {
+    @primaryKey                   int                 id;
+    @field                        string              code;
+    @many2one!(RelPartner)        Nullable!int        invoiceAddressId;
+    @related("invoiceAddressId")  Nullable!RelPartner invoiceAddress;
+    @many2one!(RelPartner)        Nullable!int        deliveryAddressId;
+    @related("deliveryAddressId") Nullable!RelPartner deliveryAddress;
+}
+
+alias RelReg = Registry!(
+    Bind!(Tag,        ModelRepo!Tag),
+    Bind!(RelPartner, ModelRepo!RelPartner),
+    Bind!(RelInvoice, ModelRepo!RelInvoice),
+    Bind!(Shipment,   ModelRepo!Shipment),
+);
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS doc_partner_tag_rel`);
+    c.exec(`DROP TABLE IF EXISTS doc_shipment`);
+    c.exec(`DROP TABLE IF EXISTS doc_account_invoice`);
+    c.exec(`DROP TABLE IF EXISTS doc_res_partner`);
+    c.exec(`DROP TABLE IF EXISTS doc_tag`);
+    c.exec(schemaSQL!RelReg());
+    c.exec(`CREATE TABLE doc_partner_tag_rel (
+                partner_id int REFERENCES doc_res_partner(id),
+                tag_id     int REFERENCES doc_tag(id))`);
+
+    auto partnerRepo = Repository!(RelPartner, Connection)(&c);
+    auto invoiceRepo = Repository!(RelInvoice, Connection)(&c);
+    auto tagRepo     = Repository!(Tag, Connection)(&c);
+
+    RelPartner acme; acme.name = "Acme"; acme.active = true;
+    auto saved = partnerRepo.insert(acme);
+    auto tagSeed = Tag(0, "vip");           // insert takes ref M, so an lvalue
+    auto tag     = tagRepo.insert(tagSeed);
+    c.execParams(`INSERT INTO doc_partner_tag_rel VALUES ($1, $2)`, saved.id, tag.id);
+
+    RelInvoice inv; inv.number = "INV-001"; inv.partnerId = saved.id.nullable;
+    invoiceRepo.insert(inv);
+    RelInvoice orphan; orphan.number = "INV-ORPHAN";   // NULL FK
+    invoiceRepo.insert(orphan);
+
+    // load! — one query, LEFT JOIN
+    auto invoices = invoiceRepo.query()
+        .load!"partner"()
+        .where!"number"("INV-001")
+        .all();
+    assert(invoices.length == 1);
+    assert(!invoices[0].partner.isNull);
+    assert(invoices[0].partner.get.name == "Acme");
+
+    // LEFT JOIN, so a NULL FK still yields the row with a null relation.
+    auto all = invoiceRepo.query().load!"partner"().all();
+    assert(all.length == 2, "LEFT JOIN must keep the NULL-FK row");
+
+    // Relation paths work with or without load!
+    assert(invoiceRepo.query().where(F!"partner.name"("Acme")).all().length == 1);
+    assert(invoiceRepo.query().orderBy(F!"partner.name".asc).all().length == 2);
+
+    // prefetch! — a second query, no row multiplication
+    auto partners = partnerRepo.query()
+        .where!"active"(true)
+        .prefetch!"invoices"()
+        .prefetch!"tags"()
+        .all();
+    assert(partners.length == 1);
+    assert(partners[0].invoices.length == 1);
+    assert(partners[0].tags.length == 1);
+    assert(partners[0].tags[0].name == "vip");
+
+    // Two FKs to one table, disambiguated by @related("field").
+    auto shipRepo = Repository!(Shipment, Connection)(&c);
+    Shipment sh; sh.code = "SH-1";
+    sh.invoiceAddressId  = saved.id.nullable;
+    sh.deliveryAddressId = saved.id.nullable;
+    shipRepo.insert(sh);
+    auto ships = shipRepo.query().load!"invoiceAddress"().all();
+    assert(ships.length == 1 && !ships[0].invoiceAddress.isNull);
+
+    c.exec(`DROP TABLE IF EXISTS doc_partner_tag_rel`);
+    c.exec(`DROP TABLE IF EXISTS doc_shipment`);
+    c.exec(`DROP TABLE IF EXISTS doc_account_invoice`);
+    c.exec(`DROP TABLE IF EXISTS doc_res_partner`);
+    c.exec(`DROP TABLE IF EXISTS doc_tag`);
+}
