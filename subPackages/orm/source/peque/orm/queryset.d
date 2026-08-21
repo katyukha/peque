@@ -184,11 +184,7 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                     if (pks.length == 0) return;
 
                     // Build IN placeholders: $1, $2, ...
-                    string placeholders;
-                    foreach (i; 0 .. pks.length) {
-                        if (i > 0) placeholders ~= ", ";
-                        placeholders ~= "$" ~ to!string(i + 1);
-                    }
+                    immutable placeholders = buildPlaceholderList(pks.length);
 
                     // FK column on TargetM — resolve from the named invField directly
                     // (the field may have @field or @many2one UDA; either is valid)
@@ -236,11 +232,7 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                     }
                     if (pks.length == 0) return;
 
-                    string placeholders;
-                    foreach (i; 0 .. pks.length) {
-                        if (i > 0) placeholders ~= ", ";
-                        placeholders ~= "$" ~ to!string(i + 1);
-                    }
+                    immutable placeholders = buildPlaceholderList(pks.length);
 
                     enum targetPkCol = ormPkColName!TargetM();
                     // Qualify target columns with alias `t`: the junction table
@@ -1125,20 +1117,30 @@ if (isModel!M && isQueryContext!Ctx) {
         return _resolveOrderTerms!(M, JoinFields)(terms, fjoins, idx);
     }
 
+    /** One LEFT JOIN onto the table behind a @related field.
+      *
+      * Every join peque emits from a @related field goes through here — the
+      * hydration joins (j0…), select!DTO's implicit joins (dj0…) and the
+      * grouped select all share it, so the ON clause and the missing-FK check
+      * cannot drift apart between them. Runtime filter joins are built from
+      * resolved _FilterJoin values instead; see _filterJoinSQL.
+      **/
+    package(peque.orm) static string _relJoinSQL(string relField, string aliasName)() {
+        alias RelType = _innerRelType!(M, relField);
+        enum _relTbl = ormTableName!RelType;
+        enum _relPk  = ormPkColName!RelType();
+        enum _fkCol  = _fkColForRelatedField!(M, relField, RelType)();
+        static assert(_fkCol.length > 0,
+            "No @many2one!(" ~ RelType.stringof ~ ") field found on " ~ M.stringof);
+        return " LEFT JOIN " ~ _relTbl ~ " " ~ aliasName ~
+               " ON " ~ aliasName ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
+    }
+
     // LEFT JOIN fragment for the hydration joins (JoinFields) — compile-time.
-    private static string _hydrationJoinSQL() {
+    package(peque.orm) static string _hydrationJoinSQL() {
         string s;
-        static foreach (idx, jf; JoinFields) {{
-            alias RelType = _innerRelType!(M, jf);
-            enum _jAlias = "j" ~ to!string(idx);
-            enum _relTbl = ormTableName!RelType;
-            enum _relPk  = ormPkColName!RelType();
-            enum _fkCol  = _fkColForRelatedField!(M, jf, RelType)();
-            static assert(_fkCol.length > 0,
-                "No @many2one!(" ~ RelType.stringof ~ ") field found on " ~ M.stringof);
-            s ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _jAlias ~
-                 " ON " ~ _jAlias ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
-        }}
+        static foreach (idx, jf; JoinFields)
+            s ~= _relJoinSQL!(jf, "j" ~ to!string(idx));
         return s;
     }
 
@@ -1567,36 +1569,10 @@ if (isModel!M && isQueryContext!Ctx) {
             }
         }}
 
-        // Build FROM + explicit JoinField JOINs
-        string fromClause = " FROM " ~ ormTableName!M ~ " _m";
-        static foreach (jfIdx2, jf; JoinFields) {{
-            alias RelType = _innerRelType!(M, jf);
-            enum _jAlias = "j" ~ to!string(jfIdx2);
-            enum _relTbl = ormTableName!RelType;
-            enum _relPk  = ormPkColName!RelType();
-            enum _fkCol  = _fkColForRelatedField!(M, jf, RelType)();
-            fromClause ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _jAlias ~
-                          " ON " ~ _jAlias ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
-        }}
-
-        // Implicit DTO joins (dj0, dj1, …)
-        static foreach (ni; 0 .. nRels) {{
-            enum rn = neededRelNames[ni];
-            static foreach (memberName; FieldNameTuple!M) {{
-                alias Mem = __traits(getMember, M, memberName);
-                static if (hasUDA!(Mem, related)) {
-                    static if (memberName == rn) {
-                        alias RelType = _innerRelType!(M, memberName);
-                        enum _djAlias = "dj" ~ to!string(ni);
-                        enum _relTbl  = ormTableName!RelType;
-                        enum _relPk   = ormPkColName!RelType();
-                        enum _fkCol   = _fkColForRelatedField!(M, memberName, RelType)();
-                        fromClause ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _djAlias ~
-                                      " ON " ~ _djAlias ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
-                    }
-                }
-            }}
-        }}
+        // FROM + hydration joins (j0…) + the implicit joins the DTO needs (dj0…)
+        string fromClause = " FROM " ~ ormTableName!M ~ " _m" ~ _hydrationJoinSQL();
+        static foreach (ni; 0 .. nRels)
+            fromClause ~= _relJoinSQL!(neededRelNames[ni], "dj" ~ to!string(ni));
 
         // Runtime filter joins from WHERE predicates
         fromClause ~= _filterJoinSQL(fjoins);
@@ -1827,18 +1803,9 @@ if (is(QS == QuerySet!Args, Args...)) {
         foreach (ref p; _havings)
             resolvedHavings ~= _resolvePred!(M, JoinFields)(p, fjoins, fjIdx);
 
-        // FROM + explicit JoinField JOINs (j0, j1, …) + runtime filter joins
-        string fromClause = " FROM " ~ ormTableName!M ~ " _m";
-        static foreach (jfIdx2, jf; JoinFields) {{
-            alias RelType = _innerRelType!(M, jf);
-            enum _jAlias = "j" ~ to!string(jfIdx2);
-            enum _relTbl = ormTableName!RelType;
-            enum _relPk  = ormPkColName!RelType();
-            enum _fkCol  = _fkColForRelatedField!(M, jf, RelType)();
-            fromClause ~= " LEFT JOIN " ~ _relTbl ~ " " ~ _jAlias ~
-                          " ON " ~ _jAlias ~ "." ~ _relPk ~ " = _m." ~ _fkCol;
-        }}
-        fromClause ~= _filterJoinSQL(fjoins);
+        // FROM + hydration joins (j0, j1, …) + runtime filter joins
+        string fromClause = " FROM " ~ ormTableName!M ~ " _m" ~
+                            QS._hydrationJoinSQL() ~ _filterJoinSQL(fjoins);
 
         // WHERE params first, HAVING params numbered after them
         string whereSQL;

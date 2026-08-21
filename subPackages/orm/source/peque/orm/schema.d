@@ -327,6 +327,36 @@ private string _tryBuildFieldIndex(alias uda, UDAType,
         return "";
 }
 
+// Emit one CREATE INDEX for a model-level @indexTogether / @uniqueIndexTogether,
+// in either spelling. Mirrors _tryBuildFieldIndex: the type-value form
+// (@UDAType!(cols)) carries no where/name, the instance form (@UDAType!(cols)(…))
+// reads both. Returns "" when `uda` is not of that template.
+private string _tryBuildTogetherIndex(alias uda, alias UDATemplate,
+                                      bool isUnique, string prefix, string table)(
+                                      out string idxName) {
+    static if (is(uda) && __traits(isSame, TemplateOf!uda, UDATemplate)) {
+        idxName = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
+        return _buildOneIndex(isUnique, "btree", _sqlIdent(table),
+                              _joinQuoted(uda.columns), "", idxName);
+    } else static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
+                      __traits(isSame, TemplateOf!(typeof(uda)), UDATemplate)) {
+        enum derived = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
+        idxName = uda.name.length ? uda.name : derived;
+        return _buildOneIndex(isUnique, "btree", _sqlIdent(table),
+                              _joinQuoted(uda.columns), uda.where, idxName);
+    } else {
+        idxName = "";
+        return "";
+    }
+}
+
+// Quote each column and join with ", " for an index column list.
+private string _joinQuoted(string[] cols) pure {
+    string r;
+    foreach (i, c; cols) { if (i) r ~= ", "; r ~= _sqlIdent(c); }
+    return r;
+}
+
 // True when `uda` is one of the field-level index UDAs, in either spelling.
 private template _isFieldIndexUDA(alias uda) {
     private template _m(UDAType) {
@@ -379,38 +409,13 @@ private string _buildIndexSQL(M)() {
         }
     }}
 
-    // Model-level: @indexTogether and @uniqueIndexTogether.
-    // Two branches per template: type-as-value (where="") and instance (where=uda.where).
+    // Model-level: @indexTogether and @uniqueIndexTogether, either spelling.
     static foreach (uda; __traits(getAttributes, M)) {{
-        static if (is(uda) && __traits(isSame, TemplateOf!uda, indexTogether)) {
-            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= _sqlIdent(c); }
-            enum _n = "idx_" ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
-            result ~= _buildOneIndex(false, "btree", _sqlIdent(table), _cols, "", _n);
-            names  ~= _n;
-        }
-        static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
-                   __traits(isSame, TemplateOf!(typeof(uda)), indexTogether)) {
-            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= _sqlIdent(c); }
-            enum _d = "idx_" ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
-            string _n = uda.name.length ? uda.name : _d;
-            result ~= _buildOneIndex(false, "btree", _sqlIdent(table), _cols, uda.where, _n);
-            names  ~= _n;
-        }
-
-        static if (is(uda) && __traits(isSame, TemplateOf!uda, uniqueIndexTogether)) {
-            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= _sqlIdent(c); }
-            enum _n = "uniq_" ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
-            result ~= _buildOneIndex(true, "btree", _sqlIdent(table), _cols, "", _n);
-            names  ~= _n;
-        }
-        static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
-                   __traits(isSame, TemplateOf!(typeof(uda)), uniqueIndexTogether)) {
-            string _cols; static foreach (c; uda.columns) { if (_cols.length) _cols ~= ", "; _cols ~= _sqlIdent(c); }
-            enum _d = "uniq_" ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
-            string _n = uda.name.length ? uda.name : _d;
-            result ~= _buildOneIndex(true, "btree", _sqlIdent(table), _cols, uda.where, _n);
-            names  ~= _n;
-        }
+        string _n;
+        result ~= _tryBuildTogetherIndex!(uda, indexTogether, false, "idx_", table)(_n);
+        names  ~= _n;
+        result ~= _tryBuildTogetherIndex!(uda, uniqueIndexTogether, true, "uniq_", table)(_n);
+        names  ~= _n;
     }}
 
     foreach (i, a; names) {

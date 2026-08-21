@@ -125,13 +125,23 @@ if (isModel!M && isQueryContext!Ctx) {
     private enum _crudDelSQL     = "DELETE FROM " ~ _crudTable ~
                                    " WHERE " ~ _crudPk ~ " = $1";
     // upsert-by-PK SQL: used when caller provides an explicit PK value.
+    /** INSERT … ON CONFLICT … DO UPDATE, shared by every upsert form.
+      *
+      * withPk decides whether the primary key is part of the INSERT column
+      * list: it is when the caller supplied one, and omitted when the database
+      * should assign it. Called in enum context, so this is pure CTFE.
+      **/
+    private static string _upsertSQL(bool withPk)(string conflictCols, string setClause) {
+        return "INSERT INTO " ~ _crudTable ~
+               " (" ~ (withPk ? _crudPk ~ ", " : "") ~ buildInsertColList!M() ~ ")" ~
+               " VALUES (" ~ buildInsertPlaceholders!(M, withPk)() ~ ")" ~
+               " ON CONFLICT (" ~ conflictCols ~ ") DO UPDATE SET " ~ setClause ~
+               " RETURNING " ~ _crudSel;
+    }
+
+    // Conflict on the primary key — used when the caller provided a PK value.
     private enum _crudUpsertByPkSQL =
-        "INSERT INTO " ~ _crudTable ~
-        " (" ~ _crudPk ~ ", " ~ buildInsertColList!M() ~ ")" ~
-        " VALUES (" ~ buildInsertPlaceholders!(M, true)() ~ ")" ~
-        " ON CONFLICT (" ~ _crudPk ~ ") DO UPDATE SET " ~
-        _buildExcludedSetClause!M() ~
-        " RETURNING " ~ _crudSel;
+        _upsertSQL!true(_crudPk, _buildExcludedSetClause!M());
 
     /** Return all rows as M[], with optional ORDER BY.
       *
@@ -297,23 +307,13 @@ if (isModel!M && isQueryContext!Ctx) {
 
         if (pkVal == typeof(pkVal).init) {
             // PK not set — exclude from INSERT, let DB assign
-            enum _sql = "INSERT INTO " ~ _crudTable ~
-                        " (" ~ buildInsertColList!M() ~ ")" ~
-                        " VALUES (" ~ buildInsertPlaceholders!M() ~ ")" ~
-                        " ON CONFLICT (" ~ _conflictCols ~ ") DO UPDATE SET " ~
-                        _setCl ~
-                        " RETURNING " ~ _crudSel;
+            enum _sql = _upsertSQL!false(_conflictCols, _setCl);
             return mixin(
                 `_ctx.execParams(_sql, ` ~ buildInsertValueExpr!M() ~ `)`
             ).getRow(0).as!M;
         } else {
             // PK set — include in INSERT; never overwrite existing PK on conflict
-            enum _sqlPk = "INSERT INTO " ~ _crudTable ~
-                          " (" ~ _crudPk ~ ", " ~ buildInsertColList!M() ~ ")" ~
-                          " VALUES (" ~ buildInsertPlaceholders!(M, true)() ~ ")" ~
-                          " ON CONFLICT (" ~ _conflictCols ~ ") DO UPDATE SET " ~
-                          _setCl ~
-                          " RETURNING " ~ _crudSel;
+            enum _sqlPk = _upsertSQL!true(_conflictCols, _setCl);
             return mixin(
                 `_ctx.execParams(_sqlPk, ` ~ buildInsertValueExpr!(M, true)() ~ `)`
             ).getRow(0).as!M;

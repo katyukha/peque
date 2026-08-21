@@ -131,30 +131,25 @@ unittest {
   * instantiations, so the lookup must be resolved into an alias first.
   **/
 template RegistryRepoFor(Reg, M) if (isModel!M) {
-    // CTFE AA lookup: avoids recursive template instantiation that Filter! would cause.
-    // Build a mangleof→index map in one static foreach pass, then do an O(1) AA lookup.
-    private size_t _findIndex() {
-        size_t[string] lookup;
+    // One CTFE pass collects both the index and the match count. A direct
+    // static foreach rather than Filter!, which would recurse once per binding.
+    private struct _Hit { size_t idx = size_t.max; size_t count; }
+
+    private _Hit _findBinding() {
+        _Hit hit;
         static foreach (i, B; Reg._bindings) {{
             static if (is(B == Bind!(BM, RepoTpl), BM, alias RepoTpl))
-                lookup[BM.mangleof] = i;
+                if (BM.mangleof == M.mangleof) {
+                    if (hit.count == 0) hit.idx = i;
+                    hit.count++;
+                }
         }}
-        auto p = M.mangleof in lookup;
-        return p ? *p : size_t.max;
+        return hit;
     }
 
-    // Duplicate detection: count occurrences of M across all bindings.
-    private size_t _countMatches() {
-        size_t n = 0;
-        static foreach (i, B; Reg._bindings) {{
-            static if (is(B == Bind!(BM, RepoTpl), BM, alias RepoTpl))
-                if (BM.mangleof == M.mangleof) n++;
-        }}
-        return n;
-    }
-
-    enum _idx = _findIndex();
-    enum _cnt = _countMatches();
+    private enum _hit = _findBinding();
+    enum _idx = _hit.idx;
+    enum _cnt = _hit.count;
 
     static assert(_cnt >= 1,
         "No binding found for " ~ M.stringof ~ " in " ~ Reg.stringof ~

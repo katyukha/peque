@@ -295,6 +295,20 @@ size_t countNonPkFields(M)() {
     return _nonPkCols!M.length;
 }
 
+/** Comma-separated placeholder list: "$1, $2, $3".
+  *
+  * start is the first placeholder number (1-based), so a caller that has
+  * already bound N parameters passes start = N + 1.
+  **/
+string buildPlaceholderList(size_t count, size_t start = 1) pure {
+    string result;
+    foreach (i; 0 .. count) {
+        if (i > 0) result ~= ", ";
+        result ~= "$" ~ (start + i).to!string;
+    }
+    return result;
+}
+
 /** Build multi-row VALUES placeholders for insertMany.
   *
   * buildMultiRowPlaceholders(3, 2) → "($1,$2,$3), ($4,$5,$6)"

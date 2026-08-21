@@ -30,6 +30,7 @@ module peque.orm.predicate;
 private import std.conv: to;
 private import std.sumtype: SumType, match;
 private import peque.converter: PGValue;
+private import peque.orm.sql: buildPlaceholderList;
 private import peque.exception: NotSupportedError, PequeException, QueryClientError, QueryError;
 private import std.exception: enforce;
 
@@ -190,11 +191,7 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
         (ref InNode n) {
             if (n.values.length == 0)
                 return SerializedPred("FALSE", []);
-            string ph;
-            foreach (i, _; n.values) {
-                if (i > 0) ph ~= ", ";
-                ph ~= "$" ~ to!string(offset + i + 1);
-            }
+            immutable ph = buildPlaceholderList(n.values.length, offset + 1);
             return SerializedPred(n.colExpr ~ " IN (" ~ ph ~ ")", n.values);
         },
         (ref NullNode n)    => SerializedPred(n.colExpr ~ " IS NULL", []),
