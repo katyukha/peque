@@ -35,7 +35,7 @@ struct TjInvoice {
     @primaryKey             int                id;
     @field                  string             name;
     @field                  double             amount;
-    @field("partner_id") @many2one!(TjPartner) Nullable!int partnerId;
+    @many2one!(TjPartner)   Nullable!int       partnerId;
     @related                Nullable!TjPartner partner;
 }
 

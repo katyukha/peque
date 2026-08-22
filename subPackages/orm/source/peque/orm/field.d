@@ -51,6 +51,7 @@ private import peque.orm.predicate;
 private import peque.orm.subquery: SubQuery;
 private import peque.orm.sql: _fieldColName, ormTableName;
 private import peque.orm.ordering: Ordering, OrderKind;
+private import peque.hydration: camelToSnake;
 private import peque.orm.sql: _sqlIdent;
 
 
@@ -539,7 +540,7 @@ unittest {
     import peque.orm.predicate: serializePredicate;
     import peque.orm.ordering: OrderDir;
 
-    // Plain field: the name IS the column on the main table. The
+    // Plain field: camelToSnake of the name, on the main table. The
     // reference is always qualified with the table alias, which is why the
     // column name needs no quoting here even for a reserved word.
     auto p = F!"status"("active");
@@ -576,7 +577,7 @@ private size_t _pathDotCount(string s) pure nothrow @safe @nogc {
 
 /** Type-free field builder — no explicit model type needed.
   *
-  * For plain fields (no dot): the name IS the column, returns a
+  * For plain fields (no dot): converted to the column name, returns a
   * concrete FieldBuilder with "_m." prefix identical to F!(M, "field").
   *
   * For join paths (one or two dots): returns a PathBuilder that carries the
@@ -596,15 +597,15 @@ template F(string path) {
     static if (_pathHasDot(path)) {
         enum PathBuilder!path F = PathBuilder!path.init;
     } else {
-        enum FieldBuilder!("_m." ~ _sqlIdent(path)) F =
-            FieldBuilder!("_m." ~ _sqlIdent(path)).init;
+        enum FieldBuilder!("_m." ~ _sqlIdent(camelToSnake(path))) F =
+            FieldBuilder!("_m." ~ _sqlIdent(camelToSnake(path))).init;
     }
 }
 
 /** Type-free subquery field builder for use inside exists!() predicates.
   *
   * Returns a FieldBuilder with "_sq." prefix — no model type validation.
-  * The name given IS the column name.
+  * The name is converted to the column name (camelToSnake).
   *
   * Usage (inside exists!(M)(...)  — M provides the inner table):
   * ---
@@ -615,8 +616,8 @@ template F(string path) {
   * ---
   **/
 template SF(string fieldName) {
-    enum FieldBuilder!("_sq." ~ _sqlIdent(fieldName)) SF =
-        FieldBuilder!("_sq." ~ _sqlIdent(fieldName)).init;
+    enum FieldBuilder!("_sq." ~ _sqlIdent(camelToSnake(fieldName))) SF =
+        FieldBuilder!("_sq." ~ _sqlIdent(camelToSnake(fieldName))).init;
 }
 
 

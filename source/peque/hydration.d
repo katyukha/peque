@@ -25,6 +25,73 @@ private import peque.model: model, field, primaryKey, autoHydrate,
 
 
 // ---------------------------------------------------------------------------
+// camelToSnake
+// ---------------------------------------------------------------------------
+
+/** Convert a camelCase D identifier to snake_case at compile time.
+  *
+  * An underscore is inserted before an uppercase letter that either follows a
+  * lowercase letter or a digit, or begins a new word after a run of capitals —
+  * so a run of capitals stays together: `myURL` is `my_url`, not `my_u_r_l`.
+  *
+  * Examples:
+  * ---
+  * static assert(camelToSnake("createdAt")  == "created_at");
+  * static assert(camelToSnake("myURL")      == "my_url");
+  * static assert(camelToSnake("HTTPServer") == "http_server");
+  * ---
+  *
+  * Override with `@field("col")` whenever the result is not the column you want.
+  **/
+string camelToSnake(string s) @safe pure nothrow {
+    import std.ascii: isUpper, isLower, isDigit, toLower;
+
+    string result;
+    foreach (size_t i, char c; s) {
+        if (isUpper(c) && i > 0) {
+            // A capital starts a new word when the previous character was not
+            // itself a capital, or when the NEXT one is lowercase — that is the
+            // last capital of a run, and so the first letter of the next word
+            // (the S in HTTPServer).
+            immutable prevIsPartOfRun = isUpper(s[i - 1]);
+            immutable startsNextWord  = i + 1 < s.length && isLower(s[i + 1]);
+            if (!prevIsPartOfRun || startsNextWord)
+                result ~= '_';
+        }
+        result ~= toLower(c);
+    }
+    return result;
+}
+
+///
+unittest {
+    // The ordinary cases.
+    static assert(camelToSnake("id")          == "id");
+    static assert(camelToSnake("name")        == "name");
+    static assert(camelToSnake("createdAt")   == "created_at");
+    static assert(camelToSnake("partnerId")   == "partner_id");
+    static assert(camelToSnake("emailAddress")== "email_address");
+
+    // Runs of capitals stay together.
+    static assert(camelToSnake("myURL")           == "my_url");
+    static assert(camelToSnake("HTTPServer")      == "http_server");
+    static assert(camelToSnake("HTTPSConnection") == "https_connection");
+    static assert(camelToSnake("myURLPath")       == "my_url_path");
+    static assert(camelToSnake("ID")              == "id");
+    static assert(camelToSnake("apiKey")          == "api_key");
+    static assert(camelToSnake("jsonData")        == "json_data");
+
+    // A digit ends a word too.
+    static assert(camelToSnake("line2Name") == "line2_name");
+    static assert(camelToSnake("address2")  == "address2");
+
+    // Already snake_case, or a single word, passes through.
+    static assert(camelToSnake("created_at") == "created_at");
+    static assert(camelToSnake("uuid")       == "uuid");
+}
+
+
+// ---------------------------------------------------------------------------
 // hydrateRow — public entry point
 // ---------------------------------------------------------------------------
 
@@ -119,7 +186,7 @@ package(peque) T _hydrateAnnotated(T, string colPrefix = "")(ref ResultRow row) 
 }
 
 
-/** Hydrate every field from the column of the same name.
+/** Hydrate every field from its column, resolved like the annotated path.
   * Silently skips fields whose columns are absent from the result.
   **/
 private T _hydrateConvention(T)(ref ResultRow row) {
@@ -146,13 +213,13 @@ private T _hydrateConvention(T)(ref ResultRow row) {
   *
   * Priority:
   *  1. @field("explicit_name") — use the explicit name
-  *  2. Otherwise — the D member name, verbatim
+  *  2. Otherwise — camelToSnake of the D member name
   *
-  * No implicit case conversion: peque quotes every identifier, so the member
-  * name IS the column name. Write @field("created_at") to address a column
-  * named differently from the member.
+  * This is the single resolver: DDL, CRUD, QuerySet and hydration all go
+  * through it, so a column cannot be named one way when written and another
+  * when read back.
   **/
-private template _resolveColName(alias FieldDecl, string memberName) {
+package(peque) template _resolveColName(alias FieldDecl, string memberName) {
     import std.traits: getUDAs;
     alias _fieldUDAs = getUDAs!(FieldDecl, field);
 
@@ -170,12 +237,12 @@ private template _resolveColName(alias FieldDecl, string memberName) {
     } else static if (_fieldUDAs.length > 0 && !is(_fieldUDAs[0]) &&
                       _fieldUDAs[0].related.length > 0) {
         // @field(related: "rel.field") — a directive for building a query, not
-        // for decoding one: the ORM aliases the path to the member name, and
+        // for decoding one: the ORM aliases the path to this name, and
         // PostgreSQL never returns a dotted column name. Kept as its own branch
         // so the ORM's alias round-trip survives edits to the fallback below.
-        enum _resolveColName = memberName;
+        enum _resolveColName = camelToSnake(memberName);
     } else {
-        // plain @field, @field(), or @primaryKey — the member name itself
-        enum _resolveColName = memberName;
+        // plain @field, @field(), or @primaryKey — the member name converted
+        enum _resolveColName = camelToSnake(memberName);
     }
 }

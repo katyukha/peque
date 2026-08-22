@@ -37,16 +37,18 @@ struct model {
 
 /** Map a struct field to a database column.
   *
-  * Without argument: the column is named exactly like the D member. peque
-  * quotes every identifier, so nothing is derived or case-converted.
+  * Without argument: the column is camelToSnake of the D member name, with
+  * runs of capitals kept whole (`myURL` is `my_url`).
   *
   * With a string argument: use that string as the exact column name — this is
-  * how you address a column whose name differs from the member's.
+  * how you address a column the conversion would not produce, including a
+  * mixed-case one, since peque quotes every identifier.
   *
   * Examples:
   * ---
   * @field                string name;          // column: "name"
-  * @field                string emailAddress;  // column: "emailAddress"
+  * @field                string emailAddress;  // column: "email_address"
+  * @field                string myURL;         // column: "my_url"
   * @field("email_addr")  string email;         // column: "email_addr"
   * ---
   *
@@ -72,8 +74,8 @@ struct field {
 
 /** Mark a field as the primary key.
   *
-  * Behaves like @field for column-name resolution: the member name is the
-  * column name unless combined with @field("col").
+  * Behaves like @field for column-name resolution: camelToSnake of the member
+  * name, unless combined with @field("col").
   *
   * Example:
   * ---
@@ -86,7 +88,7 @@ struct primaryKey {}
 
 /** Enable convention-based struct hydration without explicit @model or @field UDAs.
   *
-  * All public fields are hydrated from columns of exactly the same name.
+  * All public fields are hydrated from their camelToSnake column names.
   * Fields whose columns are absent from the result are silently skipped — they
   * remain at their zero/init value.
   *
@@ -125,8 +127,8 @@ enum OnDelete {
 /** Mark a field as a many-to-one (foreign key) relation.
   *
   * The field holds the integer FK value (always loaded as a real DB column).
-  * The column is named exactly like the D member unless a @field("col") UDA is
-  * also present to override it.
+  * The column is camelToSnake of the D member name unless a @field("col") UDA
+  * is also present to override it.
   *
   * T        = the target model struct.
   * onDelete = ON DELETE behaviour in generated DDL (default: noAction).

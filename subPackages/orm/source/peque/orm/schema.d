@@ -104,7 +104,8 @@ private import peque.model:
     uniqueTogether, checkConstraint,
     index, uniqueIndex, ginIndex, gistIndex, hashIndex,
     indexTogether, uniqueIndexTogether;
-private import peque.orm.sql: ormTableName, ormTableNameRaw, ormPkColName,
+private import peque.hydration: camelToSnake;
+private import peque.orm.sql: _colInfos, ormTableName, ormTableNameRaw, ormPkColName,
     _isColField, _colName, _sqlIdent, _identSlug;
 private import peque.orm.registry: Bind;
 
@@ -242,12 +243,42 @@ private string _buildColDef(M, string memberName)() {
 }
 
 // Build the table-level constraint clauses for model M (UNIQUE, CHECK).
+// Validate a model-level column list (@uniqueTogether / @indexTogether /
+// @uniqueIndexTogether) against M's real columns, at compile time.
+//
+// These UDAs take SQL column names, not D member names — they sit beside raw
+// `where:` clauses that must also be columns. That makes writing the member
+// name the natural slip now that the two differ, and the emitted DDL is
+// perfectly well-formed either way, so nothing complains until PostgreSQL runs
+// it. Suggest the converted name when that is what happened.
+private template _validateColList(M, string udaName, string[] cols) {
+    private static string _knownCols() {
+        string r;
+        foreach (ci; _colInfos!M) { if (r.length) r ~= ", "; r ~= ci.col; }
+        return r;
+    }
+    private static bool _isCol(string name) {
+        foreach (ci; _colInfos!M) if (ci.col == name) return true;
+        return false;
+    }
+    static foreach (col; cols) {
+        static assert(_isCol(col),
+            udaName ~ " on " ~ M.stringof ~ " names '" ~ col ~ "', which is not " ~
+            "a column on it." ~
+            (_isCol(camelToSnake(col)) ? " Did you mean '" ~ camelToSnake(col) ~
+             "'? These UDAs take SQL column names, not D member names." : "") ~
+            " Columns: " ~ _knownCols() ~ ".");
+    }
+    enum _validateColList = true;
+}
+
 private string _buildTableConstraints(M)() {
     string result;
 
     static foreach (uda; __traits(getAttributes, M)) {{
         // @uniqueTogether!("col1", "col2", ...)
         static if (is(uda) && __traits(isSame, TemplateOf!uda, uniqueTogether)) {
+            static assert(_validateColList!(M, "@uniqueTogether", uda.columns));
             string cols;
             static foreach (col; uda.columns) {
                 if (cols.length) cols ~= ", ";
@@ -331,15 +362,19 @@ private string _tryBuildFieldIndex(alias uda, UDAType,
 // in either spelling. Mirrors _tryBuildFieldIndex: the type-value form
 // (@UDAType!(cols)) carries no where/name, the instance form (@UDAType!(cols)(…))
 // reads both. Returns "" when `uda` is not of that template.
-private string _tryBuildTogetherIndex(alias uda, alias UDATemplate,
+private string _tryBuildTogetherIndex(M, alias uda, alias UDATemplate,
                                       bool isUnique, string prefix, string table)(
                                       out string idxName) {
     static if (is(uda) && __traits(isSame, TemplateOf!uda, UDATemplate)) {
+        static assert(_validateColList!(M, "@" ~ __traits(identifier, UDATemplate),
+                                        uda.columns));
         idxName = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
         return _buildOneIndex(isUnique, "btree", _sqlIdent(table),
                               _joinQuoted(uda.columns), "", idxName);
     } else static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
                       __traits(isSame, TemplateOf!(typeof(uda)), UDATemplate)) {
+        static assert(_validateColList!(M, "@" ~ __traits(identifier, UDATemplate),
+                                        uda.columns));
         enum derived = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
         idxName = uda.name.length ? uda.name : derived;
         return _buildOneIndex(isUnique, "btree", _sqlIdent(table),
@@ -412,9 +447,9 @@ private string _buildIndexSQL(M)() {
     // Model-level: @indexTogether and @uniqueIndexTogether, either spelling.
     static foreach (uda; __traits(getAttributes, M)) {{
         string _n;
-        result ~= _tryBuildTogetherIndex!(uda, indexTogether, false, "idx_", table)(_n);
+        result ~= _tryBuildTogetherIndex!(M, uda, indexTogether, false, "idx_", table)(_n);
         names  ~= _n;
-        result ~= _tryBuildTogetherIndex!(uda, uniqueIndexTogether, true, "uniq_", table)(_n);
+        result ~= _tryBuildTogetherIndex!(M, uda, uniqueIndexTogether, true, "uniq_", table)(_n);
         names  ~= _n;
     }}
 

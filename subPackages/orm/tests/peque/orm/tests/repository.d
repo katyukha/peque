@@ -50,7 +50,7 @@ struct Category {
 struct Product {
     @primaryKey          int    id;
     @field               string name;
-    @field("category_id") @many2one!(Category) int categoryId;
+    @many2one!(Category) int    categoryId;   // column: category_id
 }
 
 
@@ -345,7 +345,7 @@ unittest {
 
     auto products = repo.findAll();
     assert(products.length == 2);
-    // categoryId (mapped to category_id by @field) is hydrated from the FK column
+    // categoryId (-> category_id) is hydrated from the FK column
     assert(products[0].categoryId >= 1);
     assert(products[1].categoryId >= 1);
     assert(products[0].categoryId != products[1].categoryId);

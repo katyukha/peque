@@ -13,9 +13,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   constructor, `fromRow` factory, `@model` strict mapping, annotated-fields
   mapping, `@autoHydrate` convention mapping).
 
-  Column names are never derived: a bare `@field` maps to a column of exactly
-  that name, and `@field("col")` names one that differs. Every identifier is
-  emitted quoted, so the name written is the name used, case included.
+  Column names come from one resolver shared by DDL, CRUD, QuerySet and
+  hydration: `camelToSnake` of the D member name, with runs of capitals kept
+  whole (`myURL` is `my_url`), or `@field("col")` for an exact name. Since every
+  identifier is emitted quoted, an explicit name keeps its case, which is how a
+  mixed-case legacy column is addressed. Table names are never derived — `@model`
+  always takes the name, so renaming a struct cannot rename a table.
 
   `@model` marks a *table* — it is what `isModel` requires, so only such a
   struct can enter a `Registry` or back a `Repository`. A struct whose members
@@ -25,10 +28,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **`peque:orm`** — ORM layer providing a compile-time model registry, schema
   generation, QuerySets and CRUD. `select!DTO` projects into a flat struct whose
-  members are columns on the queried table; `@field(related: "partner.name")`
-  projects a value reached through a relation, sharing its `LEFT JOIN` with
-  `where`/`orderBy`/`load!`. Relation paths are validated against the model at
-  compile time.
+  members are columns on the queried table — `@field("col")` included;
+  `@field(related: "partner.name")` projects a value reached through a relation,
+  sharing its `LEFT JOIN` with `where`/`orderBy`/`load!`. Relation paths are
+  validated against the model at compile time, as are the column names in
+  `@uniqueTogether` / `@indexTogether` / `@uniqueIndexTogether` — which take SQL
+  column names, and now say so when given a D member name instead.
 - **`peque:migrate`** — Minimal migration runner infrastructure.
 
 ### Changed

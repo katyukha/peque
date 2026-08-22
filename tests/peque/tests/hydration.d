@@ -363,14 +363,14 @@ private struct M2OParent {
 private struct M2OChildTypeForm {
     @primaryKey            int    id;
     @field                 string code;
-    @field("parent_id") @many2one!(M2OParent)  int parentId;    // type form
+    @many2one!(M2OParent)  int    parentId;    // type form
 }
 
 @model("peque_hydration_m2o_child")
 private struct M2OChildInstanceForm {
     @primaryKey              int    id;
     @field                   string code;
-    @field("parent_id") @many2one!(M2OParent)()  int parentId;  // instance form — same meaning
+    @many2one!(M2OParent)()  int    parentId;  // instance form — same meaning
 }
 
 unittest {
@@ -492,11 +492,11 @@ unittest {
 // @field(related: "rel.field") and hydration
 //
 // A related path is a directive for BUILDING a query, not for decoding one.
-// The ORM selects the path and aliases it to the member name, and PostgreSQL
-// never returns a dotted column name, so at decode time the member name is the
-// column name. These pin that contract from the core side: peque.orm is not
-// involved here, only hand-written SQL, so the ORM's alias round-trip is what
-// breaks if hydration ever starts reading the path.
+// PostgreSQL never returns a dotted column name, so at decode time such a
+// member resolves like any other — camelToSnake of its name — which is exactly
+// the alias the ORM emits. These pin that contract from the core side: no
+// peque.orm here, only hand-written SQL, so the ORM's alias round-trip is what
+// breaks if the two ever stop agreeing.
 // ---------------------------------------------------------------------------
 
 @autoHydrate
@@ -519,7 +519,7 @@ private struct RelOnlyDTO {
 
 unittest {
     auto c = makeConn();
-    auto res = c.exec(`SELECT 7 AS "id", 'Acme' AS "partnerName"`);
+    auto res = c.exec(`SELECT 7 AS "id", 'Acme' AS "partner_name"`);
 
     auto a = res.getRow(0).as!RelAutoDTO;
     assert(a.id == 7 && a.partnerName.get == "Acme");

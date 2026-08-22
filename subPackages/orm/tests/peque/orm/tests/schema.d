@@ -83,7 +83,7 @@ struct Category {
 @model("schema_products")
 @uniqueTogether!("name", "sku")
 @checkConstraint("chk_price_positive", "price > 0")
-@indexTogether!("categoryId", "active")
+@indexTogether!("category_id", "active")
 struct Product {
     @primaryKey                                                 int          id;
     @field @unique @index                                       string       sku;
@@ -168,10 +168,10 @@ unittest {
     assert(ddl.contains("CREATE TABLE IF NOT EXISTS schema_articles"));
     assert(ddl.contains("id SERIAL PRIMARY KEY"));
     assert(ddl.contains("rating DOUBLE PRECISION NOT NULL"));
-    assert(ddl.contains("wordCount INTEGER NOT NULL"));
-    assert(ddl.contains("authorId INTEGER NOT NULL REFERENCES schema_authors(id)"));
-    assert(ddl.contains("editorId INTEGER REFERENCES schema_authors(id)"));
-    assert(!ddl.contains("editorId INTEGER NOT NULL"));
+    assert(ddl.contains("word_count INTEGER NOT NULL"));
+    assert(ddl.contains("author_id INTEGER NOT NULL REFERENCES schema_authors(id)"));
+    assert(ddl.contains("editor_id INTEGER REFERENCES schema_authors(id)"));
+    assert(!ddl.contains("editor_id INTEGER NOT NULL"));
     assert(ddl.contains("status VARCHAR(10) NOT NULL"));
 }
 
@@ -185,12 +185,12 @@ unittest {
 
     // cascade
     assert(ddl.contains(
-        "categoryId INTEGER NOT NULL REFERENCES schema_categories(id) ON DELETE CASCADE"));
+        "category_id INTEGER NOT NULL REFERENCES schema_categories(id) ON DELETE CASCADE"));
 
     // setNull — no NOT NULL, with ON DELETE SET NULL
     assert(ddl.contains(
-        "altCategoryId INTEGER REFERENCES schema_categories(id) ON DELETE SET NULL"));
-    assert(!ddl.contains("altCategoryId INTEGER NOT NULL"));
+        "alt_category_id INTEGER REFERENCES schema_categories(id) ON DELETE SET NULL"));
+    assert(!ddl.contains("alt_category_id INTEGER NOT NULL"));
 }
 
 // setNull on non-Nullable field must be a compile-time error — tested via
@@ -249,8 +249,8 @@ unittest {
     // @uniqueIndex on slug
     assert(ddl.contains("CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_products_slug ON schema_products (slug);"));
 
-    // @indexTogether!("categoryId", "active") on model
-    assert(ddl.contains("CREATE INDEX IF NOT EXISTS idx_schema_products_categoryId_active ON schema_products (categoryId, active);"));
+    // @indexTogether!("category_id", "active") on model
+    assert(ddl.contains("CREATE INDEX IF NOT EXISTS idx_schema_products_category_id_active ON schema_products (category_id, active);"));
 }
 
 
@@ -259,14 +259,14 @@ unittest {
 // ---------------------------------------------------------------------------
 
 @model("schema_posts")
-@uniqueIndexTogether!("authorId", "slug")
-@(indexTogether!("authorId", "publishedAt")(where: "published = true"))
+@uniqueIndexTogether!("author_id", "slug")
+@(indexTogether!("author_id", "published_at")(where: "published = true"))
 struct Post {
     @primaryKey                                      int             id;
     @field @index                                    int             authorId;
     @field @index(where: "published = true")         string          slug;
     @field @uniqueIndex                              string          externalId;
-    @field @uniqueIndex(where: `"deletedAt" IS NULL`) string          code;
+    @field @uniqueIndex(where: "deleted_at IS NULL") string          code;
     @field @ginIndex                                 JSONValue       metadata;
     @field @hashIndex                                string          sessionToken;
     @field                                           bool             published;
@@ -284,7 +284,7 @@ unittest {
 
     // @index (plain) — btree, no USING clause
     assert(ddl.contains(
-        "CREATE INDEX IF NOT EXISTS idx_schema_posts_authorId ON schema_posts (authorId);"));
+        "CREATE INDEX IF NOT EXISTS idx_schema_posts_author_id ON schema_posts (author_id);"));
 
     // @index(where:) — partial index
     assert(ddl.contains(
@@ -292,11 +292,11 @@ unittest {
 
     // @uniqueIndex (plain)
     assert(ddl.contains(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_posts_externalId ON schema_posts (externalId);"));
+        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_posts_external_id ON schema_posts (external_id);"));
 
     // @uniqueIndex(where:) — partial unique index
     assert(ddl.contains(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_posts_code ON schema_posts (code) WHERE deletedAt IS NULL;"));
+        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_posts_code ON schema_posts (code) WHERE deleted_at IS NULL;"));
 
     // @ginIndex — USING gin, no UNIQUE (on JSONB metadata column)
     assert(ddl.contains(
@@ -304,15 +304,15 @@ unittest {
 
     // @hashIndex — USING hash
     assert(ddl.contains(
-        "CREATE INDEX IF NOT EXISTS hash_schema_posts_sessionToken ON schema_posts USING hash (sessionToken);"));
+        "CREATE INDEX IF NOT EXISTS hash_schema_posts_session_token ON schema_posts USING hash (session_token);"));
 
     // @uniqueIndexTogether — CREATE UNIQUE INDEX, multi-column
     assert(ddl.contains(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_posts_authorId_slug ON schema_posts (authorId, slug);"));
+        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_posts_author_id_slug ON schema_posts (author_id, slug);"));
 
     // @indexTogether(where:) — partial multi-column index
     assert(ddl.contains(
-        "CREATE INDEX IF NOT EXISTS idx_schema_posts_authorId_publishedAt ON schema_posts (authorId, publishedAt) WHERE published = true;"));
+        "CREATE INDEX IF NOT EXISTS idx_schema_posts_author_id_published_at ON schema_posts (author_id, published_at) WHERE published = true;"));
 }
 
 

@@ -51,6 +51,7 @@ private import std.string: indexOf;
 private import std.exception: enforce;
 private import peque.exception: PequeException, QueryClientError, QueryError;
 
+private import peque.hydration: camelToSnake, _resolveColName;
 private import peque.model: model, defaultOrder, field, primaryKey, related,
     one2many, many2many, many2one, OnDelete, hasMany2OneUDA, many2oneUDAType,
     autoHydrate;
@@ -677,7 +678,7 @@ private template _validateRelatedPath(M, string path, string memberName) {
 
     private enum _d2 = indexOf(_rest, '.');
     static if (_d2 < 0) {
-        static assert(_mainColForDtoCTFE!(_R1, _rest)().length,
+        static assert(_mainColForDtoCTFE!(_R1, _rest, camelToSnake(_rest))().length,
             "No column '" ~ _rest ~ "' on " ~ _R1.stringof ~ _where ~
             ". Columns available: " ~ _colNamesOf!_R1 ~ ".");
     } else {
@@ -692,11 +693,22 @@ private template _validateRelatedPath(M, string path, string memberName) {
         static assert(!is(_R2 == void),
             "No @related or @many2one field '" ~ _rel2 ~ "' on " ~ _R1.stringof ~
             _where ~ ". Relations available: " ~ _relNamesOf!_R1 ~ ".");
-        static assert(_mainColForDtoCTFE!(_R2, _leaf)().length,
+        static assert(_mainColForDtoCTFE!(_R2, _leaf, camelToSnake(_leaf))().length,
             "No column '" ~ _leaf ~ "' on " ~ _R2.stringof ~ _where ~
             ". Columns available: " ~ _colNamesOf!_R2 ~ ".");
     }
     enum _validateRelatedPath = true;
+}
+
+// The explicit column name a member declares via @field("col"), or "".
+private template _dtoExplicitColName(alias FieldDecl) {
+    import std.traits: getUDAs;
+    import peque.model: field;
+    alias _u = getUDAs!(FieldDecl, field);
+    static if (_u.length > 0 && !is(_u[0]))
+        enum _dtoExplicitColName = _u[0].columnName;
+    else
+        enum _dtoExplicitColName = "";
 }
 
 // The relation path a DTO member declares via @field(related: "rel.field"),
@@ -721,20 +733,21 @@ private template _dtoRelatedPath(alias FieldDecl) {
         enum _dtoRelatedPath = "";
 }
 
-// The main-table column a DTO member names, or "" if it names none.
-// Matched by D member name first, so `partnerId` finds its column however
-// @field renamed it, then by column name so a DTO may spell one out directly.
-private string _mainColForDtoCTFE(M, string name)() {
-    static foreach (memberName; FieldNameTuple!M) {{
-        alias F = __traits(getMember, M, memberName);
+// The main-table column a DTO member reads from, or "" if it names none.
+//
+// Matched by D member name first, so a DTO mirroring the model's members works
+// whatever @field renamed their columns to; then by resolved column name, so a
+// DTO may also name the column outright with @field("col").
+private string _mainColForDtoCTFE(M, string memberName, string colName)() {
+    static foreach (mn; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, mn);
         static if (_isColField!F)
-            if (memberName == name) return _colName!(F, memberName);
+            if (mn == memberName) return _colName!(F, mn);
     }}
-    // A DTO may also spell the column out directly.
-    static foreach (memberName; FieldNameTuple!M) {{
-        alias F = __traits(getMember, M, memberName);
+    static foreach (mn; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, mn);
         static if (_isColField!F)
-            if (_colName!(F, memberName) == name) return _colName!(F, memberName);
+            if (_colName!(F, mn) == colName) return _colName!(F, mn);
     }}
     return "";
 }
@@ -1685,7 +1698,11 @@ if (isModel!M && isQueryContext!Ctx) {
         // would be folded to lower case by the server.
         string selList;
         static foreach (dtoMemberName; FieldNameTuple!DTO) {{
-            enum relPath = _dtoRelatedPath!(__traits(getMember, DTO, dtoMemberName));
+            alias DtoDecl = __traits(getMember, DTO, dtoMemberName);
+            enum relPath  = _dtoRelatedPath!DtoDecl;
+            // The alias comes from the same resolver hydration will use, so the
+            // two cannot drift apart — a mismatch is silent under @autoHydrate.
+            enum dtoAlias = _resolveColName!(DtoDecl, dtoMemberName);
             if (selList.length) selList ~= ", ";
 
             static if (relPath.length) {
@@ -1694,17 +1711,18 @@ if (isModel!M && isQueryContext!Ctx) {
                 // with them and with load!, and is created at most once.
                 static assert(_validateRelatedPath!(M, relPath, dtoMemberName));
                 selList ~= _resolvePathToCol!(M, JoinFields)(relPath, fjoins, fjIdx) ~
-                           " AS " ~ _sqlIdent(dtoMemberName);
+                           " AS " ~ _sqlIdent(dtoAlias);
             } else {
-                enum mainCol = _mainColForDtoCTFE!(M, dtoMemberName)();
+                enum mainCol = _mainColForDtoCTFE!(M, dtoMemberName, dtoAlias)();
                 static assert(mainCol.length,
                     "select!" ~ DTO.stringof ~ ": member '" ~ dtoMemberName ~
-                    "' is not a column on " ~ M.stringof ~ ". Name the column " ~
-                    "with @field(\"col\"), or, if the value comes through a " ~
-                    "relation, @field(related: \"rel.field\") — peque does not " ~
-                    "infer a join from the member name.");
+                    "' resolves to column '" ~ dtoAlias ~ "', which is not on " ~
+                    M.stringof ~ ". Name the column with @field(\"col\"), or, " ~
+                    "if the value comes through a relation, " ~
+                    "@field(related: \"rel.field\") — peque does not infer a " ~
+                    "join from the member name.");
                 selList ~= "_m." ~ _sqlIdent(mainCol) ~
-                           " AS " ~ _sqlIdent(dtoMemberName);
+                           " AS " ~ _sqlIdent(dtoAlias);
             }
         }}
 
@@ -1902,7 +1920,7 @@ if (is(QS == QuerySet!Args, Args...)) {
       *  2. an annotate! alias       → emitted as <expr> AS member_name
       *  3. neither                  → compile error (GROUP-BY validation)
       *
-      * The SQL column alias is the member name, matching @autoHydrate
+      * The SQL column alias is camelToSnake(memberName), matching @autoHydrate
       * convention hydration.  Aggregate DTO members should be long (count,
       * integral sum), double (avg, floating sum), or Nullable!T where a group
       * could aggregate over only-NULL values.
@@ -1919,8 +1937,20 @@ if (is(QS == QuerySet!Args, Args...)) {
                 " Non-aggregate DTO columns must appear in groupBy!;" ~
                 " aggregate columns must be registered via annotate!(\"" ~
                 dtoMemberName ~ "\", ...).");
+            // A grouped DTO member names a group key or an annotation alias —
+            // neither is a column on a table, so an explicit @field name or a
+            // relation path has nothing to refer to. Rejecting them keeps the
+            // alias below equal to what hydration will look up.
+            alias DtoDecl = __traits(getMember, DTO, dtoMemberName);
+            static assert(_dtoExplicitColName!DtoDecl.length == 0 &&
+                          _dtoRelatedPath!DtoDecl.length == 0,
+                "select!" ~ DTO.stringof ~ ": member '" ~ dtoMemberName ~
+                "' carries @field(\"col\") or @field(related:), which a grouped " ~
+                "query cannot honour — its columns are groupBy!() keys and " ~
+                "annotate!() aliases, matched by member name. Rename the member, " ~
+                "or give the annotation the alias you want.");
             if (selList.length) selList ~= ", ";
-            selList ~= expr ~ " AS " ~ _sqlIdent(dtoMemberName);
+            selList ~= expr ~ " AS " ~ _sqlIdent(_resolveColName!(DtoDecl, dtoMemberName));
         }}
 
         // Resolve WHERE / ORDER BY / HAVING predicates, collecting the filter

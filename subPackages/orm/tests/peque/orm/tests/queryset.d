@@ -335,11 +335,11 @@ unittest {
 // ---------------------------------------------------------------------------
 
 @model("qs_ordered")
-@defaultOrder!(F!"sortKey")          // typed default order: ASC by the sortKey column
+@defaultOrder!(F!"sortKey")          // typed default order: ASC by the sort_key column
 struct Ordered {
     @primaryKey int          id;
     @field      string       name;
-    @field      int          sortKey;
+    @field      int          sortKey;   // -> column sort_key
     @field      Nullable!int rank;
 }
 
@@ -359,7 +359,7 @@ private void seedOrdered(ref Connection c) {
 }
 
 // @defaultOrder!(F!"sortKey") applies with no explicit orderBy(); the camelCase
-// field name resolves to the sortKey column. findAll() shares the same path.
+// field name resolves to the sort_key column. findAll() shares the same path.
 unittest {
     auto c = makeConn(); seedOrdered(c);
     auto repo = Repository!(Ordered, Connection)(&c);
@@ -395,7 +395,7 @@ unittest {
     auto c = makeConn(); seedOrdered(c);
     auto repo = Repository!(Ordered, Connection)(&c);
 
-    auto rows = repo.query().orderBy(`"sortKey" DESC`).all();
+    auto rows = repo.query().orderBy("sort_key DESC").all();
     assert(rows[0].sortKey == 30);
 
     auto byExpr = repo.query().orderBy("lower(name) ASC").all();
@@ -419,7 +419,7 @@ unittest {
     // An unknown field name fails to compile.
     static assert(!__traits(compiles, repo.query().orderBy!("notAField")));
     // Raw SQL / whitespace is rejected by orderBy! (use runtime orderBy for raw).
-    static assert(!__traits(compiles, repo.query().orderBy!("sortKey DESC")));
+    static assert(!__traits(compiles, repo.query().orderBy!("sort_key DESC")));
     // Passing an F!/Ordering to orderBy! (the '!') is a mistake — caught clearly.
     static assert(!__traits(compiles, repo.query().orderBy!(F!"sortKey".desc)));
     // …the same value works through the runtime form.

@@ -11,6 +11,7 @@
   **/
 module peque.orm.sql;
 
+private import peque.hydration: camelToSnake, _resolveColName;
 private import peque.model: model, field, primaryKey, hasMany2OneUDA;
 private import std.traits: FieldNameTuple, hasUDA, getUDAs;
 private import std.conv: to;
@@ -33,9 +34,9 @@ private import peque.converter: PGValue, convertToPG;
   * always agree, so no manual quoting is ever needed in @model / @field.
   *
   * Consequence worth knowing: quoted identifiers are case-exact, so the string
-  * you write IS the identifier. For an all-lowercase name, quoting is
-  * indistinguishable from emitting it bare, so such a model needs no thought.
-  * Only if you write mixed case
+  * you write IS the identifier. Converted names are all lowercase, so quoting
+  * them is indistinguishable from emitting them bare. Only if you write mixed
+  * case
   * (`@field("MyCol")`) do you get a case-sensitive column, which is then also
   * how you address one in a legacy schema.
   *
@@ -100,17 +101,13 @@ unittest {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-// Resolve the SQL column name for a field (mirrors hydration._resolveColName).
-// Priority: @field("explicit") > the D member name verbatim (no case conversion —
-// peque quotes identifiers, so the member name IS the column name).
-// Template form (not a function) to avoid "requires instance" errors inside
-// static foreach in CTFE functions.
+// The SQL column name for a field. Delegates to hydration's resolver rather
+// than restating the rule: a second copy is a second thing to keep in step, and
+// a column named one way when written and another when read back is silent.
+// Template form (not an alias) so it stays an eponymous `enum string` usable
+// inside static foreach in CTFE functions.
 package(peque.orm) template _colName(alias F, string memberName) {
-    alias _fudas = getUDAs!(F, field);
-    static if (_fudas.length > 0 && !is(_fudas[0]) && _fudas[0].columnName.length > 0)
-        enum string _colName = _fudas[0].columnName;
-    else
-        enum string _colName = memberName;
+    enum string _colName = _resolveColName!(F, memberName);
 }
 
 // True when a field maps to a DB column: @field, @primaryKey, or @many2one.
@@ -390,7 +387,7 @@ PGValue[] buildInsertParamsMany(M)(in M[] records) {
   *
   * Iterates all column fields of M (static foreach) and returns the SQL column
   * name for the member whose D name equals memberName, falling back to
-  * memberName itself for names not declared on the model.
+  * camelToSnake(memberName) for names not declared on the model.
   **/
 package(peque.orm) string _fieldColNameRuntime(M)(string memberName) {
     import std.exception: enforce;
@@ -410,7 +407,7 @@ package(peque.orm) string _fieldColNameRuntime(M)(string memberName) {
         "'" ~ memberName ~ "' is not a column on " ~ M.stringof ~ " and contains a " ~
         "'.', so it cannot be a column name either — a relation path was passed " ~
         "where a field name was expected.");
-    return _sqlIdent(memberName);
+    return _sqlIdent(camelToSnake(memberName));
 }
 
 /** Return the SQL column name for fieldName on M if it is a DB column field.

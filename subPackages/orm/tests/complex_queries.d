@@ -6,7 +6,7 @@
   *
   * Features exercised here:
   *
-  *  - F!"field"               — type-free main-table field ref (_m."field")
+  *  - F!"field"               — type-free main-table field ref (_m.col, converted)
   *  - F!"rel.field"           — join-path field ref, join added implicitly
   *  - F!"rel.sub.field"       — 2-level implicit join path
   *  - SF!"field"              — subquery field ref (_sq.col), for inside exists!()
@@ -800,7 +800,7 @@ unittest {
 //
 //     Native aggregation (groupBy! / annotate! / having / select!DTO) covers
 //     the per-group report when querying from the "many" side (invoices
-//     grouped by orderId).  Projecting columns of the "one" side (the order
+//     grouped by order_id).  Projecting columns of the "one" side (the order
 //     name) into the same grouped query still needs joinMany!, which does not
 //     exist yet — that flavor keeps the raw-SQL workaround below.
 // ---------------------------------------------------------------------------
@@ -854,9 +854,9 @@ unittest {
     // Raw-SQL workaround for the order-side flavor (order columns + one2many
     // aggregates in one row) — requires joinMany!, which is not implemented.
     auto result = f.conn.execParams(
-        "SELECT o.id, o.name, COUNT(i.id) AS \"invoiceCount\", COALESCE(SUM(i.amount), 0) AS \"totalAmount\"" ~
+        "SELECT o.id, o.name, COUNT(i.id) AS invoice_count, COALESCE(SUM(i.amount), 0) AS total_amount" ~
         " FROM cq_sale_orders o" ~
-        " LEFT JOIN cq_invoices i ON i.\"orderId\" = o.id" ~
+        " LEFT JOIN cq_invoices i ON i.order_id = o.id" ~
         " WHERE o.id = $1" ~
         " GROUP BY o.id, o.name",
         o.id

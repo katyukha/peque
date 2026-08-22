@@ -292,7 +292,7 @@ unittest {
         .where!"active"(true)
         .asSubquery!"id"();
 
-    // F!"categoryId" names the column directly
+    // F!"categoryId" converts to the category_id column
     auto products = prodRepo.query()
         .where(F!"categoryId".inSubquery(activeCatIds))
         .all();

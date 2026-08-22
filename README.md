@@ -216,28 +216,32 @@ struct Partner {
 }
 ```
 
-A bare `@field` means the column is named exactly like the D member — peque
-converts nothing, so `createdAt` is the column `createdAt`. Give the name
-explicitly when the two differ, which is what mapping an existing snake_case
-schema looks like:
+A bare `@field` maps the member to its `snake_case` column: `createdAt` is the
+column `created_at`. Runs of capitals stay whole, so `myURL` is `my_url`, not
+`my_u_r_l`. Name the column explicitly whenever the conversion is not what you
+want — that is also how you address a legacy or mixed-case schema:
 
 ```d
 @model("res_partner")
 struct Partner {
-    @primaryKey            int     id;
-    @field                 string  name;
-    @field("created_at")   SysTime createdAt;   // column is created_at
+    @primaryKey          int     id;
+    @field               string  name;        // -> name
+    @field               SysTime createdAt;   // -> created_at
+    @field("XMLPayload") string  payload;     // -> XMLPayload, exactly
 }
 ```
+
+Table names are never derived — `@model` always takes the name, so renaming a D
+struct cannot silently rename a table.
 
 ### Column constraints and indexes
 
 ```d
 @model("products")
-@uniqueTogether!("name", "tenantId")
+@uniqueTogether!("name", "tenant_id")
 @checkConstraint("chk_price", "price > 0")
-@indexTogether!("categoryId", "active")
-@uniqueIndexTogether!("tenantId", "slug")
+@indexTogether!("category_id", "active")
+@uniqueIndexTogether!("tenant_id", "slug")
 struct Product {
     @primaryKey                                int    id;
     @field @unique @index                      string sku;
@@ -283,10 +287,9 @@ struct Order {
 ```
 
 The consequence to know: **quoted identifiers are case-exact**, so the string
-you write in `@model`/`@field` — or the D member name, when `@field` carries
-none — *is* the identifier. An all-lowercase name behaves the same either way,
-since `"email_address"` and a bare `email_address` address the same column. It
-matters when mapping a table you did not create:
+you write in `@model`/`@field` *is* the identifier. Converted names are all
+lowercase, so quoting them changes nothing. It matters when mapping a table you
+did not create:
 
 ```sql
 -- Written by someone else, unquoted, so PostgreSQL folded it to lowercase:
@@ -500,10 +503,11 @@ foreign key should be `Nullable!T` — a NULL arriving in a plain `string` is a
 `ConversionError`.
 
 The path is a directive for *building* the query, not for decoding it: peque
-selects it and aliases it to the member name, so the DTO also hydrates from
-hand-written SQL that aliases the same way (`p.name AS "partnerName"`). It must
-name a relation *and* a field on it — `related: "partner"` is rejected, since a
-scalar member cannot hold the whole related object.
+selects it and aliases it to the member's own column name, so the DTO also
+hydrates from hand-written SQL that aliases the same way (`p.name AS
+partner_name`). It must name a relation *and* a field on it — `related:
+"partner"` is rejected, since a scalar member cannot hold the whole related
+object.
 
 The path is checked against the model when `select!DTO` is instantiated, so an
 unknown relation or field is a compile error listing what is available — not a
@@ -688,7 +692,7 @@ repo.query().where(orPred).all();
 repo.query().where(~F!(Partner, "active")(false)).all();
 ```
 
-The type-free variant `F!"fieldName"` takes the name as the column directly,
+The type-free variant `F!"fieldName"` converts the name the same way but
 without model validation — so it cannot see an `@field("col")` rename, and
 field-name typos become PostgreSQL runtime errors rather than compile-time
 failures. Use `F!(Model, "field")` when compile-time checking is preferred.

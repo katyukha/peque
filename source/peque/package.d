@@ -10,6 +10,7 @@ public import peque.pool:          ConnectionPool, ThreadConnectionPool;
 // UDAs that affect core hydration, plus the relation UDAs a model may declare.
 // Schema-only UDAs (@unique, @check, @pgType, @index…) mean nothing without
 // peque:orm and are re-exported from there.
+public import peque.hydration:     camelToSnake;
 public import peque.model:         model, field, primaryKey, autoHydrate,
                                    many2one, related, one2many, many2many,
                                    OnDelete, hasMany2OneUDA;

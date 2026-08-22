@@ -31,7 +31,7 @@ struct JtPartner {
 struct JtInvoice {
     @primaryKey             int                id;
     @field                  string             name;
-    @field("partner_id") @many2one!(JtPartner) Nullable!int partnerId;
+    @many2one!(JtPartner)   Nullable!int       partnerId;
     @related                Nullable!JtPartner partner;
 }
 
@@ -47,7 +47,7 @@ struct JtPartner2 {
 struct JtInvoice2 {
     @primaryKey             int    id;
     @field                  string name;
-    @field("partner_id") @many2one!(JtPartner2) int partnerId;
+    @many2one!(JtPartner2)  int    partnerId;
 }
 
 // Models for many2many
@@ -296,7 +296,7 @@ import peque.model: autoHydrate;
 struct InvoicePartnerDTO {
     int    id;
     string name;
-    @field(related: "partner.name") string partnerName;   // j0."name" AS "partnerName"
+    @field(related: "partner.name") string partnerName;   // j0.name AS partner_name
 }
 
 unittest {
@@ -394,7 +394,7 @@ struct PfPartner {
 struct PfInvoice {
     @primaryKey            int          id;
     @field                 string       code;
-    @field("partner_id") @many2one!(PfPartner) Nullable!int partnerId;   // NULL = belongs to nobody
+    @many2one!(PfPartner)  Nullable!int partnerId;   // NULL = belongs to nobody
 }
 
 @model("pf_tag")

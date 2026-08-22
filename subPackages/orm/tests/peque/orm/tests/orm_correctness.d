@@ -1031,3 +1031,225 @@ unittest {
     // rejections above are not passing because the harness itself is broken.
     static assert(__traits(compiles, QS.init.select!RelDTO()));
 }
+
+
+// ---------------------------------------------------------------------------
+// #14 — column names convert from D member names, and every emitter agrees
+//
+// One resolver serves DDL, CRUD, QuerySet and hydration, so a column cannot be
+// named one way when written and another when read back. The DTO alias comes
+// from that same resolver: a mismatch there is silent under @autoHydrate, so it
+// is checked against the emitted SQL rather than inferred from values.
+// ---------------------------------------------------------------------------
+
+@model("cv_partner")
+private struct CvPartner {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("cv_doc")
+private struct CvDoc {
+    @primaryKey            int          id;
+    @field                 string       docNumber;    // -> doc_number
+    @field                 string       myURL;        // -> my_url, not my_u_r_l
+    @field("legacy_Col")   string       legacy;       // exact, case preserved
+    @many2one!(CvPartner)  Nullable!int partnerId;    // -> partner_id
+    @related("partnerId")  Nullable!CvPartner partner;
+}
+
+@autoHydrate
+private struct CvPlainDTO { int id; string docNumber; }
+
+// @field("col") on a DTO member names the column it reads from.
+@autoHydrate
+private struct CvRenameDTO { int id; @field("doc_number") string n; }
+
+@autoHydrate
+private struct CvRelDTO {
+    int id;
+    @field(related: "partner.name") Nullable!string partnerName;
+}
+
+unittest {
+    enum ddl = modelDDL!CvDoc();
+    import std.algorithm.searching: canFind;
+    static assert(ddl.canFind(`"doc_number" TEXT`), ddl);
+    static assert(ddl.canFind(`"my_url" TEXT`), ddl);      // acronym run stays whole
+    static assert(!ddl.canFind(`"my_u_r_l"`), ddl);
+    static assert(ddl.canFind(`"legacy_Col" TEXT`), ddl);  // @field wins, case intact
+    static assert(ddl.canFind(`"partner_id" INTEGER`), ddl);
+}
+
+unittest {
+    import std.algorithm.searching: canFind;
+
+    static struct SpyCtx {
+        Connection* conn;
+        static string lastSQL;
+        auto exec(string sql) { lastSQL = sql; return conn.exec(sql); }
+        auto execParams(T...)(string sql, T args) {
+            lastSQL = sql;
+            return conn.execParams(sql, args);
+        }
+    }
+
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS cv_doc`);
+    c.exec(`DROP TABLE IF EXISTS cv_partner`);
+    c.exec(schemaSQL!(Registry!(Bind!(CvPartner, ModelRepo!CvPartner),
+                                Bind!(CvDoc,     ModelRepo!CvDoc)))());
+
+    auto pSeed = CvPartner(0, "Acme");
+    auto p = Repository!(CvPartner, Connection)(&c).insert(pSeed);
+
+    auto spy  = SpyCtx(&c);
+    auto repo = Repository!(CvDoc, SpyCtx)(&spy);
+    CvDoc d;
+    d.docNumber = "D-1";
+    d.myURL     = "http://x";
+    d.legacy    = "L";
+    d.partnerId = p.id.nullable;
+
+    // INSERT … RETURNING writes and reads back through the same resolver.
+    auto saved = repo.insert(d);
+    assert(saved.docNumber == "D-1" && saved.myURL == "http://x" && saved.legacy == "L");
+
+    // Alias must equal the hydration key, which is the converted member name.
+    auto plain = repo.query().select!CvPlainDTO();
+    assert(SpyCtx.lastSQL.canFind(`_m."doc_number" AS "doc_number"`), SpyCtx.lastSQL);
+    assert(plain[0].docNumber == "D-1");
+
+    // @field("col") on a DTO member selects that column and aliases to it.
+    auto renamed = repo.query().select!CvRenameDTO();
+    assert(renamed[0].n == "D-1", SpyCtx.lastSQL);
+
+    // A related member aliases to its converted name too.
+    auto rel = repo.query().select!CvRelDTO();
+    assert(SpyCtx.lastSQL.canFind(`AS "partner_name"`), SpyCtx.lastSQL);
+    assert(rel[0].partnerName.get == "Acme");
+
+    // Type-free F! converts as well.
+    repo.query().where(F!"docNumber"("D-1")).count();
+    assert(SpyCtx.lastSQL.canFind(`_m."doc_number" = $1`), SpyCtx.lastSQL);
+
+    c.exec(`DROP TABLE IF EXISTS cv_doc`);
+    c.exec(`DROP TABLE IF EXISTS cv_partner`);
+}
+
+
+// ---------------------------------------------------------------------------
+// #15 — grouped select!DTO: alias and hydration key come from one resolver
+//
+// A grouped DTO member names a groupBy! key or an annotate! alias, matched by
+// member name. @field("col") has nothing to refer to there, and a member that
+// carried one still matched its key — emitting the key's alias while hydration
+// looked for the @field name. Under @autoHydrate that is not an error: the
+// field simply stays at its init value.
+// ---------------------------------------------------------------------------
+
+@model("gp_inv")
+private struct GpInv {
+    @primaryKey int    id;
+    @field      int    orderId;
+    @field      double amount;
+}
+
+@autoHydrate private struct GpPlainDTO  { int orderId; long cnt; }
+@autoHydrate private struct GpFieldDTO  { @field("whatever") int orderId; long cnt; }
+@autoHydrate private struct GpRelDTO    { @field(related: "x.y") int orderId; long cnt; }
+
+unittest {
+    alias QS = typeof(Repository!(GpInv, Connection).init.query());
+    static assert(__traits(compiles,
+        QS.init.groupBy!"orderId".annotate!("cnt", F!(GpInv, "id").count)
+               .select!GpPlainDTO()));
+    static assert(!__traits(compiles,
+        QS.init.groupBy!"orderId".annotate!("cnt", F!(GpInv, "id").count)
+               .select!GpFieldDTO()),
+        "@field(\"col\") on a grouped DTO member must be rejected, not silently ignored");
+    static assert(!__traits(compiles,
+        QS.init.groupBy!"orderId".annotate!("cnt", F!(GpInv, "id").count)
+               .select!GpRelDTO()),
+        "@field(related:) on a grouped DTO member must be rejected");
+}
+
+unittest {
+    import std.algorithm.searching: canFind;
+
+    static struct SpyCtx {
+        Connection* conn;
+        static string lastSQL;
+        auto exec(string sql) { lastSQL = sql; return conn.exec(sql); }
+        auto execParams(T...)(string sql, T args) {
+            lastSQL = sql;
+            return conn.execParams(sql, args);
+        }
+    }
+
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS gp_inv`);
+    c.exec(modelDDL!GpInv());
+
+    auto spy  = SpyCtx(&c);
+    auto repo = Repository!(GpInv, SpyCtx)(&spy);
+    GpInv i;
+    i.orderId = 5;
+    i.amount  = 10;
+    repo.insert(i);
+    repo.insert(i);
+
+    auto rows = repo.query().groupBy!"orderId"
+                    .annotate!("cnt", F!(GpInv, "id").count)
+                    .select!GpPlainDTO();
+    assert(SpyCtx.lastSQL.canFind(`_m."order_id" AS "order_id"`), SpyCtx.lastSQL);
+    assert(rows.length == 1);
+    assert(rows[0].orderId == 5, "group key must hydrate, not stay at init");
+    assert(rows[0].cnt == 2);
+
+    c.exec(`DROP TABLE IF EXISTS gp_inv`);
+}
+
+
+// ---------------------------------------------------------------------------
+// #16 — @uniqueTogether / @indexTogether column names are checked at compile time
+//
+// They take SQL column names, not D member names — they sit beside raw `where:`
+// clauses that must also be columns. Now that the two spellings differ for
+// every camelCase member, writing the member name is the natural slip, and the
+// emitted DDL is well-formed either way, so nothing complains until PostgreSQL
+// runs it.
+// ---------------------------------------------------------------------------
+
+@model("ct_ok")
+@uniqueTogether!("name", "tenant_id")
+@indexTogether!("tenant_id", "name")
+private struct CtOk {
+    @primaryKey int    id;
+    @field      string name;
+    @field      int    tenantId;
+}
+
+@model("ct_bad_unique")
+@uniqueTogether!("name", "tenantId")        // member name, not column
+private struct CtBadUnique {
+    @primaryKey int    id;
+    @field      string name;
+    @field      int    tenantId;
+}
+
+@model("ct_bad_index")
+@indexTogether!("tenantId", "name")         // member name, not column
+private struct CtBadIndex {
+    @primaryKey int    id;
+    @field      string name;
+    @field      int    tenantId;
+}
+
+unittest {
+    static assert( __traits(compiles, modelDDL!CtOk()));
+    static assert(!__traits(compiles, modelDDL!CtBadUnique()),
+        "@uniqueTogether naming a non-column must fail to compile");
+    static assert(!__traits(compiles, modelDDL!CtBadIndex()),
+        "@indexTogether naming a non-column must fail to compile");
+}
