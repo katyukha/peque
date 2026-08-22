@@ -8,7 +8,6 @@
   *  - Nullable fields
   *  - Result.as!(T[]) for all-rows hydration
   *  - INSERT ... RETURNING round-trip
-  *  - camelToSnake compile-time utility
   *  - Static assert fires for unannotated structs (via __traits(compiles))
   **/
 module peque.tests.hydration;
@@ -18,8 +17,9 @@ private import std.typecons: Nullable, nullable;
 
 private import peque.connection: Connection;
 private import peque.result: ResultRow;
+private import peque.exception: ColNotExistsError;
+private import std.exception: assertThrown;
 private import peque.model: model, field, primaryKey, autoHydrate, many2one;
-private import peque.hydration: camelToSnake;
 
 
 // ---------------------------------------------------------------------------
@@ -91,20 +91,6 @@ private void setupTable(ref Connection c) {
                ('b2', 'Beta',    20),
                ('c3',  NULL,     30);
     ");
-}
-
-
-// ---------------------------------------------------------------------------
-// camelToSnake — compile-time unit
-// ---------------------------------------------------------------------------
-
-unittest {
-    static assert(camelToSnake("id")           == "id");
-    static assert(camelToSnake("code")         == "code");
-    static assert(camelToSnake("emailAddress") == "email_address");
-    static assert(camelToSnake("partnerId")    == "partner_id");
-    static assert(camelToSnake("createdAt")    == "created_at");
-    static assert(camelToSnake("displayName")  == "display_name");
 }
 
 
@@ -377,14 +363,14 @@ private struct M2OParent {
 private struct M2OChildTypeForm {
     @primaryKey            int    id;
     @field                 string code;
-    @many2one!(M2OParent)  int    parentId;    // type form
+    @field("parent_id") @many2one!(M2OParent)  int parentId;    // type form
 }
 
 @model("peque_hydration_m2o_child")
 private struct M2OChildInstanceForm {
     @primaryKey              int    id;
     @field                   string code;
-    @many2one!(M2OParent)()  int    parentId;  // instance form — same meaning
+    @field("parent_id") @many2one!(M2OParent)()  int parentId;  // instance form — same meaning
 }
 
 unittest {
@@ -458,4 +444,98 @@ unittest {
     // outright rather than failing deep inside the call.
     static assert(!__traits(compiles, res.getRow(0).as!WrongFromRow),
         "fromRow returning a non-T must not satisfy the dispatch chain");
+}
+
+
+// ---------------------------------------------------------------------------
+// Annotated fields without @model — a decode shape, not a table
+// ---------------------------------------------------------------------------
+
+// @model marks a table (and is what isModel requires). A projection or a
+// RETURNING row needs the same strict, aliasable mapping without claiming one,
+// so annotations alone are enough to hydrate.
+private struct DecodeShape {
+    @primaryKey             int    id;
+    @field("display_name")  string name;      // aliased
+    @field                  int    score;
+}
+
+// No markers at all must still be rejected — the dispatch chain has to
+// distinguish "a decode shape" from "someone forgot".
+private struct Unmarked { int id; string code; }
+
+unittest {
+    auto c = makeConn();
+    setupTable(c);
+
+    auto res = c.exec(
+        "SELECT id, code, display_name, score FROM peque_hydration_items ORDER BY code");
+
+    auto v = res.getRow(0).as!DecodeShape;
+    assert(v.name  == "Alpha", "an explicit @field alias must be honoured");
+    assert(v.score == 10);
+    assert(v.id    >= 1);
+
+    // Strict like @model: a missing column throws rather than leaving zero.
+    auto partial = c.exec("SELECT id, code FROM peque_hydration_items LIMIT 1");
+    assertThrown!ColNotExistsError(partial.getRow(0).as!DecodeShape);
+
+    // A struct with no hydration markers stays a compile error.
+    static assert(!__traits(compiles, res.getRow(0).as!Unmarked));
+
+    // @autoHydrate still wins when both are present, and stays lenient.
+    assert(res.as!(ItemSummary[]).length == 3);
+}
+
+
+// ---------------------------------------------------------------------------
+// @field(related: "rel.field") and hydration
+//
+// A related path is a directive for BUILDING a query, not for decoding one.
+// The ORM selects the path and aliases it to the member name, and PostgreSQL
+// never returns a dotted column name, so at decode time the member name is the
+// column name. These pin that contract from the core side: peque.orm is not
+// involved here, only hand-written SQL, so the ORM's alias round-trip is what
+// breaks if hydration ever starts reading the path.
+// ---------------------------------------------------------------------------
+
+@autoHydrate
+private struct RelAutoDTO {
+    int id;
+    @field(related: "partner.name") Nullable!string partnerName;
+}
+
+// Annotated-only (no @model, no @autoHydrate) — a related: member is still a
+// @field, so it counts as an annotated column and case 5 applies.
+private struct RelAnnotatedDTO {
+    @field                          int    id;
+    @field(related: "partner.name") string partnerName;
+}
+
+// Every member related: — still an annotated shape.
+private struct RelOnlyDTO {
+    @field(related: "partner.name") string partnerName;
+}
+
+unittest {
+    auto c = makeConn();
+    auto res = c.exec(`SELECT 7 AS "id", 'Acme' AS "partnerName"`);
+
+    auto a = res.getRow(0).as!RelAutoDTO;
+    assert(a.id == 7 && a.partnerName.get == "Acme");
+
+    auto b = res.getRow(0).as!RelAnnotatedDTO;
+    assert(b.id == 7 && b.partnerName == "Acme");
+
+    auto d = res.getRow(0).as!RelOnlyDTO;
+    assert(d.partnerName == "Acme");
+}
+
+unittest {
+    // Missing column keeps the usual split: @autoHydrate skips, annotated throws.
+    auto c = makeConn();
+    auto res = c.exec(`SELECT 7 AS "id"`);
+
+    assert(res.getRow(0).as!RelAutoDTO.partnerName.isNull);
+    assertThrown!ColNotExistsError(res.getRow(0).as!RelAnnotatedDTO);
 }

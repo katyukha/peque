@@ -37,34 +37,48 @@ struct model {
 
 /** Map a struct field to a database column.
   *
-  * Without argument: column name is derived from the field name by
-  * camelCase→snake_case conversion (e.g. `emailAddress` → `email_address`).
+  * Without argument: the column is named exactly like the D member. peque
+  * quotes every identifier, so nothing is derived or case-converted.
   *
-  * With a string argument: use that string as the exact column name.
+  * With a string argument: use that string as the exact column name — this is
+  * how you address a column whose name differs from the member's.
   *
   * Examples:
   * ---
-  * @field              string name;          // column: "name"
-  * @field              string emailAddress;  // column: "email_address"
-  * @field("email_addr") string email;        // column: "email_addr"
+  * @field                string name;          // column: "name"
+  * @field                string emailAddress;  // column: "emailAddress"
+  * @field("email_addr")  string email;         // column: "email_addr"
   * ---
+  *
+  * `related:` names a value reached through a relation instead of a column on
+  * this table. It is read by the ORM's `select!DTO` and is only meaningful on a
+  * projection struct — a model's columns all live on its own table:
+  * ---
+  * @autoHydrate
+  * struct OrderSummary {
+  *     int    id;
+  *     @field(related: "partner.name") string partnerName;
+  * }
+  * ---
+  *
+  * The two are mutually exclusive: a member is either a column on this table or
+  * a value from a related one.
   **/
 struct field {
     string columnName = "";
-
-    this(string colName) @safe pure nothrow { columnName = colName; }
+    string related    = "";
 }
 
 
 /** Mark a field as the primary key.
   *
-  * Behaves like @field for column-name resolution (camelCase→snake_case unless
-  * combined with @field("col")).
+  * Behaves like @field for column-name resolution: the member name is the
+  * column name unless combined with @field("col").
   *
   * Example:
   * ---
-  * @primaryKey             int id;          // column: "id"
-  * @primaryKey @field("pk") int id;          // column: "pk"
+  * @primaryKey              int id;         // column: "id"
+  * @primaryKey @field("pk") int id;         // column: "pk"
   * ---
   **/
 struct primaryKey {}
@@ -72,7 +86,7 @@ struct primaryKey {}
 
 /** Enable convention-based struct hydration without explicit @model or @field UDAs.
   *
-  * All public fields are hydrated from same-named columns (camelCase→snake_case).
+  * All public fields are hydrated from columns of exactly the same name.
   * Fields whose columns are absent from the result are silently skipped — they
   * remain at their zero/init value.
   *
@@ -111,8 +125,8 @@ enum OnDelete {
 /** Mark a field as a many-to-one (foreign key) relation.
   *
   * The field holds the integer FK value (always loaded as a real DB column).
-  * Column name is derived by camelCase→snake_case of the field name unless
-  * a @field("col") UDA is also present to override it.
+  * The column is named exactly like the D member unless a @field("col") UDA is
+  * also present to override it.
   *
   * T        = the target model struct.
   * onDelete = ON DELETE behaviour in generated DDL (default: noAction).
@@ -139,7 +153,7 @@ struct many2one(T, OnDelete onDelete = OnDelete.noAction) {}
   *
   * T            = the target model struct.
   * inverseField = D field name of the FK on T that points back to this model.
-  *                Column name is resolved by camelToSnake(inverseField).
+  *                Its column name honours @field on that member.
   *
   * Example:
   * ---
@@ -380,7 +394,7 @@ struct pgNotNull {}
 
 /** Table-level UNIQUE (col1, col2, ...) constraint. Applied on the model struct.
   *
-  * cols are SQL column names (snake_case).
+  * cols are SQL column names.
   *
   * Example:
   * ---
@@ -470,7 +484,7 @@ struct hashIndex { string where = ""; string name = ""; }
 
 /** Create a multi-column btree index. Applied on the model struct.
   *
-  * cols are SQL column names (snake_case).
+  * cols are SQL column names.
   * An optional WHERE clause turns it into a partial index.
   *
   * Examples:
@@ -497,7 +511,7 @@ struct indexTogether(cols...) if (cols.length >= 2) {
   * CREATE TABLE), this emits a standalone CREATE UNIQUE INDEX statement,
   * allowing an optional WHERE partial-index clause.
   *
-  * cols are SQL column names (snake_case).
+  * cols are SQL column names.
   *
   * Examples:
   * ---

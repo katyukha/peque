@@ -51,9 +51,6 @@ unittest {
     static assert(__traits(compiles, { try {} catch (NotSupportedError e) {} }));
     static assert(__traits(compiles, { try {} catch (ResultError e) {} }));
 
-    // camelToSnake is part of the documented core surface.
-    static assert(camelToSnake("partnerId") == "partner_id");
-
     // Schema-only UDAs deliberately stay behind `import peque.orm;` — they mean
     // nothing without the ORM, and exporting names like `check`/`index` from the
     // top-level package would collide with user symbols.

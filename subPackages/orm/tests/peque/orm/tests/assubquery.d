@@ -292,7 +292,7 @@ unittest {
         .where!"active"(true)
         .asSubquery!"id"();
 
-    // F!"categoryId" resolves via camelToSnake → "category_id"
+    // F!"categoryId" names the column directly
     auto products = prodRepo.query()
         .where(F!"categoryId".inSubquery(activeCatIds))
         .all();

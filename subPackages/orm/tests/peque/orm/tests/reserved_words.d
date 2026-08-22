@@ -1,7 +1,7 @@
 /** Reserved words and awkward identifiers must survive the whole pipeline.
   *
-  * A D field named `order`, `end`, `user` or `check` is perfectly legal and maps
-  * via camelToSnake onto a PostgreSQL reserved word. Emitted bare it produces a
+  * A D field named `order`, `end`, `user` or `check` is perfectly legal and is
+  * also a PostgreSQL reserved word. Emitted bare it produces a
   * syntax error far from the model definition — and only in the statements that
   * happen to mention that column, so DDL could succeed while SELECT failed.
   *
@@ -29,7 +29,7 @@ private import peque.orm;
 struct RwUser {
     @primaryKey int    id;
     @field      string name;        // not reserved — must stay unquoted
-    @field      string desc_;       // -> "desc_" (not reserved, trailing _)
+    @field      string desc_;       // "desc_" — not reserved, trailing _
 }
 
 @model("order")                     // reserved table name
@@ -53,7 +53,7 @@ struct RwOrderDTO {
     int    id;
     string title;
     int    end;
-    string ownerName;   // owner_name -> owner.name
+    @field(related: "owner.name") string ownerName;
 }
 
 private Connection makeConn() {

@@ -6,57 +6,22 @@
   *  2. T has static T fromRow(ref ResultRow)  → user-defined factory
   *  3. hasUDA!(T, model)                      → map @field/@primaryKey fields only (strict)
   *  4. hasUDA!(T, autoHydrate)                → map all fields by convention (permissive)
-  *  5. (none of the above)                    → static assert with a helpful message
+  *  5. any @field/@primaryKey member           → same strict mapping, no table claimed
+  *  6. (none of the above)                    → static assert with a helpful message
   *
-  * This module is imported lazily inside ResultRow.as!T — you do not need to
-  * import it directly unless you want camelToSnake for custom use.
+  * Cases 3 and 5 map identically; the difference is what @model MEANS. @model
+  * marks a table — it is what isModel requires, so only such a struct can enter
+  * a Registry or back a Repository. A projection or a RETURNING row wants the
+  * same strict, aliasable mapping without claiming a table, and case 5 is that.
+  *
+  * This module is imported lazily inside ResultRow.as!T — you do not normally
+  * need to import it directly.
   **/
 module peque.hydration;
 
 private import peque.result: ResultRow;
 private import peque.model: model, field, primaryKey, autoHydrate,
     many2one, one2many, many2many, related, hasMany2OneUDA;
-
-
-// ---------------------------------------------------------------------------
-// camelToSnake
-// ---------------------------------------------------------------------------
-
-/** Convert a camelCase D identifier to snake_case at compile time.
-  *
-  * Rules: an uppercase letter at position > 0 is preceded by an underscore;
-  * all letters are lowercased. Consecutive capitals each get their own underscore
-  * (e.g. `myHTTPUrl` → `my_h_t_t_p_url`) — use `@field("col")` to override.
-  *
-  * Examples:
-  * ---
-  * static assert(camelToSnake("id")           == "id");
-  * static assert(camelToSnake("name")         == "name");
-  * static assert(camelToSnake("emailAddress") == "email_address");
-  * static assert(camelToSnake("partnerId")    == "partner_id");
-  * static assert(camelToSnake("createdAt")    == "created_at");
-  * ---
-  **/
-string camelToSnake(string s) @safe pure nothrow {
-    import std.ascii: isUpper, toLower;
-    string result;
-    foreach (size_t i, char c; s) {
-        if (isUpper(c) && i > 0)
-            result ~= '_';
-        result ~= toLower(c);
-    }
-    return result;
-}
-
-///
-unittest {
-    static assert(camelToSnake("id")           == "id");
-    static assert(camelToSnake("name")         == "name");
-    static assert(camelToSnake("emailAddress") == "email_address");
-    static assert(camelToSnake("partnerId")    == "partner_id");
-    static assert(camelToSnake("createdAt")    == "created_at");
-    static assert(camelToSnake("myURL")        == "my_u_r_l");   // override with @field if needed
-}
 
 
 // ---------------------------------------------------------------------------
@@ -86,13 +51,20 @@ T hydrateRow(T)(ref ResultRow row) if (is(T == struct)) {
     } else static if (hasUDA!(T, autoHydrate)) {
         // Case 4: @autoHydrate struct — all fields by convention, missing columns skipped
         return _hydrateConvention!T(row);
+    } else static if (_hasAnnotatedColumn!T) {
+        // Case 5: annotated fields but no @model — a decode shape rather than a
+        // table. Same strict mapping as case 3; @model is what marks a struct as
+        // a table (and is what isModel requires), so a projection or a
+        // RETURNING row need not claim one.
+        return _hydrateAnnotated!T(row);
     } else {
         static assert(false,
             "Cannot hydrate `" ~ T.stringof ~ "` from ResultRow.\n" ~
             "Add one of:\n" ~
             "  • this(ref ResultRow) constructor\n" ~
             "  • static " ~ T.stringof ~ " fromRow(ref ResultRow)\n" ~
-            "  • @model(\"table_name\") UDA on the struct (maps @field/@primaryKey fields)\n" ~
+            "  • @field/@primaryKey on the members you want mapped (decode-only shape)\n" ~
+            "  • @model(\"table_name\") UDA on the struct (a table; also maps @field/@primaryKey)\n" ~
             "  • @autoHydrate UDA on the struct (maps all fields by convention)");
     }
 }
@@ -109,6 +81,23 @@ T hydrateRow(T)(ref ResultRow row) if (is(T == struct)) {
   * looking it up in the ResultRow.  Used by the ORM join layer to read aliased
   * columns such as `__partner_id`, `__partner_name`, etc.
   **/
+// True when T has at least one member carrying a column UDA. Distinguishes a
+// decode shape from a struct that simply has no hydration markers at all — the
+// latter must keep failing with the dispatch-chain message.
+package(peque) template _hasAnnotatedColumn(T) {
+    import std.traits: FieldNameTuple, hasUDA;
+    enum bool _hasAnnotatedColumn = () {
+        bool found = false;
+        static foreach (memberName; FieldNameTuple!T) {{
+            alias FieldDecl = __traits(getMember, T, memberName);
+            if (hasUDA!(FieldDecl, field) || hasUDA!(FieldDecl, primaryKey) ||
+                hasMany2OneUDA!FieldDecl)
+                found = true;
+        }}
+        return found;
+    }();
+}
+
 package(peque) T _hydrateAnnotated(T, string colPrefix = "")(ref ResultRow row) {
     import std.traits: FieldNameTuple, Fields, hasUDA, getUDAs;
 
@@ -130,7 +119,7 @@ package(peque) T _hydrateAnnotated(T, string colPrefix = "")(ref ResultRow row) 
 }
 
 
-/** Hydrate all fields by camelCase→snake_case convention.
+/** Hydrate every field from the column of the same name.
   * Silently skips fields whose columns are absent from the result.
   **/
 private T _hydrateConvention(T)(ref ResultRow row) {
@@ -139,7 +128,10 @@ private T _hydrateConvention(T)(ref ResultRow row) {
     T result;
     static foreach (i, memberName; FieldNameTuple!T) {{   // double-brace: new scope per iteration
         alias FieldType = Fields!T[i];
-        enum colName = camelToSnake(memberName);
+        alias FieldDecl = __traits(getMember, T, memberName);
+        // Same resolver as the annotated path: @field("col") means the same
+        // thing wherever it appears.
+        enum colName = _resolveColName!(FieldDecl, memberName);
         // _fieldIndex returns -1 when column is not in result
         immutable colIdx = row._fieldIndex(colName);
         if (colIdx >= 0)
@@ -154,18 +146,36 @@ private T _hydrateConvention(T)(ref ResultRow row) {
   *
   * Priority:
   *  1. @field("explicit_name") — use the explicit name
-  *  2. Otherwise — camelToSnake(memberName)
+  *  2. Otherwise — the D member name, verbatim
+  *
+  * No implicit case conversion: peque quotes every identifier, so the member
+  * name IS the column name. Write @field("created_at") to address a column
+  * named differently from the member.
   **/
 private template _resolveColName(alias FieldDecl, string memberName) {
     import std.traits: getUDAs;
     alias _fieldUDAs = getUDAs!(FieldDecl, field);
 
+    static if (_fieldUDAs.length > 0 && !is(_fieldUDAs[0]))
+        static assert(_fieldUDAs[0].columnName.length == 0 ||
+                      _fieldUDAs[0].related.length == 0,
+            "@field on `" ~ memberName ~ "` sets both a column name and " ~
+            "related: — a member is either a column on this table or a value " ~
+            "reached through a relation, not both.");
+
     static if (_fieldUDAs.length > 0 && !is(_fieldUDAs[0]) &&
                _fieldUDAs[0].columnName.length > 0) {
         // @field("explicit_name") — instance UDA with a non-empty column name
         enum _resolveColName = _fieldUDAs[0].columnName;
+    } else static if (_fieldUDAs.length > 0 && !is(_fieldUDAs[0]) &&
+                      _fieldUDAs[0].related.length > 0) {
+        // @field(related: "rel.field") — a directive for building a query, not
+        // for decoding one: the ORM aliases the path to the member name, and
+        // PostgreSQL never returns a dotted column name. Kept as its own branch
+        // so the ORM's alias round-trip survives edits to the fallback below.
+        enum _resolveColName = memberName;
     } else {
-        // plain @field, @field(), or @primaryKey — use convention
-        enum _resolveColName = camelToSnake(memberName);
+        // plain @field, @field(), or @primaryKey — the member name itself
+        enum _resolveColName = memberName;
     }
 }

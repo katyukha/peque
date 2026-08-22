@@ -33,10 +33,10 @@ struct Partner {
 // --- README: "Column constraints and indexes" -------------------------------
 
 @model("products")
-@uniqueTogether!("name", "tenant_id")
+@uniqueTogether!("name", "tenantId")
 @checkConstraint("chk_price", "price > 0")
-@indexTogether!("category_id", "active")
-@uniqueIndexTogether!("tenant_id", "slug")
+@indexTogether!("categoryId", "active")
+@uniqueIndexTogether!("tenantId", "slug")
 struct Product {
     @primaryKey                                int    id;
     @field @unique @index                      string sku;
@@ -88,11 +88,15 @@ private Connection makeConn() {
     );
 }
 
-// The constraints model is DDL-only here; generating its SQL is enough to prove
-// every UDA in that example is reachable from the documented imports.
+// The constraints example is DDL-only, but generating its SQL is not enough:
+// @uniqueTogether/@indexTogether take column names as plain strings, so a name
+// matching no column still produces a well-formed string. Executing it is what
+// makes PostgreSQL check them.
 unittest {
-    enum ddl = modelDDL!Product();
-    static assert(ddl.length > 0);
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS products`);
+    c.exec(modelDDL!Product());
+    c.exec(`DROP TABLE IF EXISTS products`);
 }
 
 unittest {

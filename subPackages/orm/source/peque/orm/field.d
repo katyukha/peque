@@ -51,7 +51,7 @@ private import peque.orm.predicate;
 private import peque.orm.subquery: SubQuery;
 private import peque.orm.sql: _fieldColName, ormTableName;
 private import peque.orm.ordering: Ordering, OrderKind;
-private import peque.hydration: camelToSnake;
+private import peque.orm.sql: _sqlIdent;
 
 
 /// true if T is a FieldBuilder instantiation — used to keep the generic
@@ -539,11 +539,11 @@ unittest {
     import peque.orm.predicate: serializePredicate;
     import peque.orm.ordering: OrderDir;
 
-    // Plain field: resolved by camelToSnake against the main table. The
+    // Plain field: the name IS the column on the main table. The
     // reference is always qualified with the table alias, which is why the
     // column name needs no quoting here even for a reserved word.
     auto p = F!"status"("active");
-    assert(serializePredicate(p).sql == "_m.status = $1");
+    assert(serializePredicate(p).sql == `_m."status" = $1`);
 
     // A dotted path is left unresolved here — QuerySet resolves it against the
     // model at SQL-build time, adding the LEFT JOINs it needs.
@@ -576,14 +576,14 @@ private size_t _pathDotCount(string s) pure nothrow @safe @nogc {
 
 /** Type-free field builder — no explicit model type needed.
   *
-  * For plain fields (no dot): resolves via camelToSnake convention, returns a
+  * For plain fields (no dot): the name IS the column, returns a
   * concrete FieldBuilder with "_m." prefix identical to F!(M, "field").
   *
   * For join paths (one or two dots): returns a PathBuilder that carries the
   * unresolved path. The QuerySet resolves it against the model at SQL-build time,
   * adding implicit LEFT JOINs as needed.
   *
-  * Note: plain-field resolution uses camelToSnake without model validation.
+  * Note: plain-field resolution does no model validation.
   * Typos in field names become runtime PostgreSQL errors rather than compile-time
   * failures. Use F!(M, "field") when compile-time validation is desired.
   **/
@@ -596,15 +596,15 @@ template F(string path) {
     static if (_pathHasDot(path)) {
         enum PathBuilder!path F = PathBuilder!path.init;
     } else {
-        enum FieldBuilder!("_m." ~ camelToSnake(path)) F =
-            FieldBuilder!("_m." ~ camelToSnake(path)).init;
+        enum FieldBuilder!("_m." ~ _sqlIdent(path)) F =
+            FieldBuilder!("_m." ~ _sqlIdent(path)).init;
     }
 }
 
 /** Type-free subquery field builder for use inside exists!() predicates.
   *
   * Returns a FieldBuilder with "_sq." prefix — no model type validation.
-  * Column name resolved via camelToSnake convention.
+  * The name given IS the column name.
   *
   * Usage (inside exists!(M)(...)  — M provides the inner table):
   * ---
@@ -615,8 +615,8 @@ template F(string path) {
   * ---
   **/
 template SF(string fieldName) {
-    enum FieldBuilder!("_sq." ~ camelToSnake(fieldName)) SF =
-        FieldBuilder!("_sq." ~ camelToSnake(fieldName)).init;
+    enum FieldBuilder!("_sq." ~ _sqlIdent(fieldName)) SF =
+        FieldBuilder!("_sq." ~ _sqlIdent(fieldName)).init;
 }
 
 

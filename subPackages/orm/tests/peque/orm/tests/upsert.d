@@ -32,7 +32,7 @@ struct UpsItem {
 }
 
 @model("ups_settings")
-@uniqueTogether!("user_id", "key")
+@uniqueTogether!("userId", "key")
 struct UpsSetting {
     @primaryKey int    id;
     @field      int    userId;

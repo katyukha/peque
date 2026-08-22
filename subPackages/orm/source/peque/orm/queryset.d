@@ -345,7 +345,7 @@ private string _resolveOneLevel(M, JoinFields...)(
     // 2 — relName resolves via @related or @many2one on M. Resolve its RelType
     //     first (so the leaf column honors @field("col") overrides), then reuse
     //     an existing filter join for this path or create a new one. Resolving
-    //     RelType in both cases fixes the earlier camelToSnake fallback that
+    //     RelType in both cases means the leaf honours @field("col")
     //     ignored @field on the reuse path.
     static foreach (memberName; FieldNameTuple!M) {{
         alias Mem = __traits(getMember, M, memberName);
@@ -625,102 +625,121 @@ private string _filterJoinSQL(ref _FilterJoin[] fjoins) {
 }
 
 // ---------------------------------------------------------------------------
-// CTFE helpers for select!DTO implicit join inference
+// CTFE helpers for select!DTO
 // ---------------------------------------------------------------------------
 
-// Returns true at compile time if colName is a DB column on M.
-private bool _isMainColCTFE(M, string colName)() {
-    static foreach (memberName; FieldNameTuple!M) {{
-        alias F = __traits(getMember, M, memberName);
-        static if (_isColField!F) {
-            if (_colName!(F, memberName) == colName)
-                return true;
-        }
-    }}
-    return false;
-}
-
-// The @related member on M whose derived column prefix (camelToSnake ~ "_") is
-// the LONGEST prefix of dtoColName, or "" if none matches. Longest-prefix-wins
-// disambiguates the case where one relation name is a prefix of another: with
-// relations `partner` and `partnerCompany`, the column `partner_company_name`
-// binds to `partnerCompany` (prefix `partner_company_`), not `partner` (prefix
-// `partner_`, which would leave a bogus `company_name` leaf column).
-// CTFE helper — both _neededRelsCTFE and select!DTO's SELECT-list builder use
-// it so the set of joined relations and the column resolution cannot diverge.
-private string _bestRelForColCTFE(M)(string dtoColName) {
-    import peque.model: related;
-    import peque.hydration: camelToSnake;
-    string best;
-    size_t bestLen = 0;
-    static foreach (relMemberName; FieldNameTuple!M) {{
-        alias RelMem = __traits(getMember, M, relMemberName);
-        static if (hasUDA!(RelMem, related)) {
-            enum relPrefix = camelToSnake(relMemberName) ~ "_";
-            if (dtoColName.length > relPrefix.length &&
-                dtoColName[0 .. relPrefix.length] == relPrefix &&
-                relPrefix.length > bestLen) {
-                best = relMemberName;
-                bestLen = relPrefix.length;
+// Comma-separated relation / column names on M, for error messages.
+private template _relNamesOf(M) {
+    private static string _collect() {
+        string r;
+        static foreach (mn; FieldNameTuple!M) {{
+            alias Mem = __traits(getMember, M, mn);
+            static if (hasUDA!(Mem, related) || hasMany2OneUDA!Mem) {
+                if (r.length) r ~= ", ";
+                r ~= mn;
             }
-        }
-    }}
-    return best;
+        }}
+        return r.length ? r : "(none)";
+    }
+    enum _relNamesOf = _collect();
 }
 
-// Longest matching explicit-JoinField prefix for a DTO column name.
-// idx is the JoinFields index (-1 when nothing matches); len is the matched
-// prefix length, used to compare against the implicit-relation match.
-private struct _PrefixHit { ptrdiff_t idx = -1; size_t len = 0; }
-
-private _PrefixHit _bestJfHitCTFE(JoinFields...)(string dtoColName) {
-    import peque.hydration: camelToSnake;
-    _PrefixHit hit;
-    static foreach (i, jf; JoinFields) {{
-        enum jfPrefix = camelToSnake(jf) ~ "_";
-        if (dtoColName.length > jfPrefix.length &&
-            dtoColName[0 .. jfPrefix.length] == jfPrefix &&
-            jfPrefix.length > hit.len) {
-            hit.idx = i;
-            hit.len = jfPrefix.length;
-        }
-    }}
-    return hit;
+private template _colNamesOf(M) {
+    private static string _collect() {
+        string r;
+        static foreach (mn; FieldNameTuple!M) {{
+            static if (_isColField!(__traits(getMember, M, mn))) {
+                if (r.length) r ~= ", ";
+                r ~= mn;
+            }
+        }}
+        return r.length ? r : "(none)";
+    }
+    enum _colNamesOf = _collect();
 }
 
-private ptrdiff_t _indexOfNameCTFE(string[] names, string name) {
-    foreach (i, n; names) if (n == name) return i;
-    return -1;
+// Validate a @field(related:) path against the queried model, at compile time.
+// The path is an enum string and M is a template parameter, so a typo has no
+// reason to reach the database — and the error can name what IS available.
+private template _validateRelatedPath(M, string path, string memberName) {
+    import std.string: indexOf;
+
+    private enum _where = " (@field(related: \"" ~ path ~ "\") on member '" ~
+                          memberName ~ "')";
+    private enum _d1   = indexOf(path, '.');
+    private enum _rel1 = path[0 .. _d1];
+    private enum _rest = path[_d1 + 1 .. $];
+
+    alias _R1 = _pathRelType!(M, _rel1);
+    static assert(!is(_R1 == void),
+        "No @related or @many2one field '" ~ _rel1 ~ "' on " ~ M.stringof ~
+        _where ~ ". Relations available: " ~ _relNamesOf!M ~ ".");
+
+    private enum _d2 = indexOf(_rest, '.');
+    static if (_d2 < 0) {
+        static assert(_mainColForDtoCTFE!(_R1, _rest)().length,
+            "No column '" ~ _rest ~ "' on " ~ _R1.stringof ~ _where ~
+            ". Columns available: " ~ _colNamesOf!_R1 ~ ".");
+    } else {
+        private enum _rel2 = _rest[0 .. _d2];
+        private enum _leaf = _rest[_d2 + 1 .. $];
+
+        static assert(indexOf(_leaf, '.') < 0,
+            "Relation path is deeper than the two relation segments supported" ~
+            _where ~ ". Query from the far side of the relation instead.");
+
+        alias _R2 = _pathRelType!(_R1, _rel2);
+        static assert(!is(_R2 == void),
+            "No @related or @many2one field '" ~ _rel2 ~ "' on " ~ _R1.stringof ~
+            _where ~ ". Relations available: " ~ _relNamesOf!_R1 ~ ".");
+        static assert(_mainColForDtoCTFE!(_R2, _leaf)().length,
+            "No column '" ~ _leaf ~ "' on " ~ _R2.stringof ~ _where ~
+            ". Columns available: " ~ _colNamesOf!_R2 ~ ".");
+    }
+    enum _validateRelatedPath = true;
 }
 
-// Returns a list of @related member names on M that are needed to satisfy DTO fields.
-// Called in CTFE context via enum.
-private string[] _neededRelsCTFE(M, DTO)() {
-    import peque.hydration: camelToSnake;
+// The relation path a DTO member declares via @field(related: "rel.field"),
+// or "" when it is an ordinary column on the main table. The path must name a
+// relation AND a field on it: a dotless value would resolve against the main
+// table, making it either a roundabout @field("col") or — more likely — a
+// request for the whole related object, which no scalar member can hold.
+private template _dtoRelatedPath(alias FieldDecl) {
+    import std.traits: getUDAs;
+    import std.string: indexOf;
+    import peque.model: field;
+    alias _u = getUDAs!(FieldDecl, field);
+    static if (_u.length > 0 && !is(_u[0])) {
+        static assert(_u[0].related.length == 0 || indexOf(_u[0].related, '.') > 0,
+            "@field(related: \"" ~ _u[0].related ~ "\") on `" ~
+            __traits(identifier, FieldDecl) ~ "` must name a relation and a " ~
+            "field on it, as in \"partner.name\". For a column on this table " ~
+            "use @field(\"" ~ _u[0].related ~ "\"); for the whole related " ~
+            "object query the model itself with load!.");
+        enum _dtoRelatedPath = _u[0].related;
+    } else
+        enum _dtoRelatedPath = "";
+}
 
-    string[] mainCols;
+// The main-table column a DTO member names, or "" if it names none.
+// Matched by D member name first, so `partnerId` finds its column however
+// @field renamed it, then by column name so a DTO may spell one out directly.
+private string _mainColForDtoCTFE(M, string name)() {
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
         static if (_isColField!F)
-            mainCols ~= _colName!(F, memberName);
+            if (memberName == name) return _colName!(F, memberName);
     }}
-
-    string[] needed;
-    static foreach (dtoMemberName; FieldNameTuple!DTO) {{
-        enum dtoColName = camelToSnake(dtoMemberName);
-        bool isMain = false;
-        foreach (c; mainCols) if (c == dtoColName) { isMain = true; break; }
-        if (!isMain) {
-            enum best = _bestRelForColCTFE!M(dtoColName);
-            static if (best.length) {
-                bool found = false;
-                foreach (n; needed) if (n == best) { found = true; break; }
-                if (!found) needed ~= best;
-            }
-        }
+    // A DTO may also spell the column out directly.
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (_isColField!F)
+            if (_colName!(F, memberName) == name) return _colName!(F, memberName);
     }}
-    return needed;
+    return "";
 }
+
+
 
 
 /** One SET assignment for a bulk UPDATE.
@@ -1216,11 +1235,11 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** One LEFT JOIN onto the table behind a @related field.
       *
-      * Every join peque emits from a @related field goes through here — the
-      * hydration joins (j0…), select!DTO's implicit joins (dj0…) and the
-      * grouped select all share it, so the ON clause and the missing-FK check
-      * cannot drift apart between them. Runtime filter joins are built from
-      * resolved _FilterJoin values instead; see _filterJoinSQL.
+      * The hydration joins (j0…) and the grouped select share it, so the ON
+      * clause and the missing-FK check cannot drift apart between them.
+      * Runtime filter joins — from relation paths in where/orderBy and from
+      * @field(related:) — are built from resolved _FilterJoin values instead;
+      * see _filterJoinSQL.
       **/
     package(peque.orm) static string _relJoinSQL(string relField, string aliasName)() {
         alias RelType = _innerRelType!(M, relField);
@@ -1648,7 +1667,7 @@ if (isModel!M && isQueryContext!Ctx) {
       * ---
       **/
     DTO[] select(DTO)() {
-        import peque.hydration: camelToSnake, _hydrateAnnotated;
+        import peque.hydration: _hydrateAnnotated;
 
         // Resolve path predicates, collect filter joins
         _FilterJoin[] fjoins;
@@ -1661,56 +1680,39 @@ if (isModel!M && isQueryContext!Ctx) {
         // so any join a `path` term needs is included in the FROM clause.
         string orderBySql = _resolveOrderBySql(fjoins, fjIdx);
 
-        // Compute implicit DTO-driven relation names at compile time
-        enum neededRelNames = _neededRelsCTFE!(M, DTO)();
-        enum nRels = neededRelNames.length;
-
-        // Build SELECT list
+        // Build SELECT list. Both the column and the AS alias are quoted:
+        // hydration looks the DTO member up case-exactly, and a bare alias
+        // would be folded to lower case by the server.
         string selList;
-        static foreach (i, dtoMemberName; FieldNameTuple!DTO) {{
-            enum dtoColName = camelToSnake(dtoMemberName);
+        static foreach (dtoMemberName; FieldNameTuple!DTO) {{
+            enum relPath = _dtoRelatedPath!(__traits(getMember, DTO, dtoMemberName));
             if (selList.length) selList ~= ", ";
 
-            static if (_isMainColCTFE!(M, dtoColName)()) {
-                selList ~= "_m." ~ _sqlIdent(dtoColName);
+            static if (relPath.length) {
+                // @field(related: "partner.name") — resolved by the same path
+                // resolver that WHERE and ORDER BY use, so the join is shared
+                // with them and with load!, and is created at most once.
+                static assert(_validateRelatedPath!(M, relPath, dtoMemberName));
+                selList ~= _resolvePathToCol!(M, JoinFields)(relPath, fjoins, fjIdx) ~
+                           " AS " ~ _sqlIdent(dtoMemberName);
             } else {
-                // Bind the column to the relation with the LONGEST matching
-                // prefix across BOTH explicitly loaded joins (JoinFields → j*)
-                // and implicit DTO-driven joins (dj*). Taking the first matching
-                // JoinField instead bound partner_company_name to `partner`,
-                // silently selecting company_name from the wrong table whenever
-                // one relation name is a prefix of another. A tie prefers the
-                // explicit join, which is already in the FROM clause.
-                //
-                // The column is quoted; the AS alias stays bare because
-                // hydration looks the DTO member up by that exact snake_case
-                // name (both positions accept keywords unquoted anyway).
-                enum jfHit   = _bestJfHitCTFE!JoinFields(dtoColName);
-                enum relBest = _bestRelForColCTFE!M(dtoColName);
-                enum relLen  = relBest.length ? camelToSnake(relBest).length + 1 : 0;
-                enum djIdx   = _indexOfNameCTFE(neededRelNames, relBest);
-
-                static if (jfHit.idx >= 0 && jfHit.len >= relLen) {
-                    selList ~= "j" ~ to!string(jfHit.idx) ~ "." ~
-                               _sqlIdent(dtoColName[jfHit.len .. $]) ~
-                               " AS " ~ dtoColName;
-                } else static if (relLen > 0 && djIdx >= 0) {
-                    selList ~= "dj" ~ to!string(djIdx) ~ "." ~
-                               _sqlIdent(dtoColName[relLen .. $]) ~
-                               " AS " ~ dtoColName;
-                } else {
-                    selList ~= _sqlIdent(dtoColName);   // fallback
-                }
+                enum mainCol = _mainColForDtoCTFE!(M, dtoMemberName)();
+                static assert(mainCol.length,
+                    "select!" ~ DTO.stringof ~ ": member '" ~ dtoMemberName ~
+                    "' is not a column on " ~ M.stringof ~ ". Name the column " ~
+                    "with @field(\"col\"), or, if the value comes through a " ~
+                    "relation, @field(related: \"rel.field\") — peque does not " ~
+                    "infer a join from the member name.");
+                selList ~= "_m." ~ _sqlIdent(mainCol) ~
+                           " AS " ~ _sqlIdent(dtoMemberName);
             }
         }}
 
-        // FROM + hydration joins (j0…) + the implicit joins the DTO needs (dj0…)
-        string fromClause = " FROM " ~ ormTableName!M ~ " _m" ~ _hydrationJoinSQL();
-        static foreach (ni; 0 .. nRels)
-            fromClause ~= _relJoinSQL!(neededRelNames[ni], "dj" ~ to!string(ni));
-
-        // Runtime filter joins from WHERE predicates
-        fromClause ~= _filterJoinSQL(fjoins);
+        // FROM + hydration joins (j0…) + the filter joins WHERE / ORDER BY /
+        // related members needed. Built after the SELECT list so the joins a
+        // related member creates are included.
+        string fromClause = " FROM " ~ ormTableName!M ~ " _m" ~
+                            _hydrationJoinSQL() ~ _filterJoinSQL(fjoins);
 
         string whereSQL;
         PGValue[] params;
@@ -1802,7 +1804,7 @@ if (is(QS == QuerySet!Args, Args...)) {
       *    annotate!("amountSpread", "MAX(_m.amount) - MIN(_m.amount)")
       *
       * The alias must equal the DTO member name it should populate in
-      * select!DTO (the SQL column alias is derived via camelToSnake for
+      * select!DTO (the SQL column alias is the DTO member name, for
       * hydration).  Annotations not referenced by the DTO are not emitted.
       *
       * Security: a raw expression is embedded in the query verbatim — only
@@ -1900,14 +1902,13 @@ if (is(QS == QuerySet!Args, Args...)) {
       *  2. an annotate! alias       → emitted as <expr> AS member_name
       *  3. neither                  → compile error (GROUP-BY validation)
       *
-      * The SQL column alias is camelToSnake(memberName), matching @autoHydrate
+      * The SQL column alias is the member name, matching @autoHydrate
       * convention hydration.  Aggregate DTO members should be long (count,
       * integral sum), double (avg, floating sum), or Nullable!T where a group
       * could aggregate over only-NULL values.
       **/
     DTO[] select(DTO)() {
-        import peque.hydration: camelToSnake;
-
+    
         // Compile-time SELECT list + GROUP-BY validation
         string selList;
         static foreach (dtoMemberName; FieldNameTuple!DTO) {{
@@ -1919,7 +1920,7 @@ if (is(QS == QuerySet!Args, Args...)) {
                 " aggregate columns must be registered via annotate!(\"" ~
                 dtoMemberName ~ "\", ...).");
             if (selList.length) selList ~= ", ";
-            selList ~= expr ~ " AS " ~ camelToSnake(dtoMemberName);
+            selList ~= expr ~ " AS " ~ _sqlIdent(dtoMemberName);
         }}
 
         // Resolve WHERE / ORDER BY / HAVING predicates, collecting the filter

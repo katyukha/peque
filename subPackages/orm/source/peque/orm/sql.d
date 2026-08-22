@@ -12,7 +12,6 @@
 module peque.orm.sql;
 
 private import peque.model: model, field, primaryKey, hasMany2OneUDA;
-private import peque.hydration: camelToSnake;
 private import std.traits: FieldNameTuple, hasUDA, getUDAs;
 private import std.conv: to;
 private import peque.converter: PGValue, convertToPG;
@@ -34,9 +33,9 @@ private import peque.converter: PGValue, convertToPG;
   * always agree, so no manual quoting is ever needed in @model / @field.
   *
   * Consequence worth knowing: quoted identifiers are case-exact, so the string
-  * you write IS the identifier. For a lowercase name — everything camelToSnake
-  * produces — quoting is indistinguishable from emitting it bare, so the usual
-  * snake_case model needs no thought. Only if you deliberately write mixed case
+  * you write IS the identifier. For an all-lowercase name, quoting is
+  * indistinguishable from emitting it bare, so such a model needs no thought.
+  * Only if you write mixed case
   * (`@field("MyCol")`) do you get a case-sensitive column, which is then also
   * how you address one in a legacy schema.
   *
@@ -102,7 +101,8 @@ unittest {
 // ---------------------------------------------------------------------------
 
 // Resolve the SQL column name for a field (mirrors hydration._resolveColName).
-// Priority: @field("explicit") > camelToSnake(memberName).
+// Priority: @field("explicit") > the D member name verbatim (no case conversion —
+// peque quotes identifiers, so the member name IS the column name).
 // Template form (not a function) to avoid "requires instance" errors inside
 // static foreach in CTFE functions.
 package(peque.orm) template _colName(alias F, string memberName) {
@@ -110,11 +110,28 @@ package(peque.orm) template _colName(alias F, string memberName) {
     static if (_fudas.length > 0 && !is(_fudas[0]) && _fudas[0].columnName.length > 0)
         enum string _colName = _fudas[0].columnName;
     else
-        enum string _colName = camelToSnake(memberName);
+        enum string _colName = memberName;
 }
 
 // True when a field maps to a DB column: @field, @primaryKey, or @many2one.
+// The relation path declared by @field(related: "..."), or "" if none.
+package(peque.orm) template _relatedPathOf(alias F) {
+    static if (getUDAs!(F, field).length > 0 && !is(getUDAs!(F, field)[0]))
+        enum _relatedPathOf = getUDAs!(F, field)[0].related;
+    else
+        enum _relatedPathOf = "";
+}
+
 package(peque.orm) template _isColField(alias F) {
+    // Every model column passes through here, which is why the related: guard
+    // lives here rather than in _colInfos — schema.d iterates FieldNameTuple
+    // directly, so a guard there would miss DDL.
+    static assert(_relatedPathOf!F.length == 0,
+        "@field(related: \"" ~ _relatedPathOf!F ~ "\") on " ~ __traits(identifier, F) ~
+        ": a model's fields are columns on its own table. Declare the relation " ~
+        "with @many2one/@related, and use @field(related:) only on a select!DTO " ~
+        "projection struct.");
+
     enum bool _isColField =
         hasUDA!(F, field) || hasUDA!(F, primaryKey) || hasMany2OneUDA!F;
 }
@@ -372,9 +389,8 @@ PGValue[] buildInsertParamsMany(M)(in M[] records) {
 /** Runtime lookup: column name for D member name on M.
   *
   * Iterates all column fields of M (static foreach) and returns the SQL column
-  * name for the member whose D name equals memberName. Falls back to
-  * camelToSnake(memberName) for convention-based plain fields not found in
-  * the model (accepts camelCase names that convert cleanly).
+  * name for the member whose D name equals memberName, falling back to
+  * memberName itself for names not declared on the model.
   **/
 package(peque.orm) string _fieldColNameRuntime(M)(string memberName) {
     import std.exception: enforce;
@@ -388,13 +404,13 @@ package(peque.orm) string _fieldColNameRuntime(M)(string memberName) {
         }
     }}
     // A leaf name containing '.' means a relation path reached a place expecting
-    // a plain field. camelToSnake would pass it straight through and the caller
-    // would splice it into SQL as a qualified name (fj1.c.d → schema.table.col).
+    // a plain field. Quoting it would splice a bogus identifier into the SQL,
+    // so reject it where the mistake is still attributable.
     enforce!QueryClientError(indexOf(memberName, '.') < 0,
         "'" ~ memberName ~ "' is not a column on " ~ M.stringof ~ " and contains a " ~
         "'.', so it cannot be a column name either — a relation path was passed " ~
         "where a field name was expected.");
-    return _sqlIdent(camelToSnake(memberName));
+    return _sqlIdent(memberName);
 }
 
 /** Return the SQL column name for fieldName on M if it is a DB column field.

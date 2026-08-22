@@ -27,7 +27,9 @@ struct Event {
     @primaryKey int     id;
     @field      string  name;
     @field      string  status;
-    @field      SysTime createdAt;
+    // The table predates the model and uses snake_case, so the mapping is
+    // spelled out: peque derives nothing from the D member name.
+    @field("created_at") SysTime createdAt;
 
     void applyDefaults() {
         if (status.length == 0) status = "pending";

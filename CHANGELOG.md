@@ -8,19 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **`peque:orm`** — ORM-layer that provides compile-time model registry,
-  schema-generation, QuerySets and basic CRUD implementation.
-- **`peque:migrate`** — Minimal migration runner infrastructure.
 - **Struct hydration** in the core package, usable without `peque:orm`:
-  `ResultRow.as!T` / `Result.as!(T[])` with a documented dispatch chain
-  (user constructor, `fromRow` factory, `@model` strict mapping,
-  `@autoHydrate` convention mapping).
+  `ResultRow.as!T` / `Result.as!(T[])` with a documented dispatch chain (user
+  constructor, `fromRow` factory, `@model` strict mapping, annotated-fields
+  mapping, `@autoHydrate` convention mapping).
+
+  Column names are never derived: a bare `@field` maps to a column of exactly
+  that name, and `@field("col")` names one that differs. Every identifier is
+  emitted quoted, so the name written is the name used, case included.
+
+  `@model` marks a *table* — it is what `isModel` requires, so only such a
+  struct can enter a `Registry` or back a `Repository`. A struct whose members
+  merely carry `@field`/`@primaryKey` hydrates as well, so a projection or a
+  `RETURNING` row gets the same strict, aliasable mapping without claiming a
+  table it does not have.
+
+- **`peque:orm`** — ORM layer providing a compile-time model registry, schema
+  generation, QuerySets and CRUD. `select!DTO` projects into a flat struct whose
+  members are columns on the queried table; `@field(related: "partner.name")`
+  projects a value reached through a relation, sharing its `LEFT JOIN` with
+  `where`/`orderBy`/`load!`. Relation paths are validated against the model at
+  compile time.
+- **`peque:migrate`** — Minimal migration runner infrastructure.
 
 ### Changed
 
-- **Exception tree redesigned** (breaking). Every exception now derives from
-  `PequeException`, including `MigrationError`, which previously derived from
-  `Exception` and so escaped `catch (PequeException)`.
+- **Exception tree redesigned** (breaking). Every exception peque throws now
+  derives from `PequeException`, so a single `catch` covers the library.
 
   New types: `QueryClientError` (your call is wrong) and `QueryServerError`
   (PostgreSQL rejected it) under `QueryError`; `IntegrityError` (SQLSTATE class

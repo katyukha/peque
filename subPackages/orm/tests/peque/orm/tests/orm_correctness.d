@@ -1,25 +1,16 @@
-/** Integration + CTFE tests for the ORM-correctness fixes.
+/** Integration + CTFE tests for ORM-correctness fixes.
   *
-  * Covers:
-  *  #1 — @field("col") override on the @primaryKey is honored by ormPkColName
-  *       (and end-to-end CRUD stays internally consistent).
-  *  #2 — where!"field"(null Nullable) becomes `IS NULL` (and .ne(null) becomes
-  *       `IS NOT NULL`) instead of the never-matching `col = NULL`.
-  *  #3 — @many2many prefetch qualifies target columns (junction sharing an `id`
-  *       column is no longer ambiguous) and aliases the self-key (self-
-  *       referential m2m stitches correctly).
-  *  #4 — set!"field" twice is last-write-wins (no "multiple assignments to same
-  *       column"); CRUD update() on a zero-non-PK-column model is a compile
-  *       error, mirroring upsert().
-  *  #5 — select!DTO binds a column to the relation with the LONGEST matching
-  *       prefix, so partner_company_name resolves against partnerCompany, not
-  *       partner.
+  * Each numbered section pins one fix, with the model and DTO it needs beside
+  * it. Where a bug produced plausible wrong data rather than an error, the
+  * fixture is built so the wrong answer is distinguishable from the right one.
   **/
 module peque.orm.tests.orm_correctness;
 
 private import std.process: environment;
 private import std.typecons: Nullable, nullable;
 private import std.exception: assertThrown;
+private import std.algorithm.searching: count;
+private import peque.query_context: isQueryContext;
 
 private import peque.connection: Connection;
 private import peque.exception: QueryError;
@@ -261,8 +252,11 @@ unittest {
 
 
 // ===========================================================================
-// #5 — select!DTO longest-prefix relation resolution (partner vs partnerCompany)
+// #5 — select!DTO: two relations to the same table, one a prefix of the other
 // ===========================================================================
+//
+// `partner` and `partnerCompany` both target occ_org. Each related: path must
+// resolve to its own relation.
 
 @model("occ_org")
 struct OccOrg {
@@ -288,8 +282,8 @@ alias OccRecReg = Registry!(
 struct OccRecDTO {
     int    id;
     string title;
-    string partnerName;         // partner_name        → partner.name
-    string partnerCompanyName;  // partner_company_name → partnerCompany.name
+    @field(related: "partner.name")        string partnerName;
+    @field(related: "partnerCompany.name") string partnerCompanyName;
 }
 
 unittest {
@@ -453,14 +447,13 @@ unittest {
 
 
 // ===========================================================================
-// #8 — select!DTO longest-prefix across EXPLICIT joins too (ORM-2)
+// #8 — select!DTO: prefix-sharing relations, both explicitly loaded (ORM-2)
 // ===========================================================================
 //
-// #5 fixed the implicit (dj*) branch; the explicit JoinFields (j*) branch kept
-// taking the FIRST matching prefix. With both relations explicitly loaded,
-// partner_company_name matched "partner_" first and selected company_name from
-// the PARTNER row. The target table here deliberately HAS a company_name
-// column, so the bug returns plausible wrong data instead of erroring.
+// As #5, but with both relations pulled in by load!, so the paths resolve
+// against the hydration joins (j*) rather than creating their own. The target
+// table carries a companyName column as a decoy: picking the wrong relation or
+// the wrong leaf yields plausible data rather than an error.
 
 @model("sd_org")
 struct SdOrg {
@@ -488,8 +481,8 @@ alias SdReg = Registry!(
 struct SdDTO {
     int    id;
     string title;
-    string partnerName;         // partner_name         → partner.name
-    string partnerCompanyName;  // partner_company_name → partnerCompany.name
+    @field(related: "partner.name")        string partnerName;
+    @field(related: "partnerCompany.name") string partnerCompanyName;
 }
 
 unittest {
@@ -530,7 +523,7 @@ unittest {
     assert(dtos2[0].partnerName == "Acme");
     assert(dtos2[0].partnerCompanyName == "Globex");
 
-    // And with no explicit load at all, the implicit dj* branch still works.
+    // With no load! at all, the paths create the joins themselves.
     auto dtos3 = recRepo.query().select!SdDTO();
     assert(dtos3.length == 1);
     assert(dtos3[0].partnerName == "Acme");
@@ -714,4 +707,327 @@ unittest {
     auto small = new OccNull[](3);
     foreach (i, ref r; small) r.name = "bulk";
     assert(repo.insertMany(small).length == 3);
+}
+
+
+// ---------------------------------------------------------------------------
+// #11 — select!DTO matches a DTO member against the model's D field names,
+//       not only against its column names.
+//
+// `@field("owner_note") string ownerNote` is an ordinary main-table column
+// whose name shares nothing with the member's, so matching column names alone
+// leaves it unmatched — which is now a compile error. Both tables still carry
+// a `note` column with different values, so a member that did bind to the
+// wrong one would show up in the data rather than silently.
+// ---------------------------------------------------------------------------
+
+@model("ocn_owner")
+private struct OcnOwner {
+    @primaryKey int    id;
+    @field      string name;
+    @field      string note;
+}
+
+@model("ocn_doc")
+private struct OcnDoc {
+    @primaryKey                                int          id;
+    @field("owner_note")                       string       ownerNote;
+    @field("owner_id") @many2one!(OcnOwner)    Nullable!int ownerId;
+    @related("ownerId")                        Nullable!OcnOwner owner;
+}
+
+@autoHydrate
+private struct OcnDocDTO {
+    int    id;
+    string ownerNote;   // must be ocn_doc.owner_note
+    @field(related: "owner.name") string ownerName;
+}
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS ocn_doc`);
+    c.exec(`DROP TABLE IF EXISTS ocn_owner`);
+    c.exec(`CREATE TABLE ocn_owner (
+                id   SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                note TEXT NOT NULL)`);
+    c.exec(`CREATE TABLE ocn_doc (
+                id         SERIAL PRIMARY KEY,
+                owner_note TEXT NOT NULL,
+                owner_id   INTEGER REFERENCES ocn_owner(id))`);
+
+    auto ownerRepo = Repository!(OcnOwner, Connection)(&c);
+    auto o = OcnOwner(0, "Ann", "TARGET-NOTE");
+    auto owner = ownerRepo.insert(o);
+
+    auto docRepo = Repository!(OcnDoc, Connection)(&c);
+    OcnDoc d;
+    d.ownerNote = "MAIN-NOTE";
+    d.ownerId   = owner.id.nullable;
+    docRepo.insert(d);
+
+    auto rows = docRepo.query().select!OcnDocDTO();
+    assert(rows.length == 1);
+    assert(rows[0].ownerNote == "MAIN-NOTE",
+        "ownerNote must come from ocn_doc.owner_note, got: " ~ rows[0].ownerNote);
+    assert(rows[0].ownerName == "Ann");
+
+    c.exec(`DROP TABLE IF EXISTS ocn_doc`);
+    c.exec(`DROP TABLE IF EXISTS ocn_owner`);
+}
+
+
+// ---------------------------------------------------------------------------
+// #12 — select!DTO never infers a join from a member name.
+//
+// A DTO member is a column on the main table unless @field(related:) says
+// otherwise. That is what lets a real `partnerName` column and a `partner`
+// relation coexist in one DTO, which no inferred reading could express.
+// ---------------------------------------------------------------------------
+
+@model("rel_partner")
+private struct RelP {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("rel_doc")
+private struct RelD {
+    @primaryKey           int          id;
+    @field                string       partnerName;   // a REAL column
+    @many2one!(RelP)      Nullable!int partnerId;
+    @related("partnerId") Nullable!RelP partner;
+}
+
+@autoHydrate
+private struct RelDTO {
+    int    id;
+    string partnerName;                                     // the column
+    @field(related: "partner.name") string relPartnerName;  // through the relation
+}
+
+@autoHydrate
+private struct RelInferDTO {
+    int    id;
+    string partnerCode;    // names nothing on RelD — must not become partner.code
+}
+
+@autoHydrate
+private struct RelBothDTO {
+    int id;
+    @field("partnerName", related: "partner.name") string x;   // mutually exclusive
+}
+
+unittest {
+    // A member that matches no column is a compile error, not an inferred join
+    // and not a runtime "column does not exist".
+    alias QS = typeof(Repository!(RelD, Connection).init.query());
+    static assert( __traits(compiles, QS.init.select!RelDTO()));
+    static assert(!__traits(compiles, QS.init.select!RelInferDTO()),
+        "a member naming no column must be rejected, not inferred as a join");
+    static assert(!__traits(compiles, QS.init.select!RelBothDTO()),
+        "@field cannot set both a column name and related:");
+}
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS rel_doc`);
+    c.exec(`DROP TABLE IF EXISTS rel_partner`);
+    c.exec(schemaSQL!(Registry!(Bind!(RelP, ModelRepo!RelP),
+                                Bind!(RelD, ModelRepo!RelD)))());
+
+    auto pRepo = Repository!(RelP, Connection)(&c);
+    auto seed  = RelP(0, "FROM-RELATION");
+    auto p     = pRepo.insert(seed);
+
+    auto dRepo = Repository!(RelD, Connection)(&c);
+    RelD d;
+    d.partnerName = "FROM-COLUMN";
+    d.partnerId   = p.id.nullable;
+    dRepo.insert(d);
+
+    // Both readings available at once, and the related one shares the join
+    // whether or not the relation was also load!ed.
+    foreach (row; [dRepo.query().select!RelDTO()[0],
+                   dRepo.query().load!"partner"().select!RelDTO()[0]]) {
+        assert(row.partnerName    == "FROM-COLUMN",   row.partnerName);
+        assert(row.relPartnerName == "FROM-RELATION", row.relPartnerName);
+    }
+
+    c.exec(`DROP TABLE IF EXISTS rel_doc`);
+    c.exec(`DROP TABLE IF EXISTS rel_partner`);
+}
+
+// related: on a model's own field is rejected: a model's fields are columns on
+// its own table, so it would otherwise sit there permanently unpopulated.
+@model("rel_bad")
+private struct RelBadModel {
+    @primaryKey                     int    id;
+    @field(related: "partner.name") string pn;
+}
+
+unittest {
+    static assert(!__traits(compiles, modelDDL!RelBadModel()),
+        "@field(related:) on a model field must be rejected");
+    static assert( __traits(compiles, modelDDL!RelP()),
+        "control: an ordinary model still generates DDL");
+}
+
+
+// ---------------------------------------------------------------------------
+// #13 — @field(related:) spans two relations and shares the LEFT JOIN.
+//
+// Related paths go through the same resolver as where()/orderBy(), inheriting
+// two-segment support and join reuse. The join is a LEFT JOIN, so a nullable
+// FK yields SQL NULL — which is why such a member wants Nullable!T.
+// ---------------------------------------------------------------------------
+
+@model("th_country")
+private struct ThCountry {
+    @primaryKey int    id;
+    @field      string code;
+}
+
+@model("th_partner")
+private struct ThPartner {
+    @primaryKey           int          id;
+    @field                string       name;
+    @many2one!(ThCountry) Nullable!int countryId;
+    @related("countryId") Nullable!ThCountry country;
+}
+
+@model("th_invoice")
+private struct ThInvoice {
+    @primaryKey           int          id;
+    @field                string       number;
+    @many2one!(ThPartner) Nullable!int partnerId;
+    @related("partnerId") Nullable!ThPartner partner;
+}
+
+@autoHydrate
+private struct ThDTO {
+    int    id;
+    string number;
+    @field(related: "partner.name")         Nullable!string partnerName;
+    @field(related: "partner.country.code") Nullable!string partnerCountry;
+}
+
+unittest {
+    auto c = makeConn();
+    foreach (t; ["th_invoice", "th_partner", "th_country"])
+        c.exec(`DROP TABLE IF EXISTS ` ~ t);
+    c.exec(schemaSQL!(Registry!(Bind!(ThCountry, ModelRepo!ThCountry),
+                                Bind!(ThPartner, ModelRepo!ThPartner),
+                                Bind!(ThInvoice, ModelRepo!ThInvoice)))());
+
+    auto coSeed  = ThCountry(0, "UA");
+    auto country = Repository!(ThCountry, Connection)(&c).insert(coSeed);
+    ThPartner p; p.name = "Acme"; p.countryId = country.id.nullable;
+    auto partner = Repository!(ThPartner, Connection)(&c).insert(p);
+
+    auto ir = Repository!(ThInvoice, Connection)(&c);
+    ThInvoice i;      i.number = "INV-1";    i.partnerId = partner.id.nullable;
+    ThInvoice orphan; orphan.number = "INV-NULL";        // NULL FK
+    ir.insert(i);
+    ir.insert(orphan);
+
+    auto rows = ir.query().orderBy!("number")().select!ThDTO();
+    assert(rows.length == 2, "LEFT JOIN must keep the NULL-FK row");
+    assert(rows[0].partnerName.get    == "Acme");
+    assert(rows[0].partnerCountry.get == "UA", "two-hop path must resolve");
+    assert(rows[1].partnerName.isNull);
+    assert(rows[1].partnerCountry.isNull);
+
+    // Asking for the relation explicitly must not add a second join.
+    auto withLoad = ir.query().load!"partner"().orderBy!("number")().select!ThDTO();
+    assert(withLoad.length == 2);
+    assert(withLoad[0].partnerCountry.get == "UA");
+
+    // Values alone would not catch a duplicated join, so check the SQL itself.
+    // isQueryContext is duck-typed, which makes a recording context possible
+    // without any test hook in the ORM.
+    static struct SpyCtx {
+        Connection* conn;
+        static string lastSQL;
+        auto exec(string sql) { lastSQL = sql; return conn.exec(sql); }
+        auto execParams(T...)(string sql, T args) {
+            lastSQL = sql;
+            return conn.execParams(sql, args);
+        }
+    }
+    static assert(isQueryContext!SpyCtx);
+
+    auto spy     = SpyCtx(&c);
+    auto spyRepo = Repository!(ThInvoice, SpyCtx)(&spy);
+
+    spyRepo.query().select!ThDTO();
+    assert(SpyCtx.lastSQL.count(`"th_partner"`) == 1,
+        "two members through `partner` must share one join: " ~ SpyCtx.lastSQL);
+    assert(SpyCtx.lastSQL.count(`"th_country"`) == 1, SpyCtx.lastSQL);
+
+    spyRepo.query().load!"partner"().select!ThDTO();
+    assert(SpyCtx.lastSQL.count(`"th_partner"`) == 1,
+        "related members must reuse the load! join, not add one: " ~ SpyCtx.lastSQL);
+    assert(SpyCtx.lastSQL.count(`"th_country"`) == 1, SpyCtx.lastSQL);
+
+    foreach (t; ["th_invoice", "th_partner", "th_country"])
+        c.exec(`DROP TABLE IF EXISTS ` ~ t);
+}
+
+// A related: path must name a relation AND a field on it. Dotless has no
+// useful reading: it resolves against the main table, making it either a
+// roundabout @field("col") or a request for the whole related object.
+@autoHydrate
+private struct RelDotlessDTO {
+    int id;
+    @field(related: "name") string x;
+}
+
+@autoHydrate
+private struct RelObjectDTO {
+    int id;
+    @field(related: "partner") string x;
+}
+
+unittest {
+    alias QS = typeof(Repository!(RelD, Connection).init.query());
+    static assert(!__traits(compiles, QS.init.select!RelDotlessDTO()),
+        "a related: path without a dot must be rejected at compile time");
+    static assert(!__traits(compiles, QS.init.select!RelObjectDTO()),
+        "naming the relation itself must be rejected, not deferred to runtime");
+}
+
+// Related paths are validated against the model at compile time: the path is
+// an enum string and M is a template parameter, so a typo has no reason to
+// reach the database.
+@autoHydrate
+private struct RelBadRelDTO {
+    int id;
+    @field(related: "nosuchrel.name") Nullable!string x;
+}
+
+@autoHydrate
+private struct RelBadLeafDTO {
+    int id;
+    @field(related: "partner.nosuchfield") Nullable!string x;
+}
+
+@autoHydrate
+private struct RelTooDeepDTO {
+    int id;
+    @field(related: "partner.country.region.name") Nullable!string x;
+}
+
+unittest {
+    alias QS = typeof(Repository!(RelD, Connection).init.query());
+    static assert(!__traits(compiles, QS.init.select!RelBadRelDTO()),
+        "an unknown relation must be a compile error, not a runtime one");
+    static assert(!__traits(compiles, QS.init.select!RelBadLeafDTO()),
+        "an unknown leaf column must be a compile error, not a PostgreSQL one");
+    static assert(!__traits(compiles, QS.init.select!RelTooDeepDTO()),
+        "more than two relation segments must be rejected");
+
+    // Control: the valid path on the same model still compiles, so the three
+    // rejections above are not passing because the harness itself is broken.
+    static assert(__traits(compiles, QS.init.select!RelDTO()));
 }
