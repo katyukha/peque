@@ -405,6 +405,35 @@ auto saved = repo.upsert(p);
 //     @field @unique string email;
 auto saved2 = repo.upsert!"email"(p);
 
+// Ignore the conflict instead of updating. DO NOTHING writes no row when one
+// already exists, so this returns Nullable!M — empty means "already there".
+Nullable!Partner ins = repo.insert!(OnConflict.doNothing)(p);              // any conflict
+Nullable!Partner ins2 = repo.insert!(OnConflict.doNothing,
+                                     Target.columns!("email"))(p);         // targeted
+
+// The long spelling of upsert, when you want to name the target explicitly.
+Partner up = repo.insert!(OnConflict.doUpdate, Target.columns!("email"))(p);
+
+```
+
+`Target.columns!` takes **D field names**, like `upsert!` and `where!`.
+
+A `@uniqueIndex(where: …)` creates a *partial* unique index, which PostgreSQL
+can only infer when the statement repeats the index predicate. peque emits it
+for you, so both spellings work against one:
+
+```d
+@field @uniqueIndex(where: "NOT deleted") string slug;
+
+repo.upsert!"slug"(doc);
+// INSERT … ON CONFLICT ("slug") WHERE NOT deleted DO UPDATE SET …
+```
+
+Without that predicate PostgreSQL answers *"there is no unique or exclusion
+constraint matching the ON CONFLICT specification"*, so a model declaring one
+would otherwise have no usable upsert.
+
+```d
 // Delete a record by value (extracts PK internally)
 repo.deleteByRec(p);
 

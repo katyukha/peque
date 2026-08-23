@@ -423,6 +423,18 @@ package(peque.orm) string _fieldColName(M, string fieldName)() {
     return result;
 }
 
+/** As _fieldColName, but unquoted — for comparing against index column lists,
+  * which are raw names. Returns "" if fieldName is not a column field on M. **/
+package(peque.orm) string _fieldColNameRaw(M, string fieldName)() {
+    string result;
+    static foreach (memberName; FieldNameTuple!M) {{
+        alias F = __traits(getMember, M, memberName);
+        static if (memberName == fieldName && _isColField!F)
+            result = _colName!(F, memberName);
+    }}
+    return result;
+}
+
 /** Build "prefix.col1, prefix.col2, ..." for all DB column fields of M. **/
 package(peque.orm) string _prefixedSelectList(M, string prefix)() {
     string result;

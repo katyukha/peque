@@ -76,6 +76,8 @@ public import peque.model;
 public import peque.exception;
 
 public import peque.orm.repository: isModel, CRUDMixin, Repository;
+public import peque.orm.conflict: OnConflict, Target,
+    TargetNone, TargetColumns, TargetConstraint;
 public import peque.orm.sql:
     buildSelectList, buildInsertColList, buildInsertPlaceholders,
     buildUpdateSetClause, buildInsertValueExpr, buildUpdateValueExpr,

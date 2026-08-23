@@ -243,6 +243,64 @@ private string _buildColDef(M, string memberName)() {
 }
 
 // Build the table-level constraint clauses for model M (UNIQUE, CHECK).
+// ---------------------------------------------------------------------------
+// Partial unique index lookup — used by ON CONFLICT inference
+// ---------------------------------------------------------------------------
+
+/** The WHERE predicate of a PARTIAL unique index on exactly `cols`, or "".
+  *
+  * PostgreSQL infers a conflict target from the inserted columns, and a partial
+  * unique index only matches when the statement repeats its predicate:
+  *
+  *     CREATE UNIQUE INDEX ON t (slug) WHERE NOT deleted;
+  *     INSERT … ON CONFLICT (slug) DO UPDATE …
+  *       ERROR:  there is no unique or exclusion constraint matching the
+  *               ON CONFLICT specification
+  *     INSERT … ON CONFLICT (slug) WHERE NOT deleted DO UPDATE …   -- matches
+  *
+  * So a model declaring @uniqueIndex(where:) had an upsert that could not be
+  * used at all. Finding the predicate here lets the ON CONFLICT clause carry it
+  * automatically, with no extra API.
+  *
+  * Matching is set equality: index inference is order-insensitive.
+  **/
+package(peque.orm) template _partialUniqueIndexPred(M, string[] cols) {
+    private static bool _sameSet(string[] a, string[] b) {
+        if (a.length != b.length) return false;
+        foreach (x; a) {
+            bool found = false;
+            foreach (y; b) if (x == y) { found = true; break; }
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    private static string _find() {
+        // Field-level @uniqueIndex(where: "…") — a single-column index.
+        static foreach (memberName; FieldNameTuple!M) {{
+            alias F = __traits(getMember, M, memberName);
+            static foreach (uda; __traits(getAttributes, F)) {{
+                // Instance form only: the type form carries no predicate.
+                static if (is(typeof(uda) == uniqueIndex)) {
+                    if (uda.where.length &&
+                        _sameSet(cols, [_colName!(F, memberName)]))
+                        return uda.where;
+                }
+            }}
+        }}
+        // Model-level @uniqueIndexTogether!(…)(where: "…").
+        static foreach (uda; __traits(getAttributes, M)) {{
+            static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
+                       __traits(isSame, TemplateOf!(typeof(uda)), uniqueIndexTogether)) {
+                if (uda.where.length && _sameSet(cols, uda.columns))
+                    return uda.where;
+            }
+        }}
+        return "";
+    }
+    enum string _partialUniqueIndexPred = _find();
+}
+
 // Validate a model-level column list (@uniqueTogether / @indexTogether /
 // @uniqueIndexTogether) against M's real columns, at compile time.
 //

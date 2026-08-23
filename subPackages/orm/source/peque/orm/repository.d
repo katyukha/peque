@@ -71,6 +71,8 @@ if (isModel!M && isQueryContext!Ctx) {
     import std.typecons: Nullable, nullable;
     import std.conv: to;
     import peque.orm.sql;
+    import peque.orm.conflict;
+    import peque.orm.schema: _partialUniqueIndexPred;
 
     // Compile-time SQL constants — computed once, stored as enum strings.
     /** PostgreSQL's extended-protocol Bind message carries an int16 parameter
@@ -131,12 +133,60 @@ if (isModel!M && isQueryContext!Ctx) {
       * list: it is when the caller supplied one, and omitted when the database
       * should assign it. Called in enum context, so this is pure CTFE.
       **/
-    private static string _upsertSQL(bool withPk)(string conflictCols, string setClause) {
+    private static string _upsertSQL(bool withPk)(string conflictCols, string setClause,
+                                                 string indexPred = "") {
+        return _insertHead!withPk() ~
+               " ON CONFLICT (" ~ conflictCols ~ ")" ~
+               (indexPred.length ? " WHERE " ~ indexPred : "") ~
+               " DO UPDATE SET " ~ setClause ~
+               " RETURNING " ~ _crudSel;
+    }
+
+    // INSERT INTO … VALUES … — the part every conflict form shares.
+    private static string _insertHead(bool withPk)() {
         return "INSERT INTO " ~ _crudTable ~
                " (" ~ (withPk ? _crudPk ~ ", " : "") ~ buildInsertColList!M() ~ ")" ~
-               " VALUES (" ~ buildInsertPlaceholders!(M, withPk)() ~ ")" ~
-               " ON CONFLICT (" ~ conflictCols ~ ") DO UPDATE SET " ~ setClause ~
-               " RETURNING " ~ _crudSel;
+               " VALUES (" ~ buildInsertPlaceholders!(M, withPk)() ~ ")";
+    }
+
+    /** The `ON CONFLICT <target>` fragment for a conflict-target type.
+      *
+      * A partial unique index is only inferable when the statement repeats the
+      * index predicate, so it is appended automatically when the target columns
+      * match one — see _partialUniqueIndexPred.
+      **/
+    private static string _conflictTargetSQL(Tgt)() {
+        static if (is(Tgt == TargetNone)) {
+            return "";
+        } else static if (is(Tgt == TargetConstraint!n, string n)) {
+            return " ON CONSTRAINT " ~ _sqlIdent(Tgt._targetConstraint);
+        } else {
+            enum cols = _targetCols!Tgt();
+            enum pred = _partialUniqueIndexPred!(M, cols);
+            return " (" ~ _joinTargetCols!Tgt() ~ ")" ~
+                   (pred.length ? " WHERE " ~ pred : "");
+        }
+    }
+
+    // Resolved SQL column names for a TargetColumns!(...) target.
+    private static string[] _targetCols(Tgt)() {
+        string[] r;
+        static foreach (f; Tgt._targetFields) {
+            static assert(_fieldColName!(M, f)().length > 0,
+                "'" ~ f ~ "' is not a DB column field on " ~ M.stringof ~
+                ". Target.columns! takes D field names, not SQL column names.");
+            r ~= _fieldColNameRaw!(M, f)();
+        }
+        return r;
+    }
+
+    private static string _joinTargetCols(Tgt)() {
+        string r;
+        static foreach (f; Tgt._targetFields) {
+            if (r.length) r ~= ", ";
+            r ~= _fieldColName!(M, f)();
+        }
+        return r;
     }
 
     // Conflict on the primary key — used when the caller provided a PK value.
@@ -200,6 +250,73 @@ if (isModel!M && isQueryContext!Ctx) {
         return mixin(
             `_ctx.execParams(_crudInsSQL, ` ~ buildInsertValueExpr!M() ~ `)`
         ).getRow(0).as!M;
+    }
+
+    /** INSERT … ON CONFLICT — the full spelling of the conflict forms.
+      *
+      * The action decides the return type:
+      *  - `OnConflict.doNothing` → `Nullable!M`, empty when a conflicting row
+      *    already existed and nothing was written.
+      *  - `OnConflict.doUpdate`  → `M`, always the final row.
+      *
+      * The target says which conflicts count. `Target.columns!` takes D field
+      * names; when they match a partial unique index (`@uniqueIndex(where:)`),
+      * its predicate is emitted automatically, without which PostgreSQL cannot
+      * infer the index at all.
+      *
+      * ---
+      * repo.insert!(OnConflict.doNothing)(rec);                           // any conflict
+      * repo.insert!(OnConflict.doNothing, Target.columns!("email"))(rec);
+      * repo.insert!(OnConflict.doUpdate,  Target.columns!("email"))(rec);
+      * ---
+      *
+      * As with insert(), `applyDefaults()` runs first and the PK is left out of
+      * the INSERT so the database assigns it.
+      **/
+    auto insert(OnConflict action, Tgt = Target.none)(ref M record) {
+        static assert(!(action == OnConflict.doUpdate && is(Tgt == TargetNone)),
+            "insert!(OnConflict.doUpdate) needs a conflict target — PostgreSQL " ~
+            "cannot know which columns to update without one. Use " ~
+            "Target.columns!(\"field\") or Target.constraint!(\"name\").");
+
+        static if (__traits(hasMember, M, "applyDefaults"))
+            record.applyDefaults();
+
+        enum _target = _conflictTargetSQL!Tgt();
+
+        static if (action == OnConflict.doNothing) {
+            enum _sql = _insertHead!false() ~ " ON CONFLICT" ~ _target ~
+                        " DO NOTHING RETURNING " ~ _crudSel;
+            auto res = mixin(
+                `_ctx.execParams(_sql, ` ~ buildInsertValueExpr!M() ~ `)`
+            );
+            // No row means a conflicting row already existed. DO NOTHING is the
+            // only form that can return nothing, which is why it alone is
+            // Nullable!M.
+            if (res.ntuples == 0) return Nullable!M.init;
+            return res.getRow(0).as!M.nullable;
+        } else {
+            enum _setCl = _buildExcludedSetClauseForTarget!Tgt();
+            static assert(_setCl.length > 0,
+                "insert!(OnConflict.doUpdate, …) on " ~ M.stringof ~
+                " leaves no columns to update — every non-PK column is part of " ~
+                "the conflict target. Use insert!(OnConflict.doNothing, …).");
+            enum _sql = _insertHead!false() ~ " ON CONFLICT" ~ _target ~
+                        " DO UPDATE SET " ~ _setCl ~ " RETURNING " ~ _crudSel;
+            return mixin(
+                `_ctx.execParams(_sql, ` ~ buildInsertValueExpr!M() ~ `)`
+            ).getRow(0).as!M;
+        }
+    }
+
+    // EXCLUDED SET clause covering every non-PK column that is not part of the
+    // conflict target — updating a target column is pointless and, for a
+    // constraint target, we do not know which columns it covers.
+    private static string _buildExcludedSetClauseForTarget(Tgt)() {
+        static if (is(Tgt == TargetColumns!f, f...))
+            return _buildExcludedSetClause!(M, Tgt._targetFields)();
+        else
+            return _buildExcludedSetClause!M();
     }
 
     /** Insert multiple records in a single statement and return the inserted rows.
@@ -302,18 +419,28 @@ if (isModel!M && isQueryContext!Ctx) {
             return r;
         }();
 
+        // A partial unique index is only inferable when the statement repeats
+        // its predicate, so @uniqueIndex(where:) columns carry it here too —
+        // without this, upsert! on such a model could not run at all.
+        enum _rawCols = () {
+            string[] r;
+            static foreach (cf; conflictFields) r ~= _fieldColNameRaw!(M, cf)();
+            return r;
+        }();
+        enum _idxPred = _partialUniqueIndexPred!(M, _rawCols);
+
         enum _pkField = ormPkFieldName!M();
         auto pkVal = __traits(getMember, record, _pkField);
 
         if (pkVal == typeof(pkVal).init) {
             // PK not set — exclude from INSERT, let DB assign
-            enum _sql = _upsertSQL!false(_conflictCols, _setCl);
+            enum _sql = _upsertSQL!false(_conflictCols, _setCl, _idxPred);
             return mixin(
                 `_ctx.execParams(_sql, ` ~ buildInsertValueExpr!M() ~ `)`
             ).getRow(0).as!M;
         } else {
             // PK set — include in INSERT; never overwrite existing PK on conflict
-            enum _sqlPk = _upsertSQL!true(_conflictCols, _setCl);
+            enum _sqlPk = _upsertSQL!true(_conflictCols, _setCl, _idxPred);
             return mixin(
                 `_ctx.execParams(_sqlPk, ` ~ buildInsertValueExpr!(M, true)() ~ `)`
             ).getRow(0).as!M;
