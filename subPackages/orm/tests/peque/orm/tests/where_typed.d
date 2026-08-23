@@ -16,7 +16,7 @@
 module peque.orm.tests.where_typed;
 
 private import std.process: environment;
-private import std.typecons: Nullable;
+private import std.typecons: Nullable, nullable;
 private import std.exception: assertThrown;
 
 private import peque.connection: Connection;
@@ -338,4 +338,102 @@ unittest {
     // Empty slice → Predicate.none → WHERE FALSE → zero rows, no SQL error.
     assert(repo.query().whereIn!"name"(cast(string[])[]).all().length == 0);
     assert(repo.query().where(F!(WtItem, "score").contains(cast(int[])[])).all().length == 0);
+}
+
+
+// ---------------------------------------------------------------------------
+// Column-to-column comparisons
+//
+// Equality and != accepted another F! already; the ordering operators did not,
+// so `use_count < max_uses` had to be written as whereRaw. That works but
+// embeds the column names literally, surviving an @field rename that these
+// overloads catch.
+//
+// No type-compatibility check is imposed. D's own comparability is the wrong
+// test for SQL: `Nullable!int < int` and `Date < SysTime` are both false in D
+// and both fine in PostgreSQL.
+// ---------------------------------------------------------------------------
+
+@model("wt_tenant")
+private struct WtTenant {
+    @primaryKey int id;
+    @field      int quota;
+}
+
+@model("wt_invite")
+private struct WtInvite {
+    @primaryKey          int          id;
+    @field               string       code;
+    @field               int          useCount;
+    @field               int          maxUses;
+    @field               Nullable!int spare;
+    @many2one!(WtTenant) Nullable!int tenantId;
+    @related("tenantId") Nullable!WtTenant tenant;
+}
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS wt_invite`);
+    c.exec(`DROP TABLE IF EXISTS wt_tenant`);
+    c.exec(modelDDL!WtTenant());
+    c.exec(modelDDL!WtInvite());
+
+    auto tSeed = WtTenant(0, 10);
+    auto tenant = Repository!(WtTenant, Connection)(&c).insert(tSeed);
+    auto repo = Repository!(WtInvite, Connection)(&c);
+
+    void mk(string code, int used, int max, Nullable!int spare) {
+        WtInvite i;
+        i.code = code; i.useCount = used; i.maxUses = max;
+        i.spare = spare; i.tenantId = tenant.id.nullable;
+        repo.insert(i);
+    }
+    mk("usable",    1, 5, 3.nullable);
+    mk("exhausted", 5, 5, 3.nullable);
+    mk("over",      7, 5, 3.nullable);
+    mk("nullspare", 1, 5, Nullable!int.init);
+
+    // The case this was added for.
+    auto usable = repo.query()
+        .where(F!(WtInvite, "useCount").lt(F!(WtInvite, "maxUses")))
+        .orderBy!("code")().all();
+    assert(usable.length == 2, "use_count < max_uses");
+    assert(usable[0].code == "nullspare" && usable[1].code == "usable");
+
+    // Each operator, against the same fixture.
+    assert(repo.query().where(F!(WtInvite,"useCount").lte(F!(WtInvite,"maxUses"))).count() == 3);
+    assert(repo.query().where(F!(WtInvite,"useCount").gt (F!(WtInvite,"maxUses"))).count() == 1);
+    assert(repo.query().where(F!(WtInvite,"useCount").gte(F!(WtInvite,"maxUses"))).count() == 2);
+    assert(repo.query().where(F!(WtInvite,"useCount").ne (F!(WtInvite,"maxUses"))).count() == 3);
+    assert(repo.query().where(F!(WtInvite,"useCount")   (F!(WtInvite,"maxUses"))).count() == 1);
+
+    // Three-valued logic: a NULL on either side excludes the row, exactly as
+    // for .ne() and as Django's F() expressions behave.
+    assert(repo.query().where(F!(WtInvite,"spare").lt(F!(WtInvite,"maxUses"))).count() == 3,
+        "the NULL-spare row must not match");
+
+    // Type-free spelling resolves the same way.
+    assert(repo.query().where(F!"useCount".lt(F!"maxUses")).count() == 2);
+
+    // Path-to-path: both sides joined columns, join emitted once.
+    assert(repo.query().where(F!"tenant.quota".gt(F!"tenant.quota")).count() == 0);
+    assert(repo.query().where(F!"tenant.quota".gte(F!"tenant.quota")).count() == 4);
+
+    c.exec(`DROP TABLE IF EXISTS wt_invite`);
+    c.exec(`DROP TABLE IF EXISTS wt_tenant`);
+}
+
+unittest {
+    // Mixed field/path comparison is not supported — and never was, for equality
+    // or != either. FieldBuilder carries an already-resolved column expression
+    // while PathBuilder carries an unresolved path, so there is no node holding
+    // one of each. A compile error, not silently wrong SQL.
+    static assert(!__traits(compiles, F!"useCount".lt(F!"tenant.quota")));
+    static assert(!__traits(compiles, F!"useCount".ne(F!"tenant.quota")));
+    static assert(!__traits(compiles, F!"useCount"(F!"tenant.quota")));
+    static assert(!__traits(compiles, F!"tenant.quota".lt(F!"useCount")));
+
+    // Controls: both same-kind forms do compile.
+    static assert(__traits(compiles, F!"useCount".lt(F!"maxUses")));
+    static assert(__traits(compiles, F!"tenant.quota".lt(F!"tenant.quota")));
 }

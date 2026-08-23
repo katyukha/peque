@@ -719,12 +719,43 @@ auto orPred = F!(Partner, "name")("Acme") | F!(Partner, "name")("Beta");
 repo.query().where(orPred).all();
 
 repo.query().where(~F!(Partner, "active")(false)).all();
+
+// Compare two columns — pass another F! instead of a value. Nothing is bound;
+// both sides are emitted as column expressions.
+repo.query().where(F!(Invite, "useCount").lt(F!(Invite, "maxUses"))).all();
+// WHERE (_m."use_count" < _m."max_uses")
 ```
 
+`opCall` (equality), `ne`, `lt`, `lte`, `gt` and `gte` all take either a value
+or another `F!`. Both sides must be the same kind of reference — two plain
+fields, or two relation paths (`F!"a.b".lt(F!"a.c")`); comparing a plain field
+against a relation path is a compile error.
+
+SQL three-valued logic applies: if either column is NULL the comparison is NULL
+and the row does not match. No type-compatibility check is imposed, because D's
+own comparability is the wrong test for SQL — `Nullable!int < int` and
+`Date < SysTime` are both rejected by D and both accepted by PostgreSQL.
+
 The type-free variant `F!"fieldName"` converts the name the same way but
-without model validation — so it cannot see an `@field("col")` rename, and
-field-name typos become PostgreSQL runtime errors rather than compile-time
-failures. Use `F!(Model, "field")` when compile-time checking is preferred.
+without model validation. Two things follow: field-name typos become PostgreSQL
+runtime errors rather than compile-time failures, and — because it never
+consults the model — it cannot see an `@field("col")` rename:
+
+```d
+@field("uses_n") int useCount;          // column is uses_n
+
+F!(Invite, "useCount")   //  _m."uses_n"    — consults the model
+F!"useCount"             //  _m."use_count" — converts the name, misses the rename
+```
+
+If the typed form is too wordy, partially apply the model once. This keeps
+compile-time checking and `@field` awareness, and still allows aggregates:
+
+```d
+alias I(string f) = F!(Invite, f);
+
+repo.query().where(I!"useCount".lt(I!"maxUses")).all();
+```
 
 ```d
 repo.query().where(F!"active"(true)).all();

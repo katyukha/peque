@@ -34,6 +34,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   validated against the model at compile time, as are the column names in
   `@uniqueTogether` / `@indexTogether` / `@uniqueIndexTogether` — which take SQL
   column names, and now say so when given a D member name instead.
+
 - **`peque:migrate`** — Minimal migration runner infrastructure.
 
 ### Changed

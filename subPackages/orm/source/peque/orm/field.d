@@ -244,13 +244,17 @@ struct FieldBuilder(string colExpr, FieldT = void) {
     }
 
     /// Comparisons: .gt(v) > v, .gte(v) >= v, .lt(v) < v, .lte(v) <= v, .ne(v) != v
-    Predicate gt(V)(V val)  const { return Predicate(OpNode(colExpr, ">",  convertToPG(val))); }
+    Predicate gt(V)(V val)  const
+    if (!_isFieldBuilderType!V) { return Predicate(OpNode(colExpr, ">",  convertToPG(val))); }
     /// ditto
-    Predicate gte(V)(V val) const { return Predicate(OpNode(colExpr, ">=", convertToPG(val))); }
+    Predicate gte(V)(V val) const
+    if (!_isFieldBuilderType!V) { return Predicate(OpNode(colExpr, ">=", convertToPG(val))); }
     /// ditto
-    Predicate lt(V)(V val)  const { return Predicate(OpNode(colExpr, "<",  convertToPG(val))); }
+    Predicate lt(V)(V val)  const
+    if (!_isFieldBuilderType!V) { return Predicate(OpNode(colExpr, "<",  convertToPG(val))); }
     /// ditto
-    Predicate lte(V)(V val) const { return Predicate(OpNode(colExpr, "<=", convertToPG(val))); }
+    Predicate lte(V)(V val) const
+    if (!_isFieldBuilderType!V) { return Predicate(OpNode(colExpr, "<=", convertToPG(val))); }
     /// ditto
     Predicate ne(V)(V val)  const
     if (!_isFieldBuilderType!V) {
@@ -287,9 +291,40 @@ struct FieldBuilder(string colExpr, FieldT = void) {
         return Predicate(NullNode(colExpr));
     }
 
-    /// Column-to-column !=: F!(M, "a").ne(F!(M, "b")) or F!"a".ne(F!"b")
+    /** Column-to-column comparisons: F!(M, "a").lt(F!(M, "b")).
+      *
+      * Both sides are column expressions, so nothing is bound — the predicate
+      * is emitted as raw SQL over the two resolved column names. This is what
+      * `use_count < max_uses` should be written as; whereRaw would work too but
+      * embeds the column names literally, so it silently survives an @field
+      * rename that these overloads would catch.
+      *
+      * SQL three-valued logic applies: if either column is NULL the comparison
+      * is NULL, so the row does not match — the same as for .ne(), and the same
+      * as Django's F() expressions.
+      *
+      * No type compatibility check is imposed: D's own comparability is the
+      * wrong test for SQL, since it rejects Nullable!int against int and Date
+      * against SysTime, both of which PostgreSQL compares happily.
+      **/
     Predicate ne(string otherExpr, OFT)(FieldBuilder!(otherExpr, OFT)) const {
         return Predicate(RawNode(colExpr ~ " != " ~ otherExpr, []));
+    }
+    /// ditto
+    Predicate gt(string otherExpr, OFT)(FieldBuilder!(otherExpr, OFT)) const {
+        return Predicate(RawNode(colExpr ~ " > " ~ otherExpr, []));
+    }
+    /// ditto
+    Predicate gte(string otherExpr, OFT)(FieldBuilder!(otherExpr, OFT)) const {
+        return Predicate(RawNode(colExpr ~ " >= " ~ otherExpr, []));
+    }
+    /// ditto
+    Predicate lt(string otherExpr, OFT)(FieldBuilder!(otherExpr, OFT)) const {
+        return Predicate(RawNode(colExpr ~ " < " ~ otherExpr, []));
+    }
+    /// ditto
+    Predicate lte(string otherExpr, OFT)(FieldBuilder!(otherExpr, OFT)) const {
+        return Predicate(RawNode(colExpr ~ " <= " ~ otherExpr, []));
     }
 
     /** IN (SELECT ...): F!(M,"field").inSubquery(qs.asSubquery!"field"())
@@ -656,6 +691,22 @@ struct PathBuilder(string path) {
     /// Column-to-column !=
     Predicate ne(string other)(PathBuilder!other) const {
         return Predicate(PathNode(path, "!=", [], other));
+    }
+    /// Column-to-column ordering comparisons, as on FieldBuilder.
+    Predicate gt(string other)(PathBuilder!other) const {
+        return Predicate(PathNode(path, ">", [], other));
+    }
+    /// ditto
+    Predicate gte(string other)(PathBuilder!other) const {
+        return Predicate(PathNode(path, ">=", [], other));
+    }
+    /// ditto
+    Predicate lt(string other)(PathBuilder!other) const {
+        return Predicate(PathNode(path, "<", [], other));
+    }
+    /// ditto
+    Predicate lte(string other)(PathBuilder!other) const {
+        return Predicate(PathNode(path, "<=", [], other));
     }
 
     /// LIKE pattern
