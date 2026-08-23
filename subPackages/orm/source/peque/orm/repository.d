@@ -72,7 +72,7 @@ if (isModel!M && isQueryContext!Ctx) {
     import std.conv: to;
     import peque.orm.sql;
     import peque.orm.conflict;
-    import peque.orm.schema: _partialUniqueIndexPred;
+    import peque.orm.schema;
 
     // Compile-time SQL constants — computed once, stored as enum strings.
     /** PostgreSQL's extended-protocol Bind message carries an int16 parameter

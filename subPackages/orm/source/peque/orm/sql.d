@@ -45,7 +45,11 @@ private import peque.converter: PGValue, convertToPG;
   * and quoting them would force the hydration lookup to match case exactly for
   * no benefit. Use _identSlug for names folded into such identifiers.
   **/
-package(peque.orm) string _sqlIdent(string name) pure @safe {
+// PUBLIC despite the underscore: CRUDMixin's body is compiled in the
+// INSTANTIATING module's scope, so every symbol it touches must be reachable
+// from outside peque.orm. The underscore still marks it as internal — not part
+// of the API anyone should call directly.
+string _sqlIdent(string name) pure @safe {
     string quoted = "\"";
     foreach (char c; name) {
         if (c == '"') quoted ~= '"';    // double an embedded quote
@@ -413,7 +417,11 @@ package(peque.orm) string _fieldColNameRuntime(M)(string memberName) {
 /** Return the SQL column name for fieldName on M if it is a DB column field.
   * Returns "" if fieldName is not found or is not a column field.
   **/
-package(peque.orm) string _fieldColName(M, string fieldName)() {
+// PUBLIC despite the underscore: CRUDMixin's body is compiled in the
+// INSTANTIATING module's scope, so every symbol it touches must be reachable
+// from outside peque.orm. The underscore still marks it as internal — not part
+// of the API anyone should call directly.
+string _fieldColName(M, string fieldName)() {
     string result;
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);
@@ -425,7 +433,11 @@ package(peque.orm) string _fieldColName(M, string fieldName)() {
 
 /** As _fieldColName, but unquoted — for comparing against index column lists,
   * which are raw names. Returns "" if fieldName is not a column field on M. **/
-package(peque.orm) string _fieldColNameRaw(M, string fieldName)() {
+// PUBLIC despite the underscore: CRUDMixin's body is compiled in the
+// INSTANTIATING module's scope, so every symbol it touches must be reachable
+// from outside peque.orm. The underscore still marks it as internal — not part
+// of the API anyone should call directly.
+string _fieldColNameRaw(M, string fieldName)() {
     string result;
     static foreach (memberName; FieldNameTuple!M) {{
         alias F = __traits(getMember, M, memberName);

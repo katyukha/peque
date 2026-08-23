@@ -264,7 +264,11 @@ private string _buildColDef(M, string memberName)() {
   *
   * Matching is set equality: index inference is order-insensitive.
   **/
-package(peque.orm) template _partialUniqueIndexPred(M, string[] cols) {
+// PUBLIC despite the underscore: CRUDMixin's body is compiled in the
+// INSTANTIATING module's scope, so every symbol it touches must be reachable
+// from outside peque.orm. The underscore still marks it as internal — not part
+// of the API anyone should call directly.
+template _partialUniqueIndexPred(M, string[] cols) {
     private static bool _sameSet(string[] a, string[] b) {
         if (a.length != b.length) return false;
         foreach (x; a) {
