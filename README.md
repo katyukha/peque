@@ -465,6 +465,8 @@ bool any = repo.query().where!"active"(true).exists();
 
 // First match — returns Nullable!Partner
 auto first = repo.query().where!"name"("Acme Ltd").first();
+// When nothing else orders the query, first() falls back to ORDER BY <pk> so
+// the answer is stable. Use .limit(1).all() if you genuinely do not care.
 
 // Delete matching rows — returns count deleted.
 // delete_()/update() affect exactly the rows all() would return, including

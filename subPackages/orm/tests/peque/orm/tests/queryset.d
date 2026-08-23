@@ -509,3 +509,88 @@ unittest {
     static assert(!__traits(compiles, aRepo.query().orderBy!("b.c.nosuchcol")));
     static assert(!__traits(compiles, aRepo.query().orderBy!("b.nosuchrel.label")));
 }
+
+
+// ---------------------------------------------------------------------------
+// first() is deterministic
+//
+// With no ORDER BY, LIMIT 1 returns whatever the server finds first, which can
+// change between two identical calls — after an UPDATE rewrites a tuple, a
+// VACUUM, or a plan change. "First" then means nothing. first() falls back to
+// the primary key when nothing else orders the query, as Django and Rails do.
+// ---------------------------------------------------------------------------
+
+@model("qs_first")
+private struct QsFirst {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("qs_first_def")
+@defaultOrder!(F!"name")
+private struct QsFirstDef {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+unittest {
+    import std.algorithm.searching: canFind;
+
+    static struct SpyCtx {
+        Connection* conn;
+        static string lastSQL;
+        auto exec(string sql) { lastSQL = sql; return conn.exec(sql); }
+        auto execParams(T...)(string sql, T args) {
+            lastSQL = sql;
+            return conn.execParams(sql, args);
+        }
+    }
+
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS qs_first`);
+    c.exec(`DROP TABLE IF EXISTS qs_first_def`);
+    c.exec(modelDDL!QsFirst());
+    c.exec(modelDDL!QsFirstDef());
+
+    auto spy  = SpyCtx(&c);
+    auto repo = Repository!(QsFirst, SpyCtx)(&spy);
+    foreach (n; ["c", "a", "b"]) { QsFirst p; p.name = n; repo.insert(p); }
+
+    // Unordered: the PK fallback is emitted.
+    auto got = repo.query().first();
+    assert(SpyCtx.lastSQL.canFind(`ORDER BY _m."id"`), SpyCtx.lastSQL);
+    assert(!got.isNull && got.get.name == "c", "insertion order == PK order here");
+
+    // The physical first row and first() must now disagree: rewriting a tuple
+    // moves it to the end of the heap, so an unordered LIMIT 1 would change
+    // answer. This is the assertion that fails without the fallback.
+    c.exec(`UPDATE qs_first SET name = name WHERE name = 'c'`);
+    assert(c.exec(`SELECT name FROM qs_first LIMIT 1`).getRow(0)[0].as!string == "a",
+        "precondition: the physically-first row has moved");
+    assert(repo.query().first().get.name == "c",
+        "first() must not change when only physical row order does");
+
+    // An explicit orderBy is not overridden.
+    auto desc = repo.query().orderBy!("-name")().first();
+    assert(SpyCtx.lastSQL.canFind(`ORDER BY _m."name" DESC`), SpyCtx.lastSQL);
+    assert(!SpyCtx.lastSQL.canFind(`_m."id"`) ||
+           !SpyCtx.lastSQL.canFind(`ORDER BY _m."id"`), SpyCtx.lastSQL);
+    assert(desc.get.name == "c");
+
+    // Neither is @defaultOrder.
+    auto defRepo = Repository!(QsFirstDef, SpyCtx)(&spy);
+    foreach (n; ["c", "a", "b"]) { QsFirstDef p; p.name = n; defRepo.insert(p); }
+    auto d = defRepo.query().first();
+    assert(SpyCtx.lastSQL.canFind(`ORDER BY _m."name"`), SpyCtx.lastSQL);
+    assert(d.get.name == "a", "@defaultOrder wins over the PK fallback");
+
+    // limit(0) still means "no rows" — the fallback must not resurrect it.
+    assert(repo.query().limit(0).first().isNull);
+
+    // A filtered first() still gets the fallback.
+    auto f = repo.query().where!"name"("b").first();
+    assert(!f.isNull && f.get.name == "b");
+
+    c.exec(`DROP TABLE IF EXISTS qs_first`);
+    c.exec(`DROP TABLE IF EXISTS qs_first_def`);
+}

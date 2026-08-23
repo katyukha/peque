@@ -1387,7 +1387,26 @@ if (isModel!M && isQueryContext!Ctx) {
         // limit(0) means "no rows" — do not override it with LIMIT 1, which
         // would make first() disagree with all(), count() and exists().
         if (_limitVal == 0) return Nullable!M.init;
-        auto results = limit(1).all();
+
+        auto qs = limit(1);
+
+        // With no ordering at all, LIMIT 1 returns whatever the server finds
+        // first, which can differ between two identical calls — after a row
+        // update, a VACUUM, or a plan change. "First" then means nothing, so
+        // fall back to the primary key, as Django and Rails both do. Only when
+        // nothing else orders the query: an explicit orderBy or @defaultOrder
+        // already makes it deterministic.
+        //
+        // A model with no single @primaryKey has nothing to fall back to; it
+        // keeps the old behaviour rather than failing to compile.
+        static if (_pkCols!M.length == 1) {
+            enum Ordering[] _defTerms = _modelDefaultOrder!M;
+            if (_orderByTerms.length == 0 && _defTerms.length == 0)
+                qs = qs.orderBy(Ordering(OrderKind.column,
+                                         "_m." ~ ormPkColName!M(), OrderDir.asc));
+        }
+
+        auto results = qs.all();
         if (results.length == 0) return Nullable!M.init;
         return results[0].nullable;
     }

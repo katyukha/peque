@@ -217,3 +217,95 @@ unittest {
     assert(SpyCtx.lastSQL.canFind(`ON CONFLICT ("slug") WHERE NOT deleted DO UPDATE`),
         SpyCtx.lastSQL);
 }
+
+
+// ---------------------------------------------------------------------------
+// P3 — explicit constraint target
+//
+// Needed when inference is ambiguous, or when the constraint is not expressible
+// as a column list. For a constraint target peque cannot know which columns the
+// constraint covers, so DO UPDATE SET spans every non-PK column; re-setting a
+// key column to EXCLUDED's value is a no-op, since that is what it conflicted on.
+// ---------------------------------------------------------------------------
+
+@model("oc_named")
+@uniqueTogether!("tenant_id", "code")
+private struct OcNamed {
+    @primaryKey int    id;
+    @field      int    tenantId;
+    @field      string code;
+    @field      int    n;
+}
+
+unittest {
+    import std.algorithm.searching: canFind;
+
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS oc_named`);
+    c.exec(modelDDL!OcNamed());
+
+    // PostgreSQL derives the constraint name from table + columns; confirm it
+    // rather than hard-coding a guess.
+    auto meta = c.exec(`SELECT conname FROM pg_constraint
+                        WHERE conrelid = 'oc_named'::regclass AND contype = 'u'`);
+    assert(meta.ntuples == 1);
+    assert(meta.getRow(0)[0].as!string == "oc_named_tenant_id_code_key");
+
+    auto repo = Repository!(OcNamed, Connection)(&c);
+    OcNamed a; a.tenantId = 1; a.code = "x"; a.n = 1;
+    repo.insert(a);
+
+    OcNamed b; b.tenantId = 1; b.code = "x"; b.n = 2;
+    auto up = repo.insert!(OnConflict.doUpdate,
+                           Target.constraint!("oc_named_tenant_id_code_key"))(b);
+    assert(up.n == 2);
+    assert(repo.query().count() == 1);
+
+    OcNamed d; d.tenantId = 1; d.code = "x"; d.n = 3;
+    auto ig = repo.insert!(OnConflict.doNothing,
+                           Target.constraint!("oc_named_tenant_id_code_key"))(d);
+    assert(ig.isNull);
+    assert(repo.query().all()[0].n == 2, "DO NOTHING must not overwrite");
+
+    // A constraint that does not exist is a server error, not silent success —
+    // the name is not checkable at compile time the way a field name is.
+    OcNamed e; e.tenantId = 1; e.code = "x"; e.n = 4;
+    bool threw = false;
+    try
+        repo.insert!(OnConflict.doNothing, Target.constraint!("no_such_constraint"))(e);
+    catch (QueryServerError)
+        threw = true;
+    assert(threw, "an unknown constraint name must surface as a server error");
+
+    c.exec(`DROP TABLE IF EXISTS oc_named`);
+}
+
+unittest {
+    import std.algorithm.searching: canFind;
+
+    static struct SpyCtx {
+        Connection* conn;
+        static string lastSQL;
+        auto exec(string sql) { lastSQL = sql; return conn.exec(sql); }
+        auto execParams(T...)(string sql, T args) {
+            lastSQL = sql;
+            return conn.execParams(sql, args);
+        }
+    }
+
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS oc_named`);
+    c.exec(modelDDL!OcNamed());
+
+    auto spy  = SpyCtx(&c);
+    auto repo = Repository!(OcNamed, SpyCtx)(&spy);
+    OcNamed a; a.tenantId = 1; a.code = "x"; a.n = 1;
+    repo.insert!(OnConflict.doNothing, Target.constraint!("oc_named_tenant_id_code_key"))(a);
+
+    // The constraint name is an identifier and must be quoted, not spliced bare.
+    assert(SpyCtx.lastSQL.canFind(
+        `ON CONFLICT ON CONSTRAINT "oc_named_tenant_id_code_key" DO NOTHING`),
+        SpyCtx.lastSQL);
+
+    c.exec(`DROP TABLE IF EXISTS oc_named`);
+}
