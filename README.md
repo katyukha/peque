@@ -726,6 +726,10 @@ repo.query().where(~F!(Partner, "active")(false)).all();
 // both sides are emitted as column expressions.
 repo.query().where(F!(Invite, "useCount").lt(F!(Invite, "maxUses"))).all();
 // WHERE (_m."use_count" < _m."max_uses")
+
+// Arithmetic works here too — the same expressions that drive update()'s SET.
+repo.query().where((F!(Job, "attempts") + 1).lte(F!(Job, "maxAttempts"))).all();
+// WHERE ((_m."attempts" + $1) <= _m."max_attempts")
 ```
 
 `opCall` (equality), `ne`, `lt`, `lte`, `gt` and `gte` all take either a value

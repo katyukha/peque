@@ -437,3 +437,89 @@ unittest {
     static assert(__traits(compiles, F!"useCount".lt(F!"maxUses")));
     static assert(__traits(compiles, F!"tenant.quota".lt(F!"tenant.quota")));
 }
+
+
+// ---------------------------------------------------------------------------
+// Arithmetic expressions in WHERE
+//
+// F!"a" + 1 already worked on the SET side of update(); the same expression now
+// works as a comparison operand. A SetExpr is a self-contained (SQL, params)
+// pair with 1-based placeholders, so RawNode carries it and the serializer
+// renumbers it like any other bound fragment — the case worth testing is an
+// expression sharing a statement with other bound values.
+// ---------------------------------------------------------------------------
+
+@model("wt_job")
+private struct WtJob {
+    @primaryKey int id;
+    @field      int attempts;
+    @field      int maxAttempts;
+    @field      int backoff;
+}
+
+unittest {
+    import std.algorithm.searching: canFind;
+
+    static struct SpyCtx {
+        Connection* conn;
+        static string lastSQL;
+        auto exec(string sql) { lastSQL = sql; return conn.exec(sql); }
+        auto execParams(T...)(string sql, T args) {
+            lastSQL = sql;
+            return conn.execParams(sql, args);
+        }
+    }
+
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS wt_job`);
+    c.exec(modelDDL!WtJob());
+
+    auto spy  = SpyCtx(&c);
+    auto repo = Repository!(WtJob, SpyCtx)(&spy);
+    void mk(int a, int m, int b) {
+        WtJob j; j.attempts = a; j.maxAttempts = m; j.backoff = b;
+        repo.insert(j);
+    }
+    mk(1, 3, 10);
+    mk(3, 3, 20);
+    mk(2, 3, 30);
+
+    alias J = WtJob;
+
+    // Expression on the left, compared to a column.
+    assert(repo.query().where((F!(J,"attempts") + 1).lte(F!(J,"maxAttempts"))).count() == 2);
+    assert(SpyCtx.lastSQL.canFind(`(_m."attempts" + $1) <= _m."max_attempts"`), SpyCtx.lastSQL);
+
+    // Expression on the right of a field comparison. Operands are swapped so
+    // both orderings share one SQL shape; the meaning is unchanged.
+    assert(repo.query().where(F!(J,"attempts").lt(F!(J,"maxAttempts") + 1)).count() == 3);
+
+    // Expression compared to a plain value.
+    assert(repo.query().where((F!(J,"attempts") + 1).lte(3)).count() == 2);
+
+    // Numbering: a bound value earlier in the statement must not collide with
+    // the expression's own placeholder.
+    assert(repo.query().where!"backoff"(10)
+               .where((F!(J,"attempts") + 1).lte(F!(J,"maxAttempts"))).count() == 1);
+    assert(SpyCtx.lastSQL.canFind(`_m."backoff" = $1`) &&
+           SpyCtx.lastSQL.canFind(`(_m."attempts" + $2)`), SpyCtx.lastSQL);
+
+    // Two expressions, each carrying a parameter.
+    assert(repo.query().where((F!(J,"attempts") + 1).lte(F!(J,"maxAttempts") + 2)).count() == 3);
+    assert(SpyCtx.lastSQL.canFind(`(_m."attempts" + $1) <= (_m."max_attempts" + $2)`),
+           SpyCtx.lastSQL);
+
+    // Every operator, and composition with the boolean combinators.
+    assert(repo.query().where((F!(J,"attempts") * 2).gt(F!(J,"maxAttempts"))).count() == 2);
+    assert(repo.query().where((F!(J,"attempts") + 0)(F!(J,"maxAttempts"))).count() == 1);
+    assert(repo.query().where((F!(J,"attempts") + 0).ne(F!(J,"maxAttempts"))).count() == 2);
+    assert(repo.query()
+               .where((F!(J,"attempts") + 1).lte(F!(J,"maxAttempts")) &
+                      F!(J,"backoff").gt(15)).count() == 1);
+
+    // The same expression still drives update()'s SET side.
+    assert(repo.query().where!"backoff"(10).set!"attempts"(F!"attempts" + 5).update() == 1);
+    assert(repo.query().where!"backoff"(10).first().get.attempts == 6);
+
+    c.exec(`DROP TABLE IF EXISTS wt_job`);
+}

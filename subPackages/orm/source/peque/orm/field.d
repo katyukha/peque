@@ -164,6 +164,13 @@ struct SetExpr {
     string    sql;
     PGValue[] params;
 
+    // Defining opCall below disables D's implicit struct-literal construction,
+    // so SetExpr(sql, params) needs a real constructor to keep working.
+    this(string sql, PGValue[] params) @safe pure nothrow {
+        this.sql = sql;
+        this.params = params;
+    }
+
     /// Compose: (F!"a" + 1) * 2, or F!"a" + F!"b" * 2.
     SetExpr opBinary(string op, V)(V rhs) const
     if (op == "+" || op == "-" || op == "*" || op == "/") {
@@ -174,6 +181,35 @@ struct SetExpr {
     SetExpr opBinaryRight(string op, V)(V lhs) const
     if ((op == "+" || op == "-" || op == "*" || op == "/") && !is(V == SetExpr)) {
         return _combine(_toSetExpr(lhs), op, this);
+    }
+
+    /** Compare the expression — usable anywhere a Predicate is:
+      * `where((F!"attempts" + 1).lte(F!"maxAttempts"))`.
+      *
+      * The right operand may be a value, a field, or another expression. A
+      * SetExpr is already a self-contained (SQL, params) pair with 1-based
+      * placeholders, which is exactly what RawNode carries, so the predicate
+      * serializer renumbers it like any other bound fragment.
+      **/
+    Predicate opCall(V)(V rhs) const { return _cmp("=",  rhs); }
+    /// ditto
+    Predicate lt(V)(V rhs)     const { return _cmp("<",  rhs); }
+    /// ditto
+    Predicate lte(V)(V rhs)    const { return _cmp("<=", rhs); }
+    /// ditto
+    Predicate gt(V)(V rhs)     const { return _cmp(">",  rhs); }
+    /// ditto
+    Predicate gte(V)(V rhs)    const { return _cmp(">=", rhs); }
+    /// ditto
+    Predicate ne(V)(V rhs)     const { return _cmp("!=", rhs); }
+
+    private Predicate _cmp(V)(string op, V rhs) const {
+        import peque.orm.predicate: _shiftParams;
+        auto r = _toSetExpr(rhs);
+        return Predicate(RawNode(
+            "(" ~ sql ~ " " ~ op ~ " " ~
+                  _shiftParams(r.sql, cast(int) params.length) ~ ")",
+            params ~ r.params));
     }
 }
 
@@ -229,7 +265,7 @@ struct FieldBuilder(string colExpr, FieldT = void) {
 
     /// Equality: F!(M, "field")(val)
     Predicate opCall(V)(V val) const
-    if (!_isFieldBuilderType!V) {
+    if (!_isFieldBuilderType!V && !is(V == SetExpr)) {
         import peque.converter: convertToPG;
         return Predicate(EqNode(colExpr, convertToPG(val)));
     }
@@ -245,19 +281,19 @@ struct FieldBuilder(string colExpr, FieldT = void) {
 
     /// Comparisons: .gt(v) > v, .gte(v) >= v, .lt(v) < v, .lte(v) <= v, .ne(v) != v
     Predicate gt(V)(V val)  const
-    if (!_isFieldBuilderType!V) { return Predicate(OpNode(colExpr, ">",  convertToPG(val))); }
+    if (!_isFieldBuilderType!V && !is(V == SetExpr)) { return Predicate(OpNode(colExpr, ">",  convertToPG(val))); }
     /// ditto
     Predicate gte(V)(V val) const
-    if (!_isFieldBuilderType!V) { return Predicate(OpNode(colExpr, ">=", convertToPG(val))); }
+    if (!_isFieldBuilderType!V && !is(V == SetExpr)) { return Predicate(OpNode(colExpr, ">=", convertToPG(val))); }
     /// ditto
     Predicate lt(V)(V val)  const
-    if (!_isFieldBuilderType!V) { return Predicate(OpNode(colExpr, "<",  convertToPG(val))); }
+    if (!_isFieldBuilderType!V && !is(V == SetExpr)) { return Predicate(OpNode(colExpr, "<",  convertToPG(val))); }
     /// ditto
     Predicate lte(V)(V val) const
-    if (!_isFieldBuilderType!V) { return Predicate(OpNode(colExpr, "<=", convertToPG(val))); }
+    if (!_isFieldBuilderType!V && !is(V == SetExpr)) { return Predicate(OpNode(colExpr, "<=", convertToPG(val))); }
     /// ditto
     Predicate ne(V)(V val)  const
-    if (!_isFieldBuilderType!V) {
+    if (!_isFieldBuilderType!V && !is(V == SetExpr)) {
         return Predicate(OpNode(colExpr, "!=", convertToPG(val)));
     }
 
@@ -326,6 +362,23 @@ struct FieldBuilder(string colExpr, FieldT = void) {
     Predicate lte(string otherExpr, OFT)(FieldBuilder!(otherExpr, OFT)) const {
         return Predicate(RawNode(colExpr ~ " <= " ~ otherExpr, []));
     }
+
+    /** Compare against an expression: `F!"attempts".lt(F!"maxAttempts" + 1)`.
+      *
+      * Delegates to the SetExpr side with the operands swapped, so both
+      * orderings produce the same SQL shape and the same parameter numbering.
+      **/
+    Predicate opCall(V : SetExpr)(V rhs) const { return rhs._cmp("=",  this); }
+    /// ditto
+    Predicate lt(V : SetExpr)(V rhs)     const { return rhs._cmp(">",  this); }
+    /// ditto
+    Predicate lte(V : SetExpr)(V rhs)    const { return rhs._cmp(">=", this); }
+    /// ditto
+    Predicate gt(V : SetExpr)(V rhs)     const { return rhs._cmp("<",  this); }
+    /// ditto
+    Predicate gte(V : SetExpr)(V rhs)    const { return rhs._cmp("<=", this); }
+    /// ditto
+    Predicate ne(V : SetExpr)(V rhs)     const { return rhs._cmp("!=", this); }
 
     /** IN (SELECT ...): F!(M,"field").inSubquery(qs.asSubquery!"field"())
       *
