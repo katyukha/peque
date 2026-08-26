@@ -18,12 +18,13 @@
   *  - @uniqueIndex / @uniqueIndex(where:) → CREATE UNIQUE INDEX, partial
   *  - @ginIndex / @gistIndex / @hashIndex → USING gin/gist/hash
   *  - @indexTogether / @uniqueIndexTogether → multi-column indexes
+  *  - @pgType may not contradict the D type about time zones
   *  - schemaSQL!Reg — all models concatenated
   *  - End-to-end: execute generated SQL, insert via ORM, verify round-trip
   **/
 module peque.orm.tests.schema;
 
-private import std.datetime: DateTime;
+private import std.datetime: DateTime, SysTime, Date;
 private import std.json: JSONValue;
 private import std.process: environment;
 private import std.string: indexOf;
@@ -565,4 +566,73 @@ unittest {
     assert(ddl.contains("tags TEXT[] NOT NULL"), ddl);
     assert(ddl.contains("CREATE INDEX IF NOT EXISTS gin_ixdoc_tagged_tags"), ddl);
     assert(ddl.contains("USING gin"), ddl);
+}
+
+
+// ---------------------------------------------------------------------------
+// @pgType may not contradict the D type about time zones
+// ---------------------------------------------------------------------------
+
+// peque types a parameter from the D value alone and PostgreSQL casts it to the
+// column's real type. When the two disagree about zones that cast runs in the
+// SESSION TimeZone, so the stored instant differs per server. Reading already
+// refuses such a pair; this keeps writing from staying silent.
+@model("tz_match_ok")
+struct TzMatchOk {
+    @primaryKey                                int      id;
+    @field                                     SysTime  happenedAt;   // -> TIMESTAMPTZ
+    @field @pgType("TIMESTAMPTZ")              SysTime  explicitTz;
+    @field @pgType("timestamp with time zone") SysTime  spelledOut;
+    @field @pgType("TIMESTAMPTZ(3)")           SysTime  withPrecision;
+    @field @pgType("TIMESTAMP")                DateTime wallClock;
+    @field @pgType("DATE")                     Date     day;
+    @field @pgType("TEXT")                     string   note;         // not temporal
+    @field @pgType("TIMESTAMPTZ")              Nullable!SysTime maybe;
+}
+
+unittest {
+    import std.algorithm.searching: canFind;
+
+    // The compatible model above must still generate DDL.
+    auto ddl = modelDDL!TzMatchOk();
+    assert(ddl.canFind("TIMESTAMPTZ"), ddl);
+    assert(ddl.canFind("TIMESTAMP"), ddl);
+
+    // …and the contradictions must not compile. modelDDL is where @pgType is
+    // consulted, so that is where the check fires.
+    static assert(!__traits(compiles, modelDDL!TzMismatchA()));   // DateTime -> tz
+    static assert(!__traits(compiles, modelDDL!TzMismatchB()));   // SysTime  -> naive
+    static assert(!__traits(compiles, modelDDL!TzMismatchC()));   // Date     -> tz
+    static assert(!__traits(compiles, modelDDL!TzMismatchD()));   // spelled-out form
+    static assert(!__traits(compiles, modelDDL!TzMismatchE()));   // through Nullable
+}
+
+@model("tz_mismatch_a")
+struct TzMismatchA {
+    @primaryKey int id;
+    @field @pgType("TIMESTAMPTZ") DateTime wallClock;
+}
+
+@model("tz_mismatch_b")
+struct TzMismatchB {
+    @primaryKey int id;
+    @field @pgType("TIMESTAMP") SysTime happenedAt;
+}
+
+@model("tz_mismatch_c")
+struct TzMismatchC {
+    @primaryKey int id;
+    @field @pgType("TIMESTAMPTZ") Date day;
+}
+
+@model("tz_mismatch_d")
+struct TzMismatchD {
+    @primaryKey int id;
+    @field @pgType("timestamp without time zone") SysTime happenedAt;
+}
+
+@model("tz_mismatch_e")
+struct TzMismatchE {
+    @primaryKey int id;
+    @field @pgType("TIMESTAMPTZ") Nullable!DateTime wallClock;
 }

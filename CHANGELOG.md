@@ -8,6 +8,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`timezone` on `Connection`** — pins the session `TimeZone` once at connect,
+  via `set_config()`, so an unknown zone fails the connection. Every constructor
+  takes it as its own argument (not a key in the `string[string]` map, which
+  stays libpq's), and `makeVibePool` / `connectViaEnvParams` forward it:
+  `Connection(params, "UTC")`, `Connection(dbname: …, timezone: "UTC")`,
+  `makeVibePool(8, params, "UTC")`. It governs only what the *server* renders
+  (`now()::text`, `to_char`); values peque sends and reads are
+  session-independent regardless. Connect-time only, since a pooled connection
+  keeps session state across borrows.
+
+  **Breaking**: `timezone` precedes `ws`, so a `WaitStrategy` passed as the sixth
+  positional argument must now be named — `ws: myStrategy`.
+
+- **`@pgType` may no longer contradict the D type about time zones** — a
+  `static assert` on `@pgType("TIMESTAMPTZ") DateTime` and the like. peque types
+  a parameter from the D value and PostgreSQL casts it to the column's real type;
+  when the two disagree about zones that cast runs in the session `TimeZone`, so
+  the stored instant differs per server. Only checkable where `@pgType` states
+  the type — a column created outside the ORM stays the caller's responsibility.
+
+- **`groupByRaw!("name", "SQL expr")`** on `QuerySet` / `GroupedQuerySet` — an
+  expression as a GROUP BY key, emitted into both `GROUP BY` and the SELECT list.
+  A grouping that is a *function* of a column — `date_trunc('day', ts AT TIME
+  ZONE 'Europe/Kyiv')`, `lower(email)` — had no ORM spelling before: `annotate!`
+  projects only, which PostgreSQL rejects with "must appear in the GROUP BY
+  clause". Embedded verbatim like `annotate!`, so a trusted literal only, with no
+  bound parameters. `groupBy!` also works on `GroupedQuerySet` now, so column and
+  expression keys compose in either order.
+
 - **Struct hydration** in the core package, usable without `peque:orm`:
   `ResultRow.as!T` / `Result.as!(T[])` with a documented dispatch chain (user
   constructor, `fromRow` factory, `@model` strict mapping, annotated-fields
@@ -38,6 +67,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`peque:migrate`** — Minimal migration runner infrastructure.
 
 ### Changed
+
+- **Every `SysTime` is now returned in UTC.** The attached zone used to follow
+  two rules — the session's offset normally, UTC on the local-mean-time and BC
+  paths — so two rows of one result set could print in different zones. UTC is
+  the only rule expressible here: an LMT offset like `+02:02:04` is not a
+  whole-minute `SimpleTimeZone`. Render with `.toLocalTime()` / `.toOtherTZ(tz)`;
+  instants and comparisons are unaffected.
+
+- **Temporal conversions no longer guess a time zone** (breaking). One rule now
+  covers all of them: peque returns what the value contains, possibly less, but
+  never more. `timestamp` → `Date` still drops the time, while `timestamptz` →
+  `DateTime`/`Date` (discarding a zone) and `timestamp` → `SysTime` (inventing
+  one) throw `ConversionError` naming the fix — read a `timestamptz` as
+  `SysTime`, and give a `timestamp` its zone with `SysTime(dt, UTC())`. Each was
+  previously a silently different answer per server: an offset for `DateTime`, a
+  whole day for `Date` either side of midnight. The check follows the value's
+  rendering rather than its OID, so array elements are covered too.
 
 - **Exception tree redesigned** (breaking). Every exception peque throws now
   derives from `PequeException`, so a single `catch` covers the library.
@@ -75,6 +121,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 ### Fixed
+
+- **BC dates and years past 9999 could be read but not written.** D's ISO output
+  is not what PostgreSQL parses at either end: `-0001-06-15` is rejected (it
+  counts BC from 1 and wants `0002-06-15 BC`), and the leading sign of
+  `+12345-01-01` is read as the start of a UTC offset. The year is now rewritten
+  on the way out for `Date`, `DateTime` and `SysTime`, so a value peque can read
+  is one it can write.
+
+- **`const` / `immutable` values could not be passed as query parameters.**
+  `is(T == DateTime)` is false for `immutable(DateTime)`, so such a value matched
+  no `convertToPG` overload at all. `Date`, `DateTime`, `SysTime`, `JSONValue`,
+  `UUID` and `Nullable!T` now match through qualifiers, as the trait-based
+  constraints always did.
+
+- **`SysTime` values were written using the session's time zone, silently
+  shifting the instant.** `SysTime.toString` omits the UTC offset for
+  `LocalTime()` values — what `Clock.currTime` returns, i.e. what the documented
+  `applyDefaults` pattern inserts — so PostgreSQL received a naked wall clock and
+  read it in the *session* `TimeZone`: a host in `Europe/Kyiv` writing to a
+  session in `UTC` stored everything three hours in the future, with no error.
+  Values are now normalised with `.toUTC` before formatting, which loses nothing
+  — `timestamptz` discards the input offset anyway.
+
+- **Array elements decoded by string length.** They carry no type OID, and the
+  zoned/naive choice was made by `length == 19`: a naive value with fractional
+  seconds is longer, so it came back in the *client's* local time, and
+  `infinity` is shorter, so it was rejected as "too short". The decision now
+  follows the rendering.
 
 - **`infinity` / `-infinity` timestamps crashed.** These are ordinary
   `timestamp`/`timestamptz`/`date` values but only 8-9 bytes long, and the

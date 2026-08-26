@@ -100,6 +100,46 @@ private size_t _isoDateEnd(scope const(char)[] iso) pure @safe nothrow @nogc {
     return i;
 }
 
+
+/** Index of the UTC offset in an ISO rendering, or -1 when there is none.
+  *
+  * Starts past the date so a signed year is not mistaken for an offset. Shared
+  * by every temporal decoder, so they cannot disagree about whether a value
+  * carries a zone.
+  **/
+private ptrdiff_t _utcOffsetPos(scope const(char)[] iso, in size_t dateEnd)
+pure @safe nothrow @nogc {
+    foreach_reverse (i; dateEnd .. iso.length)
+        if (iso[i] == '+' || iso[i] == '-') return i;
+    return -1;
+}
+
+
+/** The temporal conversions peque refuses, and how to spell them instead.
+  *
+  * One rule covers all three: return what the value contains, possibly less,
+  * never more, and never guess a time zone. Each answer would otherwise depend
+  * on the server's session TimeZone — wrong by an offset, or by a whole day.
+  **/
+private enum _dateIsZonelessMsg =
+    "the calendar date of an instant depends on the zone you ask in, and " ~
+    "timestamptz carries none of its own. Read the column as SysTime and name " ~
+    "the zone — sysTime.toOtherTZ(tz).toDate() — or ask the server: " ~
+    "(ts AT TIME ZONE 'Europe/Kyiv')::date.";
+
+/// ditto
+private enum _dateTimeIsZonelessMsg =
+    "timestamptz holds an instant and DateTime has no zone to hold it in, so " ~
+    "the offset would be dropped. Read the column as SysTime, which keeps the " ~
+    "instant, or as string for the raw text.";
+
+/// ditto
+private enum _sysTimeNeedsZoneMsg =
+    "a timestamp without a time zone is a wall clock and SysTime is an " ~
+    "instant, so naming one would mean inventing a zone. Read the column as " ~
+    "DateTime, then say which zone it is in: SysTime(dt, UTC()) if the column " ~
+    "stores UTC, SysTime(dt, tz) if it stores local times.";
+
 /** Convert postgresql's text type value to D type T
   *
   * Params:
@@ -181,14 +221,20 @@ pure @trusted if (is(T == Date)) {
         case PGType.GUESS:
         case PGType.DATE:
         case PGType.TIMESTAMP:
-        case PGType.TIMESTAMPTZ:
             return _tryParse!T({
                     bool inf, negInf;
                     auto iso = _pgTimestampToISO(data[0 .. length], inf, negInf);
                     if (inf)    return Date.max;
                     if (negInf) return Date.min;
-                    return Date.fromISOExtString(iso[0 .. _isoDateEnd(iso)]);
+                    // An offset means the value is an instant, whose date is
+                    // zone-dependent. Reached via GUESS: array elements have no OID.
+                    immutable e = _isoDateEnd(iso);
+                    enforce!ConversionError(_utcOffsetPos(iso, e) < 0,
+                        _dateIsZonelessMsg);
+                    return Date.fromISOExtString(iso[0 .. e]);
                 }(), "Cannot parse date", pg_type, data, length);
+        case PGType.TIMESTAMPTZ:
+            throw _readError!T(_dateIsZonelessMsg, pg_type, data, length);
         default:
             throw _readError!T(
                 "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof),
@@ -206,18 +252,22 @@ pure @trusted if (is(T == DateTime)) {
     switch(pg_type) {
         case PGType.GUESS:
         case PGType.TIMESTAMP:
-        case PGType.TIMESTAMPTZ:
             return _tryParse!T({
                     bool inf, negInf;
                     auto iso = _pgTimestampToISO(data[0 .. length], inf, negInf);
                     if (inf)    return DateTime.max;
                     if (negInf) return DateTime.min;
-                    // Drop any fractional seconds / offset: DateTime has neither.
+                    // Drop any fractional seconds: DateTime has none.
                     immutable e = _isoDateEnd(iso);
                     enforce!ConversionError(e + 9 <= iso.length,
                         "Cannot parse DateTime from postgres: value is too short");
+                    // As for Date: an offset means an instant, not a wall clock.
+                    enforce!ConversionError(_utcOffsetPos(iso, e) < 0,
+                        _dateTimeIsZonelessMsg);
                     return DateTime.fromISOExtString(iso[0 .. e + 9]);
                 }(), "Cannot parse timestamp", pg_type, data, length);
+        case PGType.TIMESTAMPTZ:
+            throw _readError!T(_dateTimeIsZonelessMsg, pg_type, data, length);
         default:
             throw _readError!T(
                 "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof),
@@ -244,7 +294,14 @@ private Duration _parseUtcOffset(scope const(char)[] off) {
     return dur!"seconds"(sign * (h * 3600 + m * 60 + sec));
 }
 
-/** Parse a PostgreSQL `timestamptz` rendering into a SysTime.
+/** Parse a PostgreSQL `timestamptz` rendering into a SysTime, in UTC.
+  *
+  * Always UTC, whatever offset the server rendered: the instant is what peque
+  * guarantees, and one rule for the attached zone is the only way two rows of
+  * the same result set cannot print in different zones. It is also the only
+  * rule expressible here — a local-mean-time offset such as +02:02:04 is not a
+  * whole-minute SimpleTimeZone. Callers render with .toLocalTime() or
+  * .toOtherTZ().
   *
   * Normally delegates straight to SysTime.fromISOExtString. Two renderings it
   * cannot handle are dealt with here, both produced by ordinary values:
@@ -263,8 +320,6 @@ private Duration _parseUtcOffset(scope const(char)[] off) {
   * For those cases the offset is parsed here and the wall-clock part is read as
   * UTC and shifted by it, which is exact. PostgreSQL's BC years are converted
   * to astronomical numbering (1 BC == year 0), which D represents natively.
-  * The result is in UTC rather than a fixed-offset zone — the same instant —
-  * while the ordinary whole-minute path is left untouched.
   **/
 private SysTime _parseTimestampTz(scope const(char)[] str) @trusted {
     bool inf, negInf;
@@ -278,15 +333,16 @@ private SysTime _parseTimestampTz(scope const(char)[] str) @trusted {
     enforce!ConversionError(dateEnd < iso.length,
         "Cannot parse timestamp: no time part in: " ~ str.idup);
 
-    ptrdiff_t ofs = -1;
-    foreach_reverse (i; dateEnd .. iso.length)
-        if (iso[i] == '+' || iso[i] == '-') { ofs = i; break; }
+    // No offset means no instant. PostgreSQL always renders one for a
+    // timestamptz, so this only fires for a value that arrived through GUESS.
+    immutable ofs = _utcOffsetPos(iso, dateEnd);
+    enforce!ConversionError(ofs >= 0, _sysTimeNeedsZoneMsg);
 
     // A whole-minute offset is what std.datetime accepts; only a seconds-bearing
     // one (local mean time) needs to be applied by hand.
     immutable secondsOffset = ofs > 0 && (iso.length - ofs) == 9;
     if (!secondsOffset)
-        return SysTime.fromISOExtString(iso);
+        return SysTime.fromISOExtString(iso).toUTC();
 
     immutable delta = _parseUtcOffset(iso[ofs .. $]);
     return SysTime.fromISOExtString(iso[0 .. ofs] ~ "Z") - delta;
@@ -301,30 +357,14 @@ T convertTextTypeToD(T)(
     import std.datetime.timezone;
     switch(pg_type) {
         case PGType.GUESS:
-            enforce(length >= 19, _readError!T(
-                "Cannot parse value as timestamp: value is too short",
-                pg_type, data, length));
-            if (length == 19)
-                // no timezone suffix: treat as UTC timestamp
-                return _tryParse!T({
-                        bool inf, negInf;
-                        auto iso = _pgTimestampToISO(data[0 .. length], inf, negInf);
-                        if (inf)    return SysTime.max;
-                        if (negInf) return SysTime.min;
-                        return SysTime.fromISOExtString(iso ~ "Z");
-                    }(), "Cannot parse timestamp", pg_type, data, length);
-            else
-                // timezone suffix present: parse as timestamp with timezone
-                return _tryParse!T(_parseTimestampTz(data[0 .. length]),
-                    "Cannot parse timestamp with time zone", pg_type, data, length);
+            // No OID, so the rendering decides: _parseTimestampTz refuses a
+            // value without an offset. Deciding by string length instead would
+            // misread a naive value with fractional seconds, and reject
+            // "infinity" as too short.
+            return _tryParse!T(_parseTimestampTz(data[0 .. length]),
+                "Cannot parse timestamp with time zone", pg_type, data, length);
         case PGType.TIMESTAMP:
-            return _tryParse!T({
-                    bool inf, negInf;
-                    auto iso = _pgTimestampToISO(data[0 .. length], inf, negInf);
-                    if (inf)    return SysTime.max;
-                    if (negInf) return SysTime.min;
-                    return SysTime.fromISOExtString(iso ~ "Z");
-                }(), "Cannot parse timestamp", pg_type, data, length);
+            throw _readError!T(_sysTimeNeedsZoneMsg, pg_type, data, length);
         case PGType.TIMESTAMPTZ:
             return _tryParse!T(_parseTimestampTz(data[0 .. length]),
                 "Cannot parse timestamp with time zone", pg_type, data, length);

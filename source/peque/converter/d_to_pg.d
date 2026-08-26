@@ -8,7 +8,8 @@ private import std.algorithm;
 private import std.json: JSONValue;
 private import std.uuid: UUID;
 private import std.traits:
-    isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray;
+    isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray,
+    Unqual;
 private import std.range: ElementType;
 private import std.typecons: Nullable;
 
@@ -163,33 +164,64 @@ PGValue convertToPG(T) (in T value)
     );
 }
 
+/** PostgreSQL's spelling of a D ISO-extended date/timestamp.
+  *
+  * Only the year is rewritten; the rest of D's output parses as-is. The two
+  * disagree at both ends of the range:
+  *
+  *  - D numbers years astronomically and writes `-0001-06-15`; PostgreSQL has
+  *    no negative years — it counts BC from 1 and wants `0002-06-15 BC`.
+  *  - Past 9999 D writes a leading `+`, which PostgreSQL reads as the start of
+  *    a UTC offset ("time zone displacement out of range").
+  **/
+private char[] _pgCalendarText(scope const(char)[] iso, in int year) @safe pure {
+    // The year runs to the first '-' that is not its own sign.
+    size_t i = (iso.length > 0 && (iso[0] == '-' || iso[0] == '+')) ? 1 : 0;
+    while (i < iso.length && iso[i] != '-') ++i;
+    auto rest = iso[i .. $];        // "-MM-DD[T…]"
+
+    if (year > 0)
+        return (format!"%04d"(year) ~ rest).to!(char[]);
+    return (format!"%04d"(1 - year) ~ rest ~ " BC").to!(char[]);
+}
+
+
 /// ditto
 PGValue convertToPG(T) (in T value)
-@safe pure if (is(T == Date)) {
-    auto s = value.toISOExtString;
-    return PGValue(PGType.DATE, PGFormat.TEXT, (s.to!(char[]) ~ '\0'));
+@safe pure if (is(Unqual!T == Date)) {
+    return PGValue(PGType.DATE, PGFormat.TEXT,
+                   _pgCalendarText(value.toISOExtString, value.year) ~ '\0');
 }
 
 /// ditto
 PGValue convertToPG(T) (in T value)
-@safe pure if (is(T == DateTime)) {
-    auto s = value.toISOExtString;
-    return PGValue(PGType.TIMESTAMP, PGFormat.TEXT, (s.to!(char[]) ~ '\0'));
+@safe pure if (is(Unqual!T == DateTime)) {
+    return PGValue(PGType.TIMESTAMP, PGFormat.TEXT,
+                   _pgCalendarText(value.toISOExtString, value.year) ~ '\0');
 }
 
-/// ditto
+/** ditto
+  *
+  * Normalised to UTC first, so the value means the same thing on every server.
+  * Without it a `SysTime` in `LocalTime()` — what `Clock.currTime` returns —
+  * renders with no UTC offset at all, and PostgreSQL reads the naked wall clock
+  * in the session TimeZone. Nothing is lost by sending UTC: timestamptz stores
+  * an instant and discards the input offset anyway.
+  **/
 PGValue convertToPG(T) (in T value)
-@safe if (is(T == SysTime)) {
+@safe if (is(Unqual!T == SysTime)) {
+    // The year must come from the UTC value: converting can cross a boundary.
+    auto utc = value.toUTC;
     return PGValue(
         PGType.TIMESTAMPTZ,
         PGFormat.TEXT,
-        (value.to!(char[]) ~ '\0'),
+        _pgCalendarText(utc.toISOExtString, utc.year) ~ '\0',
     );
 }
 
 /// ditto
 PGValue convertToPG(T)(in T value)
-@safe if (is(T == JSONValue)) {
+@safe if (is(Unqual!T == JSONValue)) {
     auto s = value.toString();
     return PGValue(
         PGType.JSONB,
@@ -216,7 +248,8 @@ PGValue convertToPG(T) (in T value)
      */
     char[] result = ['{'];
     static if ((isIntegral!TI || isFloatingPoint!TI || isBoolean!TI ||
-                is(TI == Date) || is(TI == DateTime) || is(TI == SysTime)) ||
+                is(Unqual!TI == Date) || is(Unqual!TI == DateTime) ||
+                is(Unqual!TI == SysTime)) ||
                (isArray!TI && !isSomeString!TI)) {
         // No quoting needed — numeric, boolean, date, or nested array types
         result ~= value.map!((v) => convertToPG(v).value[0 .. $-1]).join(",");
@@ -255,15 +288,15 @@ PGValue convertToPG(T) (in T value)
 
 /// ditto
 PGValue convertToPG(T)(in T value)
-@safe pure if (is(T == UUID)) {
+@safe pure if (is(Unqual!T == UUID)) {
     return PGValue(PGType.UUID, PGFormat.TEXT, value.toString().to!(char[]) ~ '\0');
 }
 
 /// ditto — Nullable: sends SQL NULL when empty, delegates to inner type when set
 PGValue convertToPG(T)(in T value)
-@safe if (is(T == Nullable!U, U)) {
+@safe if (is(Unqual!T == Nullable!U, U)) {
     // Re-bind U inside the function body; the constraint's alias is not in scope here.
-    static if (is(T == Nullable!Inner, Inner)) {
+    static if (is(Unqual!T == Nullable!Inner, Inner)) {
         if (value.isNull)
             return PGValue(convertToPG!Inner(Inner.init).type, PGFormat.TEXT, value: null, is_null: true);
         return convertToPG!Inner(value.get);

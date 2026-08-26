@@ -29,6 +29,11 @@ alias VibeConnectionPool = ConnectionPool!(LocalTaskSemaphore, TaskMutex);
   * Params:
   *     capacity = number of connections to pre-create (>= 1)
   *     params   = connection keyword arguments (dbname, user, password, host, port, …)
+  *     timezone = session TimeZone to pin on every connection in the pool, e.g.
+  *         "UTC". Empty leaves it to the server's configuration or PGTZ. It is a
+  *         property of the connection rather than of a borrow: a pooled
+  *         connection keeps its session state across borrows, so this is the
+  *         only place it can be set safely.
   * Returns: VibeConnectionPool ready for use inside vibe.d tasks
   *
   * Example:
@@ -41,9 +46,10 @@ alias VibeConnectionPool = ConnectionPool!(LocalTaskSemaphore, TaskMutex);
   * ]);
   * ---
   **/
-VibeConnectionPool makeVibePool(in size_t capacity, in string[string] params) {
+VibeConnectionPool makeVibePool(in size_t capacity, in string[string] params,
+                                in string timezone = "") {
     return VibeConnectionPool(capacity, () {
-        auto conn = Connection(params.dup, VibeWaitStrategy());
+        auto conn = Connection(params.dup, timezone, VibeWaitStrategy());
         conn.setNonBlocking(true);
         return conn;
     });

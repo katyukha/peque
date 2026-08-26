@@ -6,6 +6,7 @@
   *  - empty match set → Nullable.isNull
   *  - aggregate!() combined with join-path WHERE predicates (filter joins)
   *  - groupBy! + annotate! (typed and raw) + grouped select!DTO
+  *  - groupByRaw! — an expression as a group key (GROUP BY + SELECT)
   *  - multi-key groupBy!
   *  - having() — alone and combined with where() ($N offset threading)
   *  - orderBy(agg.desc) + limit() on grouped queries
@@ -426,4 +427,107 @@ unittest {
                .aggregate!(F!(AggInvoice, "amount").sum)().get == 600.0);
     assert(repo.query().orderBy(F!(AggInvoice, "amount").asc).limit(2)
                .aggregate!(F!(AggInvoice, "amount").sum)().get == 150.0);
+}
+
+
+// ---------------------------------------------------------------------------
+// groupByRaw! — grouping by an expression
+// ---------------------------------------------------------------------------
+
+@autoHydrate
+struct BandTotals { string band; long n; double total; }
+
+@autoHydrate
+struct StatusBand { string status; string band; long n; }
+
+// annotate! projects; groupByRaw! groups. The distinction is the whole point:
+// an annotate!()d non-aggregate expression makes PostgreSQL reject the
+// statement, because nothing put it in GROUP BY.
+unittest {
+    auto c = makeConn();
+    seed(c);                       // amounts 100, 200, 50, 150, 400
+
+    auto repo = Repository!(AggInvoice, Connection)(&c);
+
+    // A raw key on its own: three bands over five invoices.
+    enum band = `CASE WHEN _m.amount >= 200 THEN 'big' ELSE 'small' END`;
+    auto bands = repo.query()
+        .groupByRaw!("band", band)
+        .annotate!("n",     "COUNT(*)")
+        .annotate!("total", F!(AggInvoice, "amount").sum)
+        .orderBy("band")
+        .select!BandTotals();
+
+    assert(bands.length == 2);
+    assert(bands[0].band == "big"   && bands[0].n == 2 && bands[0].total == 600.0);
+    assert(bands[1].band == "small" && bands[1].n == 3 && bands[1].total == 300.0);
+
+    // Combined with a column key — and the two kinds compose in either order,
+    // which is why groupBy! exists on the grouped type as well.
+    auto mixed = repo.query()
+        .groupBy!"status"
+        .groupByRaw!("band", band)
+        .annotate!("n", "COUNT(*)")
+        .orderBy("status, band")
+        .select!StatusBand();
+
+    auto reversed = repo.query()
+        .groupByRaw!("band", band)
+        .groupBy!"status"
+        .annotate!("n", "COUNT(*)")
+        .orderBy("status, band")
+        .select!StatusBand();
+    assert(reversed == mixed);
+
+    assert(mixed.length == 4);
+    assert(mixed[0].status == "open" && mixed[0].band == "big"   && mixed[0].n == 1);
+    assert(mixed[1].status == "open" && mixed[1].band == "small" && mixed[1].n == 2);
+    assert(mixed[2].status == "paid" && mixed[2].band == "big"   && mixed[2].n == 1);
+    assert(mixed[3].status == "paid" && mixed[3].band == "small" && mixed[3].n == 1);
+
+    // where() still applies before grouping, and having() after it.
+    auto openOnly = repo.query()
+        .where!"status"("open")
+        .groupByRaw!("band", band)
+        .annotate!("n",     "COUNT(*)")
+        .annotate!("total", F!(AggInvoice, "amount").sum)
+        // open invoices are 100, 200, 50 -> big = 200, small = 150
+        .having(F!(AggInvoice, "amount").sum.gt(180.0))
+        .select!BandTotals();
+
+    assert(openOnly.length == 1);
+    assert(openOnly[0].band == "big" && openOnly[0].n == 1 && openOnly[0].total == 200.0);
+}
+
+// The compile-time contract.
+unittest {
+    auto c = makeConn();
+    auto repo = Repository!(AggInvoice, Connection)(&c);
+    auto qs = repo.query();
+    enum band = `CASE WHEN _m.amount >= 200 THEN 'big' ELSE 'small' END`;
+
+    // A DTO member matching neither a key nor an annotation is still rejected.
+    static assert(!__traits(compiles,
+        qs.groupByRaw!("band", band).select!BandTotals()));   // no "n"/"total"
+
+    // An empty name or expression is refused rather than emitting broken SQL.
+    static assert(!__traits(compiles, qs.groupByRaw!("", band)));
+    static assert(!__traits(compiles, qs.groupByRaw!("band", "")));
+
+    // One name cannot be claimed twice — the duplicate would be silently
+    // dropped, which is a wrong answer rather than an error.
+    static assert(!__traits(compiles,
+        qs.groupBy!"status"
+          .groupByRaw!("status", band)
+          .annotate!("n", "COUNT(*)")
+          .select!StatusBand()));
+    static assert(!__traits(compiles,
+        qs.groupByRaw!("band", band)
+          .annotate!("band", "COUNT(*)")
+          .annotate!("n", "COUNT(*)")
+          .select!StatusBand()));
+
+    // Grouped queries have no row terminals, raw key or not.
+    static assert(!__traits(compiles, qs.groupByRaw!("band", band).all()));
+    static assert(!__traits(compiles, qs.groupByRaw!("band", band).first()));
 }

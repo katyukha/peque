@@ -150,6 +150,76 @@ private string _pgBaseType(T)() {
             "`. Annotate the field with @pgType(\"...\").");
 }
 
+/// Normalised @pgType string: upper-cased, precision dropped, spaces collapsed.
+private string _normTypeName(string t) pure @safe {
+    string outp;
+    bool lastSpace = true;      // leading whitespace is dropped
+    size_t depth;
+    foreach (char c; t) {
+        if (c == '(') { ++depth; continue; }   // "(3)", "(10,2)" — precision
+        if (c == ')') { if (depth) --depth; continue; }
+        if (depth) continue;
+        if (c == ' ' || c == '\t') {
+            if (!lastSpace) { outp ~= ' '; lastSpace = true; }
+            continue;
+        }
+        lastSpace = false;
+        outp ~= (c >= 'a' && c <= 'z') ? cast(char)(c - 32) : c;
+    }
+    while (outp.length && outp[$ - 1] == ' ') outp = outp[0 .. $ - 1];
+    return outp;
+}
+
+/// Does this normalised PostgreSQL type name denote a date/time value at all?
+private bool _isTemporalTypeName(string t) pure @safe {
+    return t == "DATE" || t == "TIME" || t == "TIMETZ" ||
+           t == "TIMESTAMP" || t == "TIMESTAMPTZ" ||
+           t == "TIME WITH TIME ZONE" || t == "TIME WITHOUT TIME ZONE" ||
+           t == "TIMESTAMP WITH TIME ZONE" || t == "TIMESTAMP WITHOUT TIME ZONE";
+}
+
+/// …and does it carry a time zone?
+private bool _isZonedTypeName(string t) pure @safe {
+    return t == "TIMESTAMPTZ" || t == "TIMETZ" ||
+           t == "TIMESTAMP WITH TIME ZONE" || t == "TIME WITH TIME ZONE";
+}
+
+/** Reject a @pgType whose zone-ness contradicts the D type's.
+  *
+  * peque types a parameter from the D value alone and PostgreSQL casts it to the
+  * column's real type. When the two disagree about zones, that cast runs in the
+  * SESSION TimeZone, so what gets stored depends on a server setting — the read
+  * direction already refuses such a pair, and this closes the write side.
+  *
+  * Only fires where @pgType states the type: for an INSERT the server infers it
+  * and reports nothing, so a column created outside the ORM stays the caller's
+  * responsibility.
+  **/
+private void _assertTemporalZoneMatch(M, string memberName, string typeName)() {
+    alias FType = typeof(__traits(getMember, M, memberName));
+    static if (is(FType == Nullable!U, U)) alias VType = U;
+    else                                   alias VType = FType;
+
+    static if (is(VType == SysTime) || is(VType == DateTime) || is(VType == Date)) {
+        enum norm = _normTypeName(typeName);
+        static if (_isTemporalTypeName(norm)) {
+            enum wantsZone = is(VType == SysTime);
+            static assert(_isZonedTypeName(norm) == wantsZone,
+                M.stringof ~ "." ~ memberName ~ ": @pgType(\"" ~ typeName ~
+                "\") " ~ (wantsZone ? "has no time zone, but SysTime is an instant."
+                                     : "carries a time zone, but " ~ VType.stringof ~
+                                       " has none.") ~
+                " PostgreSQL would cast the value using the session TimeZone, so" ~
+                " what gets stored would depend on a server setting. Use " ~
+                (wantsZone
+                    ? "@pgType(\"TIMESTAMPTZ\") — or change the field to DateTime" ~
+                      " if it really is a wall clock."
+                    : "@pgType(\"TIMESTAMP\") or \"DATE\" — or change the field to" ~
+                      " SysTime if it really is an instant."));
+        }
+    }
+}
+
 private template _isNullable(T) {
     static if (is(T == Nullable!U, U))
         enum bool _isNullable = true;
@@ -182,6 +252,7 @@ private string _buildColDef(M, string memberName)() {
     alias pgTypeUDAs = getUDAs!(F, pgType);
     static if (pgTypeUDAs.length > 0) {
         typeName = pgTypeUDAs[0].typeName;
+        _assertTemporalZoneMatch!(M, memberName, pgTypeUDAs[0].typeName)();
     } else static if (hasUDA!(F, primaryKey)) {
         static if (is(FType == int) || is(FType == uint))
             typeName = "SERIAL";

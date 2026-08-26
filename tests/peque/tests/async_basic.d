@@ -25,7 +25,7 @@ private Connection mockConn(ref MockWaitStrategy mock) {
         password: environment.get("POSTGRES_PASSWORD", "peque"),
         host:     environment.get("POSTGRES_HOST",     "localhost"),
         port:     environment.get("POSTGRES_PORT",     "5432"),
-        MockWS(&mock),
+        ws: MockWS(&mock),
     );
 }
 

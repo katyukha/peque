@@ -117,7 +117,7 @@ struct PollWaitStrategy {
   *
   * ---
   * MockWaitStrategy mock;
-  * auto conn = Connection(connStr, MockWS(&mock));
+  * auto conn = Connection(connStr, ws: MockWS(&mock));
   * conn.execParams("SELECT 1");
   * assert(mock.readCount >= 1);
   * ---

@@ -15,6 +15,7 @@ version (unittest):
 import core.time;
 import std.conv: text;
 import std.process: environment;
+import std.datetime: SysTime, DateTime, UTC;
 
 import vibe.core.core;
 import vibe.core.task: Task;
@@ -35,7 +36,7 @@ string[string] testParams() {
 
 
 Connection vibeConnect() {
-    auto conn = Connection(testParams(), VibeWaitStrategy());
+    auto conn = Connection(testParams(), ws: VibeWaitStrategy());
     conn.setNonBlocking(true);
     return conn;
 }
@@ -195,4 +196,30 @@ unittest {
         assert(after <= before + 5,
             text("fd leak: ", before, " fds before, ", after, " after 200 wait cycles"));
     }, 60.seconds);
+}
+
+
+// makeVibePool forwards `timezone` to every connection it creates — the path
+// where it is most likely to be dropped unnoticed, since the pool builds its
+// connections inside a factory delegate.
+unittest {
+    runVibeTest({
+        auto pool = makeVibePool(2, testParams(), "Asia/Kolkata");
+
+        // Every connection in the pool, not just the first one handed out.
+        foreach (_; 0 .. 4)
+            pool.borrow((ref Connection c) {
+                assert(c.exec(`SHOW TimeZone`).getValue!string(0, 0) == "Asia/Kolkata");
+            });
+
+        // Omitted, the pool leaves the zone to the server — and the connection
+        // still round-trips an instant unchanged, which is the invariant that
+        // must not depend on the setting.
+        auto plain = makeVibePool(1, testParams());
+        plain.borrow((ref Connection c) {
+            auto instant = SysTime(DateTime(2026, 8, 26, 9, 0, 0), UTC());
+            assert(c.execParams(`SELECT $1::timestamptz`, instant)
+                    .getValue!SysTime(0, 0) == instant);
+        });
+    });
 }

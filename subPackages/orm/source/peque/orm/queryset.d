@@ -1198,17 +1198,37 @@ if (isModel!M && isQueryContext!Ctx) {
       **/
     auto groupBy(groupFields...)()
     if (groupFields.length >= 1) {
-        static foreach (gf; groupFields) {
-            static if (!is(typeof(gf) == string)) {
-                static assert(false,
-                    "groupBy! takes field-name string literals, e.g. groupBy!(\"orderId\")");
-            } else {
-                static assert(_fieldColName!(M, gf)().length > 0,
-                    "'" ~ gf ~ "' in groupBy! is not a DB column field on " ~ M.stringof ~
-                    " (must have @field, @primaryKey, or @many2one UDA)");
-            }
-        }
+        _assertGroupKeys!(M, groupFields)();
         return GroupedQuerySet!(typeof(this), groupFields)(this);
+    }
+
+    /** Group by a raw SQL expression, under a DTO member name.
+      *
+      * groupBy! keys are columns, which is enough until the grouping is a
+      * function of one — a timestamp bucketed into a user's local day, a
+      * lower(email), a computed band. The expression lands in both GROUP BY and
+      * the SELECT list, so PostgreSQL accepts it and the DTO can read it back.
+      *
+      * ---
+      * @autoHydrate
+      * struct DayCount { int userId; DateTime localDay; long n; }
+      *
+      * repo.query()
+      *     .groupBy!"userId"
+      *     .groupByRaw!("localDay",
+      *                  `date_trunc('day', _m.created_at AT TIME ZONE 'Europe/Kyiv')`)
+      *     .annotate!("n", "COUNT(*)")
+      *     .select!DayCount();
+      * ---
+      *
+      * Security: embedded verbatim, like annotate! and whereRaw's fragment — a
+      * trusted compile-time literal only, and no bound parameters. A grouping
+      * that depends on a runtime value (each user's own time zone) belongs in
+      * Connection.execParams, not in string concatenation here.
+      **/
+    auto groupByRaw(string name, string expr)() {
+        _assertRawGroupKey!(name, expr)();
+        return GroupedQuerySet!(typeof(this), GroupExpr!(name, expr))(this);
     }
 
     // -----------------------------------------------------------------------
@@ -1771,6 +1791,28 @@ if (isModel!M && isQueryContext!Ctx) {
 // GroupedQuerySet — GROUP BY / HAVING / aggregate projection
 // ---------------------------------------------------------------------------
 
+// Group-key validation, shared by QuerySet's builders and GroupedQuerySet's:
+// keys can be introduced from either, and the two must reject the same things.
+private void _assertGroupKeys(M, groupFields...)() {
+    static foreach (gf; groupFields) {
+        static if (!is(typeof(gf) == string))
+            static assert(false,
+                "groupBy! takes field-name string literals, e.g. groupBy!(\"orderId\")");
+        else
+            static assert(_fieldColName!(M, gf)().length > 0,
+                "'" ~ gf ~ "' in groupBy! is not a DB column field on " ~ M.stringof ~
+                " (must have @field, @primaryKey, or @many2one UDA)");
+    }
+}
+
+/// ditto
+private void _assertRawGroupKey(string name, string expr)() {
+    static assert(name.length > 0, "groupByRaw!: the DTO member name is empty");
+    static assert(expr.length > 0,
+        "groupByRaw!(\"" ~ name ~ "\"): the SQL expression is empty");
+}
+
+
 /** Annotation marker pairing a SELECT alias with an aggregate builder or a
   * raw SQL expression.  Appears only in GroupedQuerySet type parameters —
   * never constructed at runtime.  Produced by GroupedQuerySet.annotate!.
@@ -1781,13 +1823,33 @@ struct Annot(string name, string expr) {
 }
 
 
+/** Group-key marker for a raw SQL expression, produced by groupByRaw!.
+  *
+  * Like Annot it pairs a name with an expression, but it also goes into GROUP
+  * BY — the whole difference. A non-aggregate annotate! expression makes
+  * PostgreSQL reject the statement ("must appear in the GROUP BY clause"),
+  * because a SELECT-list expression groups nothing by itself.
+  **/
+struct GroupExpr(string name, string expr) {
+    enum _name = name;
+    enum _expr = expr;
+}
+
+
+/// true if S is a GroupExpr instantiation (a group key, not just a projection).
+package(peque.orm) enum _isGroupExpr(alias S) =
+    is(S == GroupExpr!(n, e), string n, string e);
+
+
 /** GROUP BY query wrapper produced by QuerySet.groupBy!(...).
   *
   * Specs is a compile-time mix of:
-  *  - string values      — group-key field names (accumulated by groupBy!)
-  *  - Annot!(name, spec) — aggregate/raw SELECT annotations (annotate!)
+  *  - string values          — group-key field names (accumulated by groupBy!)
+  *  - GroupExpr!(name, expr) — raw group keys (groupByRaw!): GROUP BY + SELECT
+  *  - Annot!(name, spec)     — aggregate/raw SELECT annotations (annotate!)
   *
-  * Builders: annotate!, having, where, whereRaw, orderBy, limit, offset.
+  * Builders: groupBy!, groupByRaw!, annotate!, having, where, whereRaw,
+  * orderBy, limit, offset.
   * The only terminal is the grouped select!DTO() — every DTO member must be
   * either a group key or an annotation alias (validated at compile time), so
   * PostgreSQL's "column must appear in the GROUP BY clause" error is caught
@@ -1859,6 +1921,29 @@ if (is(QS == QuerySet!Args, Args...)) {
         else
             enum expr = typeof(spec[0]).expr;    // AggBuilder
         auto g2 = GroupedQuerySet!(QS, Specs, Annot!(name, expr))(_base);
+        g2._havings = _havings;
+        return g2;
+    }
+
+    /** Add one or more column group keys — see QuerySet.groupBy! for the
+      * rules; this is the same builder, appending to an existing grouping so
+      * that column and expression keys can be introduced in either order.
+      **/
+    auto groupBy(groupFields...)()
+    if (groupFields.length >= 1) {
+        _assertGroupKeys!(M, groupFields)();
+        auto g2 = GroupedQuerySet!(QS, Specs, groupFields)(_base);
+        g2._havings = _havings;
+        return g2;
+    }
+
+    /** Add a raw SQL expression as a further group key — see
+      * QuerySet.groupByRaw! for the rules; this is the same builder, appending
+      * to an existing grouping.
+      **/
+    auto groupByRaw(string name, string expr)() {
+        _assertRawGroupKey!(name, expr)();
+        auto g2 = GroupedQuerySet!(QS, Specs, GroupExpr!(name, expr))(_base);
         g2._havings = _havings;
         return g2;
     }
@@ -1952,8 +2037,9 @@ if (is(QS == QuerySet!Args, Args...)) {
             enum expr = _groupedExprFor!(dtoMemberName)();
             static assert(expr.length > 0,
                 "select!" ~ DTO.stringof ~ ": member '" ~ dtoMemberName ~
-                "' is neither a groupBy!(...) key nor an annotate!(...) alias." ~
-                " Non-aggregate DTO columns must appear in groupBy!;" ~
+                "' is neither a groupBy!(...) key, a groupByRaw!(...) key, nor" ~
+                " an annotate!(...) alias. Non-aggregate DTO columns must appear" ~
+                " in groupBy! (a column) or groupByRaw! (an expression);" ~
                 " aggregate columns must be registered via annotate!(\"" ~
                 dtoMemberName ~ "\", ...).");
             // A grouped DTO member names a group key or an annotation alias —
@@ -1965,9 +2051,10 @@ if (is(QS == QuerySet!Args, Args...)) {
                           _dtoRelatedPath!DtoDecl.length == 0,
                 "select!" ~ DTO.stringof ~ ": member '" ~ dtoMemberName ~
                 "' carries @field(\"col\") or @field(related:), which a grouped " ~
-                "query cannot honour — its columns are groupBy!() keys and " ~
-                "annotate!() aliases, matched by member name. Rename the member, " ~
-                "or give the annotation the alias you want.");
+                "query cannot honour — its columns are groupBy!() / " ~
+                "groupByRaw!() keys and annotate!() aliases, matched by member " ~
+                "name. Rename the member, or give the key/annotation the name " ~
+                "you want.");
             if (selList.length) selList ~= ", ";
             selList ~= expr ~ " AS " ~ _sqlIdent(_resolveColName!(DtoDecl, dtoMemberName));
         }}
@@ -2030,9 +2117,9 @@ if (is(QS == QuerySet!Args, Args...)) {
             return n;
         }();
         static assert(_keyCount <= 1,
-            "select!DTO: '" ~ memberName ~ "' is both a groupBy!() key and an " ~
-            "annotate!() alias. The aggregate would be silently ignored — give " ~
-            "the annotation a different alias.");
+            "select!DTO: '" ~ memberName ~ "' is claimed by more than one of " ~
+            "groupBy!() / groupByRaw!() / annotate!(). One of them would be " ~
+            "silently ignored — give them distinct names.");
 
         string expr = "";
         static foreach (S; Specs) {{
@@ -2051,13 +2138,19 @@ if (is(QS == QuerySet!Args, Args...)) {
         return expr;
     }
 
-    // Comma-separated GROUP BY column list from the group-key Specs.
+    // Comma-separated GROUP BY list: column keys from groupBy!, plus the raw
+    // expressions from groupByRaw!. annotate! expressions are deliberately NOT
+    // here — an annotation is a projection, and grouping by one would change
+    // the answer rather than the presentation.
     private static string _groupByClause() {
         string s;
         static foreach (S; Specs) {{
             static if (is(typeof(S) == string)) {
                 if (s.length) s ~= ", ";
                 s ~= "_m." ~ _fieldColName!(M, S)();
+            } else static if (_isGroupExpr!S) {
+                if (s.length) s ~= ", ";
+                s ~= S._expr;
             }
         }}
         return s;

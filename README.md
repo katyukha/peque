@@ -30,11 +30,132 @@ scope, without depending on the GC.
 | `int`, `long`, `short` | `integer`, `bigint`, `smallint` |
 | `float`, `double` | `real`, `double precision` (incl. `NaN`, `Infinity`, `-Infinity`) |
 | `bool` | `boolean` |
+| `UUID` | `uuid` |
 | `Date` | `date` |
 | `DateTime` | `timestamp` |
 | `SysTime` | `timestamptz` |
 | `T[]` | one-dimensional arrays |
 | `Nullable!T` | any nullable column |
+
+### Time zones
+
+`SysTime` is an **instant**; `DateTime` is a **wall clock**. Which one you pick
+decides whether the value survives a change of server, and the two are not
+interchangeable.
+
+A `SysTime` is normalised to UTC on the way out, so what you write means the same
+thing whatever the server's session `TimeZone` is set to. This matters more than
+it sounds: `SysTime.toString` omits the UTC offset for values in `LocalTime()` —
+what `Clock.currTime` returns — so without the normalisation PostgreSQL would
+read a naked wall clock and apply its own session zone.
+
+```d
+partner.createdAt = Clock.currTime;   // stored as the instant it names
+```
+
+Reading a `timestamptz` into a `DateTime` is refused with a `ConversionError`:
+`DateTime` has nowhere to keep the offset, so the value would silently become
+whatever wall clock the server's `TimeZone` renders — a different answer on a
+different server. Use `SysTime`, or `string` for the raw text.
+
+### Pinning the session zone
+
+Nothing above depends on the server's `TimeZone` — that is the point of the
+normalisation. What *does* depend on it is anything **PostgreSQL renders**:
+`now()::text`, `to_char`, a `timestamptz` cast to text in a raw query. That
+setting comes from the server's configuration or the client's `PGTZ`, so the same
+code can print different times on two machines. Pin it at connect:
+
+```d
+auto c = Connection(
+    dbname: "mydb", user: "myuser", password: "secret",
+    host: "localhost", port: "5432",
+    timezone: "UTC",              // applied once, on connect
+);
+```
+
+Every constructor takes it, as a separate argument that sits between the
+connection parameters and the wait strategy — connection *parameters* go to libpq
+untouched, and `timezone` is peque's setting, not libpq's:
+
+```d
+auto c = Connection(params, "UTC");              // string[string] params
+auto c = Connection(connStr, "UTC");             // conninfo string
+auto pool = makeVibePool(8, params, "UTC");      // every connection in the pool
+auto c = connectViaEnvParams(defaults, "UTC");
+```
+
+An unknown zone fails the connection rather than leaving one whose rendering
+quietly differs from what you asked for.
+
+Deliberately connect-time only: a pooled connection keeps its session state
+across borrows, so setting the zone per request would leak one request's zone
+into whoever borrows that connection next. For a per-user zone, convert at the
+edges or say `AT TIME ZONE $1` in the query.
+
+Two libpq mechanisms do the same job from outside the code, and work with peque
+without any of the above: the **`PGTZ`** environment variable, and libpq's
+`options` connection keyword (`options=-c timezone=UTC`). Both travel in the
+startup packet — `pg_settings.source` reads `client` rather than `session` — so
+they are useful for pinning a zone you do not want to hard-code. `timezone` is
+not a libpq keyword itself; passing one to libpq is an "invalid connection
+option" error, which is why peque strips its own key before connecting.
+
+### Reading values back
+
+Values always come back in **UTC**, whatever offset the server rendered — one
+rule, so two rows of a result set cannot print in different zones. The instant is
+what peque guarantees; to display one, convert explicitly:
+
+```d
+auto ts = row["created_at"].get!SysTime;
+ts.toUTC;                                              // canonical form
+ts.toOtherTZ(PosixTimeZone.getTimeZone("Europe/Kyiv"));  // for display
+```
+
+For an application serving users in several zones: store instants as
+`timestamptz`/`SysTime`, keep each user's zone as an **IANA name**
+(`"Europe/Kyiv"`, not `"+03:00"` — offsets change with DST), and convert only
+when rendering. Grouping by a user's local day belongs in SQL, where the zone
+database does the work — including the DST transitions that make a local day 23
+or 25 hours long. `groupByRaw!` takes an expression as a group key:
+
+```d
+@autoHydrate
+struct DayCount { DateTime localDay; long n; }
+
+auto rows = repo.query()
+    .where!"userId"(userId)
+    .groupByRaw!("localDay",
+                 `date_trunc('day', _m.created_at AT TIME ZONE 'Europe/Kyiv')`)
+    .annotate!("n", "COUNT(*)")
+    .orderBy("local_day")
+    .select!DayCount();
+```
+
+Use a named zone rather than a bare offset: `AT TIME ZONE '-05:00'` follows POSIX
+sign conventions and shifts the *opposite* way from what the string suggests,
+while `'America/New_York'` applies the real rules for that date.
+
+A `groupByRaw!` expression is embedded verbatim and cannot carry bound
+parameters, so it must be a trusted literal. When the zone itself is a runtime
+value — each user's own — bind it through `execParams` instead of building the
+SQL by concatenation:
+
+```d
+auto rows = c.execParams(`
+    SELECT date_trunc('day', created_at AT TIME ZONE $1) AS local_day,
+           count(*)                                      AS n
+      FROM visits
+     WHERE user_id = $2
+     GROUP BY 1 ORDER BY 1`, userTz, userId).as!(DayCount[]);
+```
+
+Two things `timestamp` (without a zone) is still right for: a **future local
+event** — "09:00 in Kyiv on 2027-03-15" must keep its wall clock plus a zone
+name, because the zone's rules may change before then and a precomputed instant
+would silently become the wrong local time — and values that are not instants at
+all, such as a business date, which belongs in `Date`.
 
 ## Installation
 

@@ -13,7 +13,7 @@ module peque.orm.tests.doc_examples;
 
 import std.process: environment;
 import std.typecons: Nullable, nullable;
-import std.datetime: SysTime, Clock;
+import std.datetime: SysTime, DateTime, Clock, UTC;
 
 import peque;
 import peque.orm;
@@ -328,4 +328,58 @@ unittest {
     assert(got.backoff == 880);                // (100+10)*2 = 220, then LEAST(880, 3600)
 
     c.exec(`DROP TABLE IF EXISTS doc_expr_job`);
+}
+
+
+// --- README: "Time zones" ---------------------------------------------------
+
+@model("doc_tz_visit")
+struct DocVisit {
+    @primaryKey int     id;
+    @field      int     userId;
+    @field      SysTime createdAt;
+}
+
+@autoHydrate
+struct DayCount { DateTime localDay; long n; }
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS doc_tz_visit`);
+    c.exec(modelDDL!DocVisit());
+
+    auto repo = Repository!(DocVisit, Connection)(&c);
+
+    // Two visits three hours apart around the Kyiv midnight boundary: 21:30 UTC
+    // is already the next local day at +03, so a UTC-based grouping would put
+    // both on the 26th and be wrong for this user.
+    foreach (ts; [SysTime(DateTime(2026, 8, 26, 20, 30, 0), UTC()),
+                  SysTime(DateTime(2026, 8, 26, 21, 30, 0), UTC())]) {
+        DocVisit v; v.userId = 7; v.createdAt = ts;
+        repo.insert(v);
+    }
+
+    // groupByRaw! puts the expression in both GROUP BY and the SELECT list.
+    auto rows = repo.query()
+        .where!"userId"(7)
+        .groupByRaw!("localDay",
+                     `date_trunc('day', _m.created_at AT TIME ZONE 'Europe/Kyiv')`)
+        .annotate!("n", "COUNT(*)")
+        .orderBy("local_day")
+        .select!DayCount();
+
+    assert(rows.length == 2);
+    assert(rows[0].localDay == DateTime(2026, 8, 26, 0, 0, 0) && rows[0].n == 1);
+    assert(rows[1].localDay == DateTime(2026, 8, 27, 0, 0, 0) && rows[1].n == 1);
+
+    // The same question with the zone as a runtime value: bound, not spliced.
+    auto viaParams = c.execParams(`
+        SELECT date_trunc('day', created_at AT TIME ZONE $1) AS local_day,
+               count(*)                                      AS n
+          FROM doc_tz_visit
+         WHERE user_id = $2
+         GROUP BY 1 ORDER BY 1`, "Europe/Kyiv", 7).as!(DayCount[]);
+    assert(viaParams == rows);
+
+    c.exec(`DROP TABLE IF EXISTS doc_tz_visit`);
 }
