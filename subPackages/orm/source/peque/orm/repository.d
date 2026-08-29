@@ -173,8 +173,12 @@ if (isModel!M && isQueryContext!Ctx) {
         string[] r;
         static foreach (f; Tgt._targetFields) {
             static assert(_fieldColName!(M, f)().length > 0,
-                "'" ~ f ~ "' is not a DB column field on " ~ M.stringof ~
-                ". Target.columns! takes D field names, not SQL column names.");
+                "Target.columns! on " ~ M.stringof ~ " names '" ~ f ~ "', " ~
+                "which is not a D field on it." ~
+                (_fieldForColumnName!M(f).length
+                    ? " Did you mean '" ~ _fieldForColumnName!M(f) ~ "'?" : "") ~
+                " Target.columns! takes D field names, not SQL column names." ~
+                " Fields: " ~ _modelFieldNames!M() ~ ".");
             r ~= _fieldColNameRaw!(M, f)();
         }
         return r;

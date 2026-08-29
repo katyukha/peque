@@ -21,6 +21,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   **Breaking**: `timezone` precedes `ws`, so a `WaitStrategy` passed as the sixth
   positional argument must now be named — `ws: myStrategy`.
 
+- **`select!DTO` rejects a partly-annotated DTO.** Without `@autoHydrate`, only
+  the annotated members hydrate, so the rest were SELECTed and then silently left
+  at `.init`. Now a compile error: annotate every member, or add `@autoHydrate`.
+
 - **`@pgType` may no longer contradict the D type about time zones** — a
   `static assert` on `@pgType("TIMESTAMPTZ") DateTime` and the like. peque types
   a parameter from the D value and PostgreSQL casts it to the column's real type;
@@ -173,6 +177,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   mapped to astronomical numbering (1 BC = year 0).
 
 ### Documentation
+
+- **Which name goes where** — why `@uniqueTogether!("partner_id")` and
+  `Target.columns!("partnerId")` differ in the same struct: peque *resolves* it →
+  D member name; it is *spliced into SQL* → column name. Both directions were
+  already compile errors; `Target.columns!` now suggests the D field and lists
+  the available ones, mirroring the schema UDAs' message.
+- **Fields named after D keywords** — `@field("version") int version_;`. The D
+  side keeps the underscore everywhere; only the emitted SQL drops it.
 
 - Documented **where a column default belongs**: a D field initialiser for
   compile-time constants, `applyDefaults()` for computed values, and

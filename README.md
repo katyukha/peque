@@ -390,6 +390,42 @@ Index name convention (all checked against PostgreSQL's 63-byte limit at compile
 | `@indexTogether` | `idx_` | btree |
 | `@uniqueIndexTogether` | `uniq_` | btree |
 
+### Which name goes where
+
+Two spellings appear in a model, and the rule is which side resolves the name:
+
+- **peque resolves it → D member name.** `where!"partnerId"`, `orderBy!("createdAt")`,
+  `groupBy!`, `set!`, `load!`, `prefetch!`, `F!(M, "field")`, `Target.columns!("email")`,
+  and `@one2many!(Line, "orderId")`.
+- **It is spliced into SQL verbatim → SQL column name.** `@uniqueTogether!`,
+  `@indexTogether!`, `@uniqueIndexTogether!`, and the raw fragments in
+  `@check`, `@pgDefault`, `@checkConstraint`, `@index(where:)`.
+
+Getting it the wrong way round is a compile error naming the mistake and
+suggesting the other spelling, in both directions — but the rule above is why
+`@uniqueTogether!("partner_id")` and `Target.columns!("partnerId")` differ a few
+lines apart in the same struct.
+
+### Fields named after D keywords
+
+A column may be named `version`, `default`, `module` or any other D keyword,
+which no member can be. Name the member with a trailing underscore and give
+`@field` the real column:
+
+```d
+@model("release")
+struct Release {
+    @primaryKey       int    id;
+    @field("version") int    version_;   // column "version"
+    @field("default") string default_;   // column "default"
+}
+```
+
+The D-side spelling stays `version_` everywhere — `where!"version_"(7)`,
+`orderBy!("version_")`, the struct member itself — and only the emitted SQL says
+`version`. The underscore is a D convention, not a peque one: `camelToSnake`
+keeps it, so without the explicit `@field` the column would be `version_` too.
+
 ### Identifier quoting
 
 Every identifier peque emits — table, column, junction table and its keys,

@@ -286,3 +286,62 @@ unittest {
     c.exec(`DROP TABLE IF EXISTS rw_case_t`);
     c.exec(`DROP TABLE IF EXISTS rw_case_co`);
 }
+
+
+// ---------------------------------------------------------------------------
+// D keywords: `@field("version")` on a `version_` member
+// ---------------------------------------------------------------------------
+
+// A column can be named after a D keyword, which no member can be. @field is the
+// escape hatch: the D side keeps the underscore everywhere — where!, orderBy!,
+// the member itself — and only the emitted SQL drops it. Nothing is inferred,
+// camelToSnake keeps a trailing underscore.
+struct RelDTO { @field("version") int version_; @field string plainName; }
+
+/// Mixing annotated and plain members without @autoHydrate is a compile error.
+struct PartlyAnnotatedDTO { @field("version") int version_; string plainName; }
+
+@model("kw_release")
+struct KwRelease {
+    @primaryKey        int    id;
+    @field("version")  int    version_;
+    @field("default")  string default_;
+    @field("module")   string module_;
+    @field             string plainName;
+}
+
+unittest {
+    import std.algorithm.searching: canFind;
+
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS kw_release`);
+
+    // DDL names the SQL column, not the D member.
+    enum ddl = modelDDL!KwRelease();
+    static assert(ddl.canFind(`"version" INTEGER`), ddl);
+    static assert(ddl.canFind(`"default" TEXT`), ddl);
+    static assert(ddl.canFind(`"module" TEXT`), ddl);
+    static assert(!ddl.canFind(`"version_"`), ddl);
+    c.exec(ddl);
+
+    auto repo = Repository!(KwRelease, Connection)(&c);
+    KwRelease r;
+    r.version_ = 7; r.default_ = "d"; r.module_ = "m"; r.plainName = "p";
+    auto ins = repo.insert(r);
+    assert(ins.version_ == 7 && ins.default_ == "d" && ins.module_ == "m");
+
+    // Builders take the D member name; the underscore is part of it.
+    assert(repo.query().where!"version_"(7).first().get.default_ == "d");
+    assert(repo.query().orderBy!("version_")().all().length == 1);
+    assert(repo.findById(ins.id).get.module_ == "m");
+
+    // A DTO member follows the same rule.
+    auto dto = repo.query().select!RelDTO();
+    assert(dto.length == 1 && dto[0].version_ == 7 && dto[0].plainName == "p");
+
+    // A partly-annotated DTO is refused: the unannotated members would be
+    // selected and then dropped by the strict hydration path.
+    static assert(!__traits(compiles, repo.query().select!PartlyAnnotatedDTO()));
+
+    c.exec(`DROP TABLE IF EXISTS kw_release`);
+}

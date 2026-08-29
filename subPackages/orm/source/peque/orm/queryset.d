@@ -1719,7 +1719,21 @@ if (isModel!M && isQueryContext!Ctx) {
       * ---
       **/
     DTO[] select(DTO)() {
-        import peque.hydration: _hydrateAnnotated;
+        import peque.hydration: _hydrateAnnotated, _hasAnnotatedColumn;
+
+        // Every member is projected, so hydration must read every member back.
+        // Without @autoHydrate a PARTLY annotated struct takes the strict path,
+        // which maps annotated members only. Catchable here because both halves
+        // are visible: this decides what is emitted, hydration what is read.
+        static if (!hasUDA!(DTO, autoHydrate) && _hasAnnotatedColumn!DTO)
+            static foreach (m; FieldNameTuple!DTO)
+                static assert(hasUDA!(__traits(getMember, DTO, m), field) ||
+                              hasUDA!(__traits(getMember, DTO, m), primaryKey),
+                    "select!" ~ DTO.stringof ~ ": member '" ~ m ~ "' carries no " ~
+                    "@field while other members do, so it would be SELECTed and " ~
+                    "then dropped by hydration, staying at its .init value. " ~
+                    "Annotate every member, or put @autoHydrate on the struct to " ~
+                    "map them all by convention.");
 
         // Resolve path predicates, collect filter joins
         _FilterJoin[] fjoins;

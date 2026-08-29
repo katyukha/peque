@@ -447,6 +447,21 @@ string _fieldColNameRaw(M, string fieldName)() {
     return result;
 }
 
+/** Comma-separated D field names of M that map to columns — for diagnostics.
+  * Public for the same reason as _fieldColNameRaw above.
+  **/
+string _modelFieldNames(M)() {
+    string r;
+    foreach (ci; _colInfos!M) { if (r.length) r ~= ", "; r ~= ci.member; }
+    return r;
+}
+
+/// The D field of M whose column is `col`, or "" — the inverse of _colName.
+string _fieldForColumnName(M)(in string col) {
+    foreach (ci; _colInfos!M) if (ci.col == col) return ci.member;
+    return "";
+}
+
 /** Build "prefix.col1, prefix.col2, ..." for all DB column fields of M. **/
 package(peque.orm) string _prefixedSelectList(M, string prefix)() {
     string result;
