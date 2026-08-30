@@ -222,6 +222,28 @@ package(peque.orm) template _pkInfo(M) {
 // SQL fragment builders
 // ---------------------------------------------------------------------------
 
+/** SQL column name for a model field — the supported field → column resolver.
+  *
+  * Applies the same rule as everything else peque emits: `@field("col")` if
+  * present, otherwise `camelToSnake` of the member name. Public because code
+  * outside peque legitimately needs it — a caller that reads
+  * `@uniqueTogether!(...)` off a model and derives something from it (the
+  * constraint name PostgreSQL will generate, for instance) must resolve the
+  * field names first, and reimplementing the rule is how the two drift apart.
+  *
+  * Unquoted, for folding into derived identifiers; use ormTableName-style
+  * quoting when embedding in SQL.
+  **/
+template ormColumnName(M, string fieldName) {
+    enum string ormColumnName = () {
+        foreach (ci; _colInfos!M) if (ci.member == fieldName) return ci.col;
+        return "";
+    }();
+    static assert(ormColumnName.length > 0,
+        "ormColumnName!(" ~ M.stringof ~ ", \"" ~ fieldName ~ "\"): not a " ~
+        "column field on " ~ M.stringof ~ ". Fields: " ~ _modelFieldNames!M() ~ ".");
+}
+
 /// Raw primary-key column name for model M (no quoting) — for building derived
 /// identifiers such as joined-column aliases.
 /// Honors a `@field("col")` override on the primary-key member.

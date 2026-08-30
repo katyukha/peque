@@ -81,7 +81,7 @@ public import peque.orm.conflict: OnConflict, Target,
 public import peque.orm.sql:
     buildSelectList, buildInsertColList, buildInsertPlaceholders,
     buildUpdateSetClause, buildInsertValueExpr, buildUpdateValueExpr,
-    ormTableName, ormPkColName, ormPkFieldName, countNonPkFields;
+    ormTableName, ormColumnName, ormPkColName, ormPkFieldName, countNonPkFields;
 public import peque.orm.registry:
     ModelRepo, Bind, Registry, RegistryRepoFor, MergeRegistries;
 public import peque.orm.schema: modelDDL, schemaSQL;

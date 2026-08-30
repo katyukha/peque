@@ -372,7 +372,7 @@ template _partialUniqueIndexPred(M, string[] cols) {
                 // before the sets can be compared.
                 if (uda.where.length &&
                     _sameSet(cols, _resolveUdaCols!(M, "@uniqueIndexTogether",
-                                                    uda.columns)))
+                                                    uda.fields)))
                     return uda.where;
             }
         }}
@@ -446,7 +446,7 @@ private string _buildTableConstraints(M)() {
     static foreach (uda; __traits(getAttributes, M)) {{
         // @uniqueTogether!("col1", "col2", ...)
         static if (is(uda) && __traits(isSame, TemplateOf!uda, uniqueTogether)) {
-            enum _utCols = _resolveUdaCols!(M, "@uniqueTogether", uda.columns);
+            enum _utCols = _resolveUdaCols!(M, "@uniqueTogether", uda.fields);
             string cols;
             static foreach (col; _utCols) {
                 if (cols.length) cols ~= ", ";
@@ -535,14 +535,14 @@ private string _tryBuildTogetherIndex(M, alias uda, alias UDATemplate,
                                       out string idxName) {
     static if (is(uda) && __traits(isSame, TemplateOf!uda, UDATemplate)) {
         enum _cols = _resolveUdaCols!(M, "@" ~ __traits(identifier, UDATemplate),
-                                      uda.columns);
+                                      uda.fields);
         idxName = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(_cols);
         return _buildOneIndex(isUnique, "btree", _sqlIdent(table),
                               _joinQuoted(_cols), "", idxName);
     } else static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
                       __traits(isSame, TemplateOf!(typeof(uda)), UDATemplate)) {
         enum _cols = _resolveUdaCols!(M, "@" ~ __traits(identifier, UDATemplate),
-                                      uda.columns);
+                                      uda.fields);
         enum derived = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(_cols);
         idxName = uda.name.length ? uda.name : derived;
         return _buildOneIndex(isUnique, "btree", _sqlIdent(table),

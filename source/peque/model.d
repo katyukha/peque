@@ -405,8 +405,8 @@ struct pgNotNull {}
   * struct Partner { ... }
   * ---
   **/
-struct uniqueTogether(cols...) if (cols.length >= 2) {
-    enum string[] columns = [cols];
+struct uniqueTogether(fieldNames...) if (fieldNames.length >= 2) {
+    enum string[] fields = [fieldNames];
 }
 
 /** Named table-level CHECK constraint. Applied on the model struct.
@@ -501,8 +501,8 @@ struct hashIndex { string where = ""; string name = ""; }
   * struct Order { ... }
   * ---
   **/
-struct indexTogether(cols...) if (cols.length >= 2) {
-    enum string[] columns = [cols];
+struct indexTogether(fieldNames...) if (fieldNames.length >= 2) {
+    enum string[] fields = [fieldNames];
     string where = "";
     string name  = "";
 }
@@ -527,8 +527,8 @@ struct indexTogether(cols...) if (cols.length >= 2) {
   * struct User { ... }
   * ---
   **/
-struct uniqueIndexTogether(cols...) if (cols.length >= 2) {
-    enum string[] columns = [cols];
+struct uniqueIndexTogether(fieldNames...) if (fieldNames.length >= 2) {
+    enum string[] fields = [fieldNames];
     string where = "";
     string name  = "";
 }

@@ -137,3 +137,50 @@ unittest {
     c.exec(`DROP TABLE IF EXISTS ext_session`);
     c.exec(`DROP TABLE IF EXISTS ext_tag`);
 }
+
+
+// ---------------------------------------------------------------------------
+// ormColumnName — the supported field -> column resolver
+// ---------------------------------------------------------------------------
+
+// Code outside peque that reads a model's UDAs has to resolve field names to
+// columns before deriving anything from them. Reimplementing the rule is how a
+// consumer silently drifts: one downstream caller composed PostgreSQL's
+// generated constraint name straight from @uniqueTogether's list and, once that
+// list held D field names, predicted <table>_projectId_userId_key for a
+// constraint the server calls <table>_project_id_user_id_key. It compiled
+// clean. This is the resolver that makes that unnecessary, and it lives here —
+// outside peque.orm — because that is the only place its visibility is real.
+@model("ec_col_name")
+@uniqueTogether!("projectId", "userId")
+struct EcColName {
+    @primaryKey            int    id;
+    @field                 int    projectId;
+    @field("legacy_UserId") int   userId;
+    @field                 string name;
+}
+
+unittest {
+    static assert(ormColumnName!(EcColName, "projectId") == "project_id");
+    static assert(ormColumnName!(EcColName, "name")      == "name");
+    // An explicit @field wins, case and all.
+    static assert(ormColumnName!(EcColName, "userId")    == "legacy_UserId");
+    // The primary key resolves like any other field.
+    static assert(ormColumnName!(EcColName, "id")        == "id");
+    // An unknown field is a compile error naming the alternatives.
+    static assert(!__traits(compiles, ormColumnName!(EcColName, "project_id")));
+    static assert(!__traits(compiles, ormColumnName!(EcColName, "nope")));
+
+    // What the downstream caller actually needed: compose a derived identifier
+    // from the same list the UDA carries, resolved rather than concatenated raw.
+    static foreach (uda; __traits(getAttributes, EcColName)) {
+        static if (__traits(compiles, uda.fields)) {
+            enum joined = () {
+                string r;
+                static foreach (f; uda.fields) r ~= "_" ~ ormColumnName!(EcColName, f);
+                return r;
+            }();
+            static assert(joined == "_project_id_legacy_UserId", joined);
+        }
+    }
+}
