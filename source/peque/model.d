@@ -396,11 +396,11 @@ struct pgNotNull {}
 
 /** Table-level UNIQUE (col1, col2, ...) constraint. Applied on the model struct.
   *
-  * cols are SQL column names.
+  * cols are D field names, resolved to their columns.
   *
   * Example:
   * ---
-  * @uniqueTogether!("name", "tenant_id")
+  * @uniqueTogether!("name", "tenantId")
   * @model("res_partner")
   * struct Partner { ... }
   * ---
@@ -486,12 +486,12 @@ struct hashIndex { string where = ""; string name = ""; }
 
 /** Create a multi-column btree index. Applied on the model struct.
   *
-  * cols are SQL column names.
+  * cols are D field names, resolved to their columns.
   * An optional WHERE clause turns it into a partial index.
   *
   * Examples:
   * ---
-  * @indexTogether!("partner_id", "status")
+  * @indexTogether!("partnerId", "status")
   * @model("sale_order")
   * struct Order { ... }
   *
@@ -513,11 +513,11 @@ struct indexTogether(cols...) if (cols.length >= 2) {
   * CREATE TABLE), this emits a standalone CREATE UNIQUE INDEX statement,
   * allowing an optional WHERE partial-index clause.
   *
-  * cols are SQL column names.
+  * cols are D field names, resolved to their columns.
   *
   * Examples:
   * ---
-  * @uniqueIndexTogether!("tenant_id", "email")
+  * @uniqueIndexTogether!("tenantId", "email")
   * @model("users")
   * struct User { ... }
   *

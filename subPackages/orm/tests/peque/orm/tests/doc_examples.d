@@ -33,10 +33,10 @@ struct Partner {
 // --- README: "Column constraints and indexes" -------------------------------
 
 @model("products")
-@uniqueTogether!("name", "tenant_id")
+@uniqueTogether!("name", "tenantId")
 @checkConstraint("chk_price", "price > 0")
-@indexTogether!("category_id", "active")
-@uniqueIndexTogether!("tenant_id", "slug")
+@indexTogether!("categoryId", "active")
+@uniqueIndexTogether!("tenantId", "slug")
 struct Product {
     @primaryKey                                int    id;
     @field @unique @index                      string sku;

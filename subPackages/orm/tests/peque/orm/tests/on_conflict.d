@@ -45,7 +45,7 @@ private struct OcDoc {
 
 // Multi-column partial unique index, declared at model level.
 @model("oc_multi")
-@(uniqueIndexTogether!("tenant_id", "code")(where: "active"))
+@(uniqueIndexTogether!("tenantId", "code")(where: "active"))
 private struct OcMulti {
     @primaryKey int    id;
     @field      int    tenantId;
@@ -229,7 +229,7 @@ unittest {
 // ---------------------------------------------------------------------------
 
 @model("oc_named")
-@uniqueTogether!("tenant_id", "code")
+@uniqueTogether!("tenantId", "code")
 private struct OcNamed {
     @primaryKey int    id;
     @field      int    tenantId;

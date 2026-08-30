@@ -178,11 +178,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Documentation
 
-- **Which name goes where** — why `@uniqueTogether!("partner_id")` and
-  `Target.columns!("partnerId")` differ in the same struct: peque *resolves* it →
-  D member name; it is *spliced into SQL* → column name. Both directions were
-  already compile errors; `Target.columns!` now suggests the D field and lists
-  the available ones, mirroring the schema UDAs' message.
+- **Which name goes where** — one rule, now that the schema UDAs have moved:
+  peque takes the D field name wherever it names a model member, and a SQL name
+  only where no D name exists. `Target.columns!`'s error also suggests the D
+  field and lists the available ones, mirroring the schema UDAs' message.
 - **Fields named after D keywords** — `@field("version") int version_;`. The D
   side keeps the underscore everywhere; only the emitted SQL drops it.
 

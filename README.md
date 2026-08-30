@@ -359,10 +359,10 @@ struct cannot silently rename a table.
 
 ```d
 @model("products")
-@uniqueTogether!("name", "tenant_id")
+@uniqueTogether!("name", "tenantId")
 @checkConstraint("chk_price", "price > 0")
-@indexTogether!("category_id", "active")
-@uniqueIndexTogether!("tenant_id", "slug")
+@indexTogether!("categoryId", "active")
+@uniqueIndexTogether!("tenantId", "slug")
 struct Product {
     @primaryKey                                int    id;
     @field @unique @index                      string sku;
@@ -392,19 +392,37 @@ Index name convention (all checked against PostgreSQL's 63-byte limit at compile
 
 ### Which name goes where
 
-Two spellings appear in a model, and the rule is which side resolves the name:
+**Anywhere peque names a model member, it takes the D field name** — `where!`,
+`orderBy!`, `groupBy!`, `set!`, `load!`, `prefetch!`, `F!(M, "field")`,
+`upsert!`, `Target.columns!`, `@one2many!(Line, "orderId")`, `@defaultOrder`, and
+the column lists of `@uniqueTogether!` / `@indexTogether!` /
+`@uniqueIndexTogether!`. Those are resolved to columns, so the emitted SQL and
+the generated index names are unaffected by the spelling.
 
-- **peque resolves it → D member name.** `where!"partnerId"`, `orderBy!("createdAt")`,
-  `groupBy!`, `set!`, `load!`, `prefetch!`, `F!(M, "field")`, `Target.columns!("email")`,
-  and `@one2many!(Line, "orderId")`.
-- **It is spliced into SQL verbatim → SQL column name.** `@uniqueTogether!`,
-  `@indexTogether!`, `@uniqueIndexTogether!`, and the raw fragments in
-  `@check`, `@pgDefault`, `@checkConstraint`, `@index(where:)`.
+SQL names appear only where **no D name exists**:
 
-Getting it the wrong way round is a compile error naming the mistake and
-suggesting the other spelling, in both directions — but the rule above is why
-`@uniqueTogether!("partner_id")` and `Target.columns!("partnerId")` differ a few
-lines apart in the same struct.
+- raw SQL expressions — `@check`, `@pgDefault`, `@checkConstraint`, and the
+  `where:` predicate on the index UDAs;
+- names of database objects — `@model("table")`, `@field("col")`,
+  `@pgType("…")`, an index's `name:`;
+- the junction table and its key columns in `@many2many`, which belong to a
+  table that is not a model.
+
+Reaching for the wrong spelling is a compile error that names the mistake and
+suggests the other one.
+
+The boundary is sharp, and a single declaration can sit on both sides of it —
+**the column list is D, the predicate is SQL**:
+
+```d
+@(indexTogether!("queue", "runAt")(where: "state = 'pending'"))
+//                        ^^^^^ D field          ^^^^^ SQL column
+```
+
+`runAt` is a member peque resolves to `run_at`; `state` is inside an expression
+peque passes to PostgreSQL untouched, so it has to be the column. The rule
+answers it every time: peque resolves names *of your model*, and only what has
+no D name stays SQL.
 
 ### Fields named after D keywords
 

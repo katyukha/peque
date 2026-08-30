@@ -45,7 +45,7 @@
   *
   * Table constraints (applied on the model struct):
   * ---
-  * @uniqueTogether!("name", "tenant_id")
+  * @uniqueTogether!("name", "tenantId")
   * @checkConstraint("chk_price", "price > 0")
   * @model("res_partner")
   * struct Partner { ... }
@@ -62,11 +62,11 @@
   * @field @gistIndex                     string loc;    // … USING gist (loc)
   * @field @hashIndex                     string code;   // … USING hash (code)
   *
-  * @indexTogether!("partner_id", "status")
+  * @indexTogether!("partnerId", "status")
   * @model("sale_order")
   * struct Order { ... }         // CREATE INDEX ON sale_order (partner_id, status)
   *
-  * @uniqueIndexTogether!("tenant_id", "email")
+  * @uniqueIndexTogether!("tenantId", "email")
   * @model("users")
   * struct User { ... }          // CREATE UNIQUE INDEX ON users (tenant_id, email)
   * ---
@@ -367,7 +367,12 @@ template _partialUniqueIndexPred(M, string[] cols) {
         static foreach (uda; __traits(getAttributes, M)) {{
             static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
                        __traits(isSame, TemplateOf!(typeof(uda)), uniqueIndexTogether)) {
-                if (uda.where.length && _sameSet(cols, uda.columns))
+                // `cols` are already resolved column names (Target.columns!
+                // resolves too), so the UDA's field list has to be resolved
+                // before the sets can be compared.
+                if (uda.where.length &&
+                    _sameSet(cols, _resolveUdaCols!(M, "@uniqueIndexTogether",
+                                                    uda.columns)))
                     return uda.where;
             }
         }}
@@ -384,25 +389,55 @@ template _partialUniqueIndexPred(M, string[] cols) {
 // name the natural slip now that the two differ, and the emitted DDL is
 // perfectly well-formed either way, so nothing complains until PostgreSQL runs
 // it. Suggest the converted name when that is what happened.
-private template _validateColList(M, string udaName, string[] cols) {
-    private static string _knownCols() {
+/** Resolve a model-level UDA's field list to SQL column names.
+  *
+  * The UDAs take D field names, like every other place the ORM names a model
+  * member. The emitted SQL, and the derived index name, are built from the
+  * RESOLVED columns — so `@uniqueIndexTogether!("partnerId", "name")` still
+  * produces `uidx_t_partner_id_name`, and a model that switches spelling keeps
+  * its index names byte-identical.
+  **/
+private template _resolveUdaCols(M, string udaName, string[] fields) {
+    private static string _knownFields() {
         string r;
-        foreach (ci; _colInfos!M) { if (r.length) r ~= ", "; r ~= ci.col; }
+        foreach (ci; _colInfos!M) { if (r.length) r ~= ", "; r ~= ci.member; }
         return r;
     }
-    private static bool _isCol(string name) {
-        foreach (ci; _colInfos!M) if (ci.col == name) return true;
-        return false;
+    private static string _colOf(string name) {
+        foreach (ci; _colInfos!M) if (ci.member == name) return ci.col;
+        return "";
     }
-    static foreach (col; cols) {
-        static assert(_isCol(col),
-            udaName ~ " on " ~ M.stringof ~ " names '" ~ col ~ "', which is not " ~
-            "a column on it." ~
-            (_isCol(camelToSnake(col)) ? " Did you mean '" ~ camelToSnake(col) ~
-             "'? These UDAs take SQL column names, not D member names." : "") ~
-            " Columns: " ~ _knownCols() ~ ".");
+    private static string _memberWithCol(string col) {
+        foreach (ci; _colInfos!M) if (ci.col == col) return ci.member;
+        return "";
     }
-    enum _validateColList = true;
+
+    static foreach (f; fields) {
+        static assert(_colOf(f).length > 0,
+            udaName ~ " on " ~ M.stringof ~ " names '" ~ f ~ "', which is not a " ~
+            "field on it." ~
+            (_memberWithCol(f).length
+                ? " Did you mean '" ~ _memberWithCol(f) ~ "'? These UDAs take D " ~
+                  "field names, not SQL column names."
+                : "") ~
+            " Fields: " ~ _knownFields() ~ ".");
+
+        // A name that is one member's D name AND another member's column name
+        // would resolve two ways. Not a contrived case: @field("…") exists so a
+        // column can diverge from its member, and renaming a column while
+        // keeping the D member is ordinary maintenance.
+        static assert(_memberWithCol(f).length == 0 || _memberWithCol(f) == f,
+            udaName ~ " on " ~ M.stringof ~ ": '" ~ f ~ "' is both the D field " ~
+            "'" ~ f ~ "' and the column of field '" ~ _memberWithCol(f) ~ "'. " ~
+            "Rename one of them — peque will not guess which you meant.");
+    }
+
+    private static string[] _resolve() {
+        string[] r;
+        static foreach (f; fields) r ~= _colOf(f);
+        return r;
+    }
+    enum string[] _resolveUdaCols = _resolve();
 }
 
 private string _buildTableConstraints(M)() {
@@ -411,9 +446,9 @@ private string _buildTableConstraints(M)() {
     static foreach (uda; __traits(getAttributes, M)) {{
         // @uniqueTogether!("col1", "col2", ...)
         static if (is(uda) && __traits(isSame, TemplateOf!uda, uniqueTogether)) {
-            static assert(_validateColList!(M, "@uniqueTogether", uda.columns));
+            enum _utCols = _resolveUdaCols!(M, "@uniqueTogether", uda.columns);
             string cols;
-            static foreach (col; uda.columns) {
+            static foreach (col; _utCols) {
                 if (cols.length) cols ~= ", ";
                 cols ~= _sqlIdent(col);
             }
@@ -499,19 +534,19 @@ private string _tryBuildTogetherIndex(M, alias uda, alias UDATemplate,
                                       bool isUnique, string prefix, string table)(
                                       out string idxName) {
     static if (is(uda) && __traits(isSame, TemplateOf!uda, UDATemplate)) {
-        static assert(_validateColList!(M, "@" ~ __traits(identifier, UDATemplate),
-                                        uda.columns));
-        idxName = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
+        enum _cols = _resolveUdaCols!(M, "@" ~ __traits(identifier, UDATemplate),
+                                      uda.columns);
+        idxName = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(_cols);
         return _buildOneIndex(isUnique, "btree", _sqlIdent(table),
-                              _joinQuoted(uda.columns), "", idxName);
+                              _joinQuoted(_cols), "", idxName);
     } else static if (!is(uda) && __traits(compiles, TemplateOf!(typeof(uda))) &&
                       __traits(isSame, TemplateOf!(typeof(uda)), UDATemplate)) {
-        static assert(_validateColList!(M, "@" ~ __traits(identifier, UDATemplate),
-                                        uda.columns));
-        enum derived = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(uda.columns);
+        enum _cols = _resolveUdaCols!(M, "@" ~ __traits(identifier, UDATemplate),
+                                      uda.columns);
+        enum derived = prefix ~ _identSlug(table) ~ "_" ~ _joinUnderscore(_cols);
         idxName = uda.name.length ? uda.name : derived;
         return _buildOneIndex(isUnique, "btree", _sqlIdent(table),
-                              _joinQuoted(uda.columns), uda.where, idxName);
+                              _joinQuoted(_cols), uda.where, idxName);
     } else {
         idxName = "";
         return "";

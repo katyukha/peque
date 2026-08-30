@@ -84,7 +84,7 @@ struct Category {
 @model("schema_products")
 @uniqueTogether!("name", "sku")
 @checkConstraint("chk_price_positive", "price > 0")
-@indexTogether!("category_id", "active")
+@indexTogether!("categoryId", "active")
 struct Product {
     @primaryKey                                                 int          id;
     @field @unique @index                                       string       sku;
@@ -250,7 +250,7 @@ unittest {
     // @uniqueIndex on slug
     assert(ddl.contains("CREATE UNIQUE INDEX IF NOT EXISTS uniq_schema_products_slug ON schema_products (slug);"));
 
-    // @indexTogether!("category_id", "active") on model
+    // @indexTogether!("categoryId", "active") on model
     assert(ddl.contains("CREATE INDEX IF NOT EXISTS idx_schema_products_category_id_active ON schema_products (category_id, active);"));
 }
 
@@ -260,8 +260,8 @@ unittest {
 // ---------------------------------------------------------------------------
 
 @model("schema_posts")
-@uniqueIndexTogether!("author_id", "slug")
-@(indexTogether!("author_id", "published_at")(where: "published = true"))
+@uniqueIndexTogether!("authorId", "slug")
+@(indexTogether!("authorId", "publishedAt")(where: "published = true"))
 struct Post {
     @primaryKey                                      int             id;
     @field @index                                    int             authorId;
@@ -498,9 +498,11 @@ struct IxcTogether {
     @field      string aB;
     @field      string c;
 }
-// "a" + "b_c" and "a_b" + "c" both join to idx_ixc_together_a_b_c.
-@indexTogether!("a", "b_c")
-@indexTogether!("a_b", "c")
+// Fields ("a", "bC") and ("aB", "c") resolve to columns a+b_c and a_b+c, which
+// both join to idx_ixc_together2_a_b_c — the name is derived from the RESOLVED
+// columns, so the collision is unchanged by the D-name spelling.
+@indexTogether!("a", "bC")
+@indexTogether!("aB", "c")
 @model("ixc_together2")
 struct IxcTogether2 {
     @primaryKey int    id;

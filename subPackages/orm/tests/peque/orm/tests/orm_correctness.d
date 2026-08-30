@@ -1212,18 +1212,17 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// #16 — @uniqueTogether / @indexTogether column names are checked at compile time
+// #16 — @uniqueTogether / @indexTogether field names are checked at compile time
 //
-// They take SQL column names, not D member names — they sit beside raw `where:`
-// clauses that must also be columns. Now that the two spellings differ for
-// every camelCase member, writing the member name is the natural slip, and the
-// emitted DDL is well-formed either way, so nothing complains until PostgreSQL
-// runs it.
+// They take D field names, like every other place the ORM names a model member,
+// and resolve them to columns. Reaching for the SQL spelling is the natural
+// slip; the emitted DDL would be well-formed either way, so without this check
+// nothing complains until PostgreSQL runs it.
 // ---------------------------------------------------------------------------
 
 @model("ct_ok")
-@uniqueTogether!("name", "tenant_id")
-@indexTogether!("tenant_id", "name")
+@uniqueTogether!("name", "tenantId")
+@indexTogether!("tenantId", "name")
 private struct CtOk {
     @primaryKey int    id;
     @field      string name;
@@ -1231,15 +1230,27 @@ private struct CtOk {
 }
 
 @model("ct_bad_unique")
-@uniqueTogether!("name", "tenantId")        // member name, not column
+@uniqueTogether!("name", "tenant_id")       // column name, not D field
 private struct CtBadUnique {
     @primaryKey int    id;
     @field      string name;
     @field      int    tenantId;
 }
 
+// A name that is one member's D field AND another member's column: @field("…")
+// exists precisely so a column can diverge from its member, so this arises from
+// ordinary maintenance (renaming a column, keeping the member). Resolving it
+// either way would be silent, so it is rejected.
+@model("ct_ambiguous")
+@uniqueTogether!("fooBar", "id")
+private struct CtAmbiguous {
+    @primaryKey       int    id;
+    @field            string fooBar;    // column foo_bar
+    @field("fooBar")  string other;     // column fooBar — collides with the member above
+}
+
 @model("ct_bad_index")
-@indexTogether!("tenantId", "name")         // member name, not column
+@indexTogether!("tenant_id", "name")        // column name, not D field
 private struct CtBadIndex {
     @primaryKey int    id;
     @field      string name;
@@ -1249,7 +1260,21 @@ private struct CtBadIndex {
 unittest {
     static assert( __traits(compiles, modelDDL!CtOk()));
     static assert(!__traits(compiles, modelDDL!CtBadUnique()),
-        "@uniqueTogether naming a non-column must fail to compile");
+        "@uniqueTogether naming a column instead of a field must fail to compile");
     static assert(!__traits(compiles, modelDDL!CtBadIndex()),
-        "@indexTogether naming a non-column must fail to compile");
+        "@indexTogether naming a column instead of a field must fail to compile");
+
+    // The one case that could resolve two ways is refused rather than guessed.
+    // This is the guard that makes the D-field spelling safe rather than merely
+    // convenient, so it gets its own case.
+    static assert(!__traits(compiles, modelDDL!CtAmbiguous()),
+        "a name that is both a D field and another field's column must be refused");
+
+    // The RESOLVED columns are what reach the SQL, so the emitted DDL is
+    // unchanged by the spelling: field `tenantId` still names column tenant_id.
+    import std.algorithm.searching: canFind;
+    static assert(modelDDL!CtOk().canFind(`UNIQUE ("name", "tenant_id")`),
+                  modelDDL!CtOk());
+    static assert(modelDDL!CtOk().canFind(`("tenant_id", "name")`),
+                  modelDDL!CtOk());
 }
