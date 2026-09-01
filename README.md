@@ -1270,6 +1270,7 @@ non-superuser cannot override, so text matching is unsound in principle.
 
 ```
 PequeException                  root — never thrown directly
+├── LibpqLoadError              libpq itself could not be loaded (dynamic builds)
 ├── ConnectionError             the link is unusable
 ├── NotSupportedError           peque will not do this, in any context
 ├── ConversionError             a value could not be converted, either direction
@@ -1372,7 +1373,12 @@ Sub-package tests:
 ```sh
 dub test :orm     --config=unittestStatic
 dub test :migrate --config=unittestStatic
+dub test :vibe    --config=unittestStatic
 ```
+
+Substitute `unittestDynamic` to exercise the runtime-loaded `libpq` path. CI
+runs all four suites on every push, across dmd and ldc, both linking modes, and
+PostgreSQL 15–18.
 
 ## License
 

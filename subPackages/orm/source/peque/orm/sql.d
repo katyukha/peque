@@ -168,10 +168,10 @@ package(peque.orm) struct _ColInfo {
 
 /** Every column field of M, in declaration order.
   *
-  * The eight SQL builders below used to repeat the same
-  * `static foreach` + `!hasUDA!(F, primaryKey) && _isColField!F` test, which
-  * meant eight places to keep in step. They are now folds over this one list,
-  * so column selection lives in exactly one spot.
+  * The SQL builders below are folds over this one list rather than each
+  * repeating the `static foreach` + `!hasUDA!(F, primaryKey) && _isColField!F`
+  * test, so column selection lives in exactly one spot instead of eight that
+  * have to be kept in step.
   **/
 package(peque.orm) template _colInfos(M) {
     private static _ColInfo[] _collect() {
@@ -551,8 +551,8 @@ private string _joinMemberNames(_ColInfo[] cols) pure {
 package(peque.orm) string _findM2OFKColFor(M, RelType)() {
     enum fks = _m2oFksFor!(M, RelType);
     // Reached only when a @related field gave no explicit fkField, so more than
-    // one candidate cannot be resolved. Previously the LAST match silently won
-    // (while the caller's doc promised the first).
+    // one candidate cannot be resolved. Picking one silently would contradict
+    // the caller's documented "the single FK" promise.
     static assert(fks.length <= 1,
         M.stringof ~ " has " ~ fks.length.to!string ~ " @many2one fields " ~
         "targeting " ~ RelType.stringof ~ " (" ~ _joinMemberNames(fks) ~ "), so " ~

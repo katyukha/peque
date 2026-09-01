@@ -510,8 +510,8 @@ unittest {
     assert(parseExactFloat!double("9007199254740995") == 9007199254740996.0);
 
     // more significant digits than the guess mantissa (19) holds — the
-    // extended 38-digit seed must kick in (regression: binary128's 36-digit
-    // spelling of 2/3 overran the verification walk)
+    // extended 38-digit seed must kick in, or binary128's 36-digit spelling
+    // of 2/3 overruns the verification walk
     assert(parseExactFloat!double("0.666666666666666666666666666666666635")
         == 2.0 / 3.0);
     assert(parseExactFloat!double(

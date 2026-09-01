@@ -476,7 +476,7 @@ unittest {
 
 
 // ===========================================================================
-// Index-name collisions and misplaced index UDAs (ORM-9)
+// Index-name collisions and misplaced index UDAs
 // ===========================================================================
 //
 // Every CREATE INDEX carries IF NOT EXISTS, so two indexes deriving the same
@@ -542,7 +542,7 @@ unittest {
     static assert(namedDDL.canFind("idx_ixc_named_code "),  namedDDL);
     static assert(namedDDL.canFind("idx_ixc_named_code_b"), namedDDL);
 
-    // An index UDA on a non-column field is no longer silently dropped.
+    // An index UDA on a non-column field is rejected, not silently dropped.
     static assert(!__traits(compiles, modelDDL!IxcNonCol()),
         "@index on a field without @field must be rejected, not ignored");
 }
@@ -552,10 +552,10 @@ unittest {
 // The documented array + GIN form must actually compile
 // ===========================================================================
 //
-// model.d and this module's header previously showed `@ginIndex string[] tags;`
-// with no @field, which the "index UDA needs a column" assert now rejects — and
-// which never had a PostgreSQL type mapping either. This pins the corrected
-// form so the examples and the code cannot drift apart again.
+// `@ginIndex string[] tags;` without `@field` is not the documented form: the
+// "index UDA needs a column" assert rejects it, and it has no PostgreSQL type
+// mapping either. This pins the form the docs show, so examples and code
+// cannot drift apart.
 
 @model("ixdoc_tagged")
 struct IxDocTagged {

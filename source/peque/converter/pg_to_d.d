@@ -603,8 +603,8 @@ unittest {
 
 // timestamptz with a seconds-bearing UTC offset. PostgreSQL renders timestamps
 // predating the zone's switch to standard time in local mean time, whose offset
-// is not a whole number of minutes; std.datetime's parser rejects it outright,
-// so such rows used to be unreadable.
+// is not a whole number of minutes — a form std.datetime's parser rejects
+// outright, so peque parses it itself.
 unittest {
     import std.datetime.timezone: UTC;
 

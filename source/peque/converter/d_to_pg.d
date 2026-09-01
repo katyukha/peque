@@ -377,8 +377,9 @@ unittest {
     assert(convertToPG([1.0, 2.0]).type == PGType._FLOAT8);
 }
 
-// Test that float serialization is round-trip exact for tiny and precise
-// magnitudes (fixed-point "%.20f" used to zero anything below ~5e-21).
+// Float serialization must be round-trip exact for tiny and precise
+// magnitudes. Fixed-point formatting cannot do this: "%.20f" zeroes anything
+// below ~5e-21.
 unittest {
     import std.math: nextUp;
 
@@ -390,8 +391,8 @@ unittest {
     // lexer rejects the 4.9e-324 literal as "not representable"
     immutable minSub = nextUp(0.0);
 
-    // The %.20f regression: tiny magnitudes must switch to scientific
-    // notation instead of flushing to zeros.
+    // Tiny magnitudes must switch to scientific notation rather than flush
+    // to a row of zeros.
     assert(pgText(1.5e-25).canFind('e'));
     assert(pgText(-minSub).canFind('e'));
 

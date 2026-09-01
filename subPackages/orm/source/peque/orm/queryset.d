@@ -457,9 +457,9 @@ private string _resolvePathToCol(M, JoinFields...)(
     }
     string rel2 = rest[0 .. d2];
     string leaf = rest[d2 + 1 .. $];
-    // The resolver handles at most two relation segments. A deeper path used to
-    // fall through with the remainder as the "leaf", so "a.b.c.d" emitted
-    // `fj1.c.d` — which PostgreSQL reads as schema fj1, table c, column d.
+    // The resolver handles at most two relation segments. Letting a deeper path
+    // fall through with the remainder as the "leaf" would emit `fj1.c.d` for
+    // "a.b.c.d" — which PostgreSQL reads as schema fj1, table c, column d.
     enforce!QueryClientError(indexOf(leaf, '.') < 0,
         "Relation path '" ~ path ~ "' on " ~ M.stringof ~ " is deeper than the two " ~
         "relation segments supported (rel.field or rel1.rel2.field). Query from " ~
@@ -1252,10 +1252,6 @@ if (isModel!M && isQueryContext!Ctx) {
         }
     }
 
-    private void _buildWhere(out string whereSQL, out PGValue[] params, int startOffset = 0) {
-        _buildWhereFromArray(_wheres, whereSQL, params, startOffset);
-    }
-
     // Resolve the effective ORDER BY body — explicit terms if set, otherwise the
     // model's @defaultOrder — registering any LEFT JOIN a join-path term needs
     // into fjoins/idx. Returns "" when there is nothing to order by. Shared by
@@ -1701,20 +1697,24 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** Project matching rows into DTO[].
       *
-      * DTO fields are matched against:
-      *  1. Main-table columns (_m.col)
-      *  2. Explicit JoinFields (j0.col AS prefix_col)
-      *  3. Implicit @related joins inferred from DTO field names
-      *     (partnerName → "partner_" prefix → LEFT JOIN cq_partners dj0)
-      *  4. Runtime filter joins from WHERE path predicates (fj0, fj1, …)
+      * Nothing is inferred from a member name: a DTO member is a column on the
+      * queried table unless it declares `@field(related: "rel.field")`, which
+      * projects through up to two relations. Those paths go through the same
+      * resolver `where` and `orderBy` use, so their LEFT JOINs are shared with
+      * each other and with `load!` and created at most once.
+      *
+      * Since the joins are LEFT, a member reached through a nullable foreign
+      * key should be `Nullable!T` — a NULL arriving in a plain `string` is a
+      * ConversionError.
       *
       * Example:
       * ---
       * @autoHydrate
-      * struct PartnerDTO { int id; string name; string companyName; }
-      * // Explicit join:
-      * auto dtos = repo.query().load!("company").select!PartnerDTO();
-      * // Fully implicit (companyName → company_ prefix):
+      * struct PartnerDTO {
+      *     int    id;
+      *     string name;
+      *     @field(related: "company.name") Nullable!string companyName;
+      * }
       * auto dtos = repo.query().select!PartnerDTO();
       * ---
       **/

@@ -162,10 +162,10 @@ unittest {
     auto repo = Repository!(PrOrder, Connection)(&c);
 
     // PathBuilder can be instantiated directly, bypassing F!'s static assert —
-    // the resolver must reject the depth too. Previously "a.b.c.d" resolved to
-    // `fj1.c.d`, which PostgreSQL parses as schema fj1, table c, column d and
-    // rejects — also as a QueryError, so assert on the message to be sure the
-    // depth guard is what fired.
+    // the resolver must reject the depth too. Without the guard "a.b.c.d"
+    // resolves to `fj1.c.d`, which PostgreSQL parses as schema fj1, table c,
+    // column d and rejects — also as a QueryError, so assert on the message to
+    // be sure the depth guard is what fired.
     auto deep = PathBuilder!"partner.company.name.oops".init("Acme");
     auto deepMsg = collectExceptionMsg!QueryError(repo.query().where(deep).all());
     assert(deepMsg.canFind("deeper than the two relation segments"),
@@ -185,8 +185,8 @@ unittest {
 
     // Orders having an invoice (correlated on the outer PK) whose partner is
     // P-Acme. The F!"partner.name" term is an outer path nested inside the
-    // EXISTS body: it used to survive as an unresolved PathNode and hit
-    // assert(false) during serialisation.
+    // EXISTS body, so it must be resolved against the OUTER model rather than
+    // survive as a PathNode into serialisation.
     auto oneLevel = repo.query().where(
         exists!(PrInvoice)(
             SF!(PrInvoice, "orderId")(F!(PrOrder, "id")) &

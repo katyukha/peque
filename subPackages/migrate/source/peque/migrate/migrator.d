@@ -2,13 +2,12 @@ module peque.migrate.migrator;
 
 private import std.format: format;
 private import peque.connection: Connection, Transaction;
+private import std.exception: basicExceptionCtors;
 private import peque.exception: PequeException;
 private import peque.migrate.version_table;
 
 class MigrationError : PequeException {
-    this(string msg, string file = __FILE__, size_t line = __LINE__) {
-        super(msg, file, line);
-    }
+    mixin basicExceptionCtors;
 }
 
 // Compile-time migration list — version = 1-based position, never reorder.
@@ -102,8 +101,8 @@ if (Migrations.length > 0) {
             if (applied.length == 0) return;
 
             _checkAppliedIntegrity(applied);
-            // migrate() validated twice and rollback not at all, so down() from
-            // an edited migration used to run against unverified state.
+            // rollback() validates too: down() from an edited migration would
+            // otherwise run against state its up() never produced.
             _validateChecksums(applied);
 
             int rolled = 0;
@@ -160,9 +159,9 @@ if (Migrations.length > 0) {
         }
     }
 
-    // Prefer up(ref Transaction): passing the Connection let a migration call
+    // Prefer up(ref Transaction): with the bare Connection a migration can call
     // conn.exec("COMMIT") and escape the atomicity guard that wraps it.
-    // up(ref Connection) is still accepted so existing migrations keep working.
+    // up(ref Connection) is accepted as a convenience for simple migrations.
     private void _runUp(M)(ref M m, ref Transaction tx) {
         static if (__traits(compiles, m.up(tx)))
             m.up(tx);
@@ -196,8 +195,8 @@ if (Migrations.length > 0) {
             }
         }}
         // _checkAppliedIntegrity already rejects out-of-range versions, so this
-        // is a belt-and-braces guard: the previous code let an unknown version
-        // fall through silently and still counted it as rolled back.
+        // is a belt-and-braces guard — falling through here would count an
+        // unknown version as rolled back without running anything.
         if (!handled)
             throw new MigrationError(format!(
                 "Applied version %d is not in the compiled migration list " ~
@@ -207,7 +206,7 @@ if (Migrations.length > 0) {
 
     /** Reject a database state the compiled list cannot describe.
       *
-      * Two cases, both silent before:
+      * Two cases:
       *  - a version beyond the end of the list: the database was migrated by a
       *    newer build, and running this one would mis-attribute versions;
       *  - a gap: version N applied while some earlier version is not. With
@@ -285,11 +284,11 @@ private string _migrationName(M)() {
   * drift detection declares `enum checksum = "..."` (a hash or version tag of its
   * own SQL) and peque pins that value.
   *
-  * Deliberately NOT derived from the fully-qualified name or the description, as
-  * an earlier version was: that combination failed in both directions. Renaming a
-  * module or struct, or editing a description, is a harmless change that bricked
-  * every deployed database with a spurious mismatch, while editing the actual SQL
-  * — the thing worth catching — went undetected.
+  * Deliberately NOT derived from the fully-qualified name or the description:
+  * that combination fails in both directions. Renaming a module or struct, or
+  * editing a description, is a harmless change that would brick every deployed
+  * database with a spurious mismatch, while editing the actual SQL — the thing
+  * worth catching — would go undetected.
   **/
 private string _migrationChecksum(M)() {
     static if (__traits(hasMember, M, "checksum"))

@@ -1,8 +1,8 @@
 /** Complex enterprise-like query tests for peque:orm.
   *
-  * Started as a design specification for the implicit-join features; they are
-  * implemented now and these tests run with the normal suite. Remaining gaps
-  * are marked inline (see Test 14).
+  * Written against the shape of a real application schema rather than a
+  * minimal fixture, so the join, aggregation and projection features are
+  * exercised together. Features not yet available are marked inline (Test 14).
   *
   * Features exercised here:
   *
@@ -23,8 +23,9 @@
   *    result struct. Without .load!, the field stays at init even if the table
   *    was joined for filtering purposes.
   *
-  *  - select!DTO is fully implicit — joins are inferred from DTO field names via
-  *    the join-prefix naming convention (partnerName → partner.name).
+  *  - select!DTO infers nothing — a DTO member is a column on the queried
+  *    table unless it names a path with @field(related: "rel.field"), and those
+  *    paths share their LEFT JOINs with where/orderBy/load!.
   *
   * Domain model:
   *
@@ -714,8 +715,8 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// 11. select!DTO — flat projection across three joins, fully implicit.
-//     No explicit .load!() — DTO field names drive the join list.
+// 11. select!DTO — flat projection across three joins.
+//     No explicit .load!(): each @field(related:) path adds the join it needs.
 // ---------------------------------------------------------------------------
 
 @autoHydrate

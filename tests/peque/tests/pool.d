@@ -145,7 +145,7 @@ unittest {
 /** close() must be a safe no-op on a default-constructed (never-connected)
   * Connection — the state a pool slot is in when, under GC ownership, the
   * Connection's own destructor runs before the pool's ~this reaches it.
-  * Regression: previously threw AssertError "uninitialized payload". **/
+  * Touching the SafeRefCounted payload there is an AssertError. **/
 unittest {
     Connection c;      // default-init: SafeRefCounted store is uninitialized
     c.close();         // must not throw

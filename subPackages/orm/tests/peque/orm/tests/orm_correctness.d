@@ -1,8 +1,9 @@
-/** Integration + CTFE tests for ORM-correctness fixes.
+/** Integration + CTFE tests for ORM correctness invariants.
   *
-  * Each numbered section pins one fix, with the model and DTO it needs beside
-  * it. Where a bug produced plausible wrong data rather than an error, the
-  * fixture is built so the wrong answer is distinguishable from the right one.
+  * Each section pins one invariant, with the model and DTO it needs beside it.
+  * Where breaking the invariant yields plausible wrong data rather than an
+  * error, the fixture is built so the wrong answer is distinguishable from the
+  * right one.
   **/
 module peque.orm.tests.orm_correctness;
 
@@ -20,11 +21,11 @@ private import peque.orm;
 private import peque.orm.sql: ormPkColName;
 
 
-// #4 (compile-time): on a model with zero non-PK column fields, update() and
+// Compile-time: on a model with zero non-PK column fields, update() and
 // upsert() would emit an empty SET clause and must stay compile errors. They are
 // templates, so the guards fire at the call site rather than at instantiation —
 // that lets such a model still form a Repository and use the operations that do
-// make sense (insert / findById / deleteById), which ORM-7 covers.
+// make sense (insert / findById / deleteById).
 @model("occ_pk_only")
 struct OccPkOnly { @primaryKey int id; }
 unittest {
@@ -50,7 +51,7 @@ private Connection makeConn() {
 
 
 // ===========================================================================
-// #1 — @field override on the primary key
+// @field override on the primary key
 // ===========================================================================
 
 @model("occ_pk")
@@ -89,7 +90,7 @@ unittest {
 
 
 // ===========================================================================
-// #2 — where!"field"(null Nullable) → IS NULL / .ne(null) → IS NOT NULL
+// where!"field"(null Nullable) → IS NULL / .ne(null) → IS NOT NULL
 // ===========================================================================
 
 @model("occ_null")
@@ -134,7 +135,7 @@ unittest {
 
 
 // ===========================================================================
-// #4 — set!"field" twice (last-write-wins) via QuerySet.update()
+// set!"field" twice (last-write-wins) via QuerySet.update()
 // ===========================================================================
 
 unittest {
@@ -155,7 +156,7 @@ unittest {
 
 
 // ===========================================================================
-// #3 — @many2many prefetch: ambiguous junction id + self-referential m2m
+// @many2many prefetch: ambiguous junction id + self-referential m2m
 // ===========================================================================
 
 @model("occ_tag")
@@ -168,8 +169,8 @@ struct OccTag {
 struct OccDoc {
     @primaryKey int    id;
     @field      string title;
-    // Junction table occ_doc_tag intentionally has its OWN `id` column so the
-    // (previously unqualified) target SELECT list would be ambiguous.
+    // Junction table occ_doc_tag intentionally has its OWN `id` column, so an
+    // unqualified target SELECT list would be ambiguous.
     @many2many!(OccTag, "occ_doc_tag", "doc_id", "tag_id") OccTag[] tags;
 }
 alias OccDocReg = Registry!(
@@ -183,7 +184,7 @@ unittest {
     c.exec("DROP TABLE IF EXISTS occ_doc;");
     c.exec("DROP TABLE IF EXISTS occ_tag;");
     c.exec(schemaSQL!OccDocReg());
-    // Junction with its own serial `id` — the collision the fix guards against.
+    // Junction with its own serial `id` — the collision the qualification guards against.
     c.exec("
         CREATE TABLE occ_doc_tag (
             id      serial PRIMARY KEY,
@@ -252,7 +253,7 @@ unittest {
 
 
 // ===========================================================================
-// #5 — select!DTO: two relations to the same table, one a prefix of the other
+// select!DTO: two relations to the same table, one a prefix of the other
 // ===========================================================================
 //
 // `partner` and `partnerCompany` both target occ_org. Each related: path must
@@ -308,15 +309,16 @@ unittest {
     auto dtos = recRepo.query().orderBy("_m.title ASC").select!OccRecDTO();
     assert(dtos.length == 1);
     assert(dtos[0].title == "R1");
-    // The bug bound partner_company_name to `partner` (prefix partner_), leaving
-    // a bogus `company_name` leaf. Longest-prefix binds it to partnerCompany.
+    // Shortest-prefix matching would bind partner_company_name to `partner`
+    // (prefix partner_), leaving a bogus `company_name` leaf. Longest-prefix
+    // binds it to partnerCompany.
     assert(dtos[0].partnerName == "Acme");
     assert(dtos[0].partnerCompanyName == "Globex");
 }
 
 
 // ===========================================================================
-// #6 — @many2one instance form behaves exactly like the type form (CORE-10)
+// @many2one instance form behaves exactly like the type form
 // ===========================================================================
 //
 // hasMany2OneUDA only matched the type form, so `@many2one!(T)()` silently
@@ -407,12 +409,13 @@ unittest {
 
 
 // ===========================================================================
-// #7 — PK-only models: INSERT must use the DEFAULT form (ORM-7)
+// PK-only models: INSERT must use the DEFAULT form
 // ===========================================================================
 //
-// With no non-PK columns the insert column list is empty, which used to emit
-// "INSERT INTO t () VALUES ()" — rejected by PostgreSQL. Marker / identity
-// tables are a legitimate shape, so they are supported rather than rejected.
+// With no non-PK columns the insert column list is empty, and the general form
+// would emit "INSERT INTO t () VALUES ()", which PostgreSQL rejects. Marker /
+// identity tables are a legitimate shape, so they are supported rather than
+// rejected.
 
 @model("occ_marker")
 struct OccMarker { @primaryKey int id; }
@@ -447,7 +450,7 @@ unittest {
 
 
 // ===========================================================================
-// #8 — select!DTO: prefix-sharing relations, both explicitly loaded (ORM-2)
+// select!DTO: prefix-sharing relations, both explicitly loaded
 // ===========================================================================
 //
 // As #5, but with both relations pulled in by load!, so the paths resolve
@@ -509,8 +512,8 @@ unittest {
                        .select!SdDTO();
     assert(dtos.length == 1);
     assert(dtos[0].partnerName == "Acme");
-    // The bug produced "DECOY-from-partner" here: j0.company_name, i.e. the
-    // partner's company_name rather than partnerCompany's name.
+    // A prefix mix-up shows up as "DECOY-from-partner" here: j0.company_name,
+    // i.e. the partner's company_name rather than partnerCompany's name.
     assert(dtos[0].partnerCompanyName == "Globex",
         "partner_company_name must bind to partnerCompany, got: " ~
         dtos[0].partnerCompanyName);
@@ -535,7 +538,7 @@ unittest {
 
 
 // ===========================================================================
-// #9 — guards made natural by the sql.d column-model consolidation
+// Guards over the shared sql.d column model
 // ===========================================================================
 
 // Exactly one @primaryKey. With two, ormPkColName/ormPkFieldName picked the
@@ -561,7 +564,7 @@ unittest {
     static assert(!__traits(compiles, { enum x = ormPkFieldName!OccTwoPk(); }),
         "two @primaryKey fields must be rejected consistently everywhere");
     static assert(!__traits(compiles, { enum x = buildInsertValueExpr!(OccTwoPk, true)(); }),
-        "the builder that used to pick the LAST PK must reject the ambiguity too");
+        "the value-expression builder must reject the ambiguity too");
     static assert(!__traits(compiles, { enum x = ormPkColName!OccNoPk(); }),
         "a model with no @primaryKey must be rejected with a clear message");
 
@@ -571,8 +574,7 @@ unittest {
 }
 
 // Two @many2one to the same target with a bare @related is ambiguous: the FK
-// finder used to return the LAST match silently, while its caller's doc
-// promised the first.
+// finder must refuse rather than pick one silently.
 @model("occ_amb_org")
 struct OccAmbOrg {
     @primaryKey int    id;
@@ -596,8 +598,9 @@ unittest {
                   true);
 }
 
-// Negative limit/offset used to mean "unset" (-1 is the sentinel), so a
-// miscomputed page size silently returned the whole table.
+// -1 is the "unset" sentinel for limit/offset, so a negative value must be
+// rejected rather than read as unset — a miscomputed page size would otherwise
+// silently return the whole table.
 unittest {
     auto c    = makeConn();
     auto repo = seedNull(c);
@@ -625,12 +628,12 @@ unittest {
 
 
 // ===========================================================================
-// #10 — limit/offset semantics on terminals, and the bind-parameter ceiling
+// limit/offset semantics on terminals, and the bind-parameter ceiling
 // ===========================================================================
 
-// count()/exists() used to ignore limit/offset, so .limit(0).exists() was true
-// while .limit(0).all() was empty. delete_()/update() ignored them too, which
-// meant .limit(10).delete_() deleted every matching row.
+// Every terminal honours limit/offset. Ignoring them makes .limit(0).exists()
+// true while .limit(0).all() is empty, and makes .limit(10).delete_() delete
+// every matching row.
 unittest {
     auto c    = makeConn();
     auto repo = seedNull(c);        // two rows: "has-note" and "no-note"
@@ -659,8 +662,8 @@ unittest {
                 "count() must equal all().length for limit/offset combinations");
             assert(qs.exists() == (qs.all().length > 0),
                 "exists() must agree with all() for limit/offset combinations");
-            // first() used to call limit(1) unconditionally, so limit(0) —
-            // which every other terminal reads as "no rows" — returned one.
+            // first() must not force limit(1) unconditionally: limit(0) means
+            // "no rows" to every other terminal and has to here as well.
             assert(qs.first().isNull == (qs.all().length == 0),
                 "first() must agree with all() for limit/offset combinations");
         }
@@ -677,8 +680,9 @@ unittest {
     assert(repo.query().count() == 1);
 }
 
-// PostgreSQL binds at most 65535 parameters per statement; exceeding it used to
-// surface as an opaque libpq protocol error far from the call site.
+// PostgreSQL binds at most 65535 parameters per statement. Peque checks the
+// count itself, so the caller gets a named limit instead of an opaque libpq
+// protocol error far from the call site.
 unittest {
     auto c    = makeConn();
     auto repo = seedNull(c);
@@ -711,7 +715,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// #11 — select!DTO matches a DTO member against the model's D field names,
+// select!DTO matches a DTO member against the model's D field names,
 //       not only against its column names.
 //
 // `@field("owner_note") string ownerNote` is an ordinary main-table column
@@ -778,7 +782,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// #12 — select!DTO never infers a join from a member name.
+// select!DTO never infers a join from a member name.
 //
 // A DTO member is a column on the main table unless @field(related:) says
 // otherwise. That is what lets a real `partnerName` column and a `partner`
@@ -875,7 +879,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// #13 — @field(related:) spans two relations and shares the LEFT JOIN.
+// @field(related:) spans two relations and shares the LEFT JOIN.
 //
 // Related paths go through the same resolver as where()/orderBy(), inheriting
 // two-segment support and join reuse. The join is a LEFT JOIN, so a nullable
@@ -1034,7 +1038,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// #14 — column names convert from D member names, and every emitter agrees
+// Column names convert from D member names, and every emitter agrees
 //
 // One resolver serves DDL, CRUD, QuerySet and hydration, so a column cannot be
 // named one way when written and another when read back. The DTO alias comes
@@ -1139,7 +1143,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// #15 — grouped select!DTO: alias and hydration key come from one resolver
+// Grouped select!DTO: alias and hydration key come from one resolver
 //
 // A grouped DTO member names a groupBy! key or an annotate! alias, matched by
 // member name. @field("col") has nothing to refer to there, and a member that
@@ -1212,7 +1216,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// #16 — @uniqueTogether / @indexTogether field names are checked at compile time
+// @uniqueTogether / @indexTogether field names are checked at compile time
 //
 // They take D field names, like every other place the ORM names a model member,
 // and resolve them to columns. Reaching for the SQL spelling is the natural

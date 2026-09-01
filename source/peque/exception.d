@@ -4,6 +4,7 @@
   *
   * ---
   * PequeException                  root — never thrown directly
+  * ├── LibpqLoadError              libpq itself could not be loaded
   * ├── ConnectionError             the link is unusable
   * ├── NotSupportedError           peque will not do this, in any context
   * ├── ConversionError             a value could not be converted, either direction
@@ -32,6 +33,21 @@ import std.format: format;
 
 /// Root of every peque exception. Never thrown directly.
 class PequeException : Exception {
+    mixin basicExceptionCtors;
+}
+
+
+// ---------------------------------------------------------------------------
+// Library loading
+// ---------------------------------------------------------------------------
+
+/** libpq itself could not be loaded. Dynamic builds (`PequeDynamic`) only.
+  *
+  * Covers both ways loading fails: no library found under any of the searched
+  * names, and one found whose symbols do not bind — an ABI mismatch, or a libpq
+  * too old for the functions peque needs.
+  **/
+class LibpqLoadError : PequeException {
     mixin basicExceptionCtors;
 }
 
@@ -86,6 +102,7 @@ class ConversionError : PequeException {
     /// Empty for parameters: those are caller data and may be secrets.
     string value;
 
+    // Kept for `enforce!E`, which needs the (msg, file, line) constructor.
     this(string msg, string file = __FILE__, size_t line = __LINE__,
          Throwable nextInChain = null) @safe pure nothrow {
         super(msg, file, line, nextInChain);
@@ -122,6 +139,7 @@ class RowNotExistsError : ResultError {
     /// Number of rows the result actually has.
     long ntuples = -1;
 
+    // Kept for `enforce!E`, which needs the (msg, file, line) constructor.
     this(string msg, string file = __FILE__, size_t line = __LINE__,
          Throwable nextInChain = null) @safe pure nothrow {
         super(msg, file, line, nextInChain);
@@ -150,6 +168,7 @@ class ColNotExistsError : ResultError {
     /// Names of the columns that ARE present, so a caller can report or match.
     string[] available;
 
+    // Kept for `enforce!E`, which needs the (msg, file, line) constructor.
     this(string msg, string file = __FILE__, size_t line = __LINE__,
          Throwable nextInChain = null) @safe pure nothrow {
         super(msg, file, line, nextInChain);
@@ -229,14 +248,7 @@ class QueryServerError : QueryError {
     /// 1-based index into the statement text, as a string. Empty when absent.
     string statementPosition;
 
-    this(string msg, string file = __FILE__, size_t line = __LINE__,
-         Throwable nextInChain = null) @safe pure nothrow {
-        super(msg, file, line, nextInChain);
-    }
-
-    this(string msg, Throwable nextInChain) @safe pure nothrow {
-        super(msg, nextInChain);
-    }
+    mixin basicExceptionCtors;
 
     /** True when re-running the statement could plausibly succeed.
       *
@@ -295,14 +307,7 @@ class IntegrityError : QueryServerError {
     /// Which kind of constraint was violated.
     IntegrityKind kind = IntegrityKind.other;
 
-    this(string msg, string file = __FILE__, size_t line = __LINE__,
-         Throwable nextInChain = null) @safe pure nothrow {
-        super(msg, file, line, nextInChain);
-    }
-
-    this(string msg, Throwable nextInChain) @safe pure nothrow {
-        super(msg, nextInChain);
-    }
+    mixin basicExceptionCtors;
 }
 
 /** SQLSTATE class 40 — transaction_rollback.
@@ -312,12 +317,5 @@ class IntegrityError : QueryServerError {
   * committed, so replaying it could apply the change twice.
   **/
 class SerializationError : QueryServerError {
-    this(string msg, string file = __FILE__, size_t line = __LINE__,
-         Throwable nextInChain = null) @safe pure nothrow {
-        super(msg, file, line, nextInChain);
-    }
-
-    this(string msg, Throwable nextInChain) @safe pure nothrow {
-        super(msg, nextInChain);
-    }
+    mixin basicExceptionCtors;
 }

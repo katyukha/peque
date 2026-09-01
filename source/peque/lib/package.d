@@ -4,6 +4,8 @@ private import std.format: format;
 private import std.string: join, fromStringz;
 private import std.algorithm: map;
 
+private import peque.exception: LibpqLoadError;
+
 public import peque.lib.libpq;
 
 
@@ -57,6 +59,14 @@ version(PequeDynamic) {
         return false;
     }
 
+    /** Load libpq before anything can use it.
+      *
+      * A missing or unloadable libpq is an environment problem, not a broken
+      * invariant, so it is thrown rather than asserted: an `assert(0)` here
+      * halts with no message under `-release`, which is the build most likely
+      * to meet a machine without the library installed. Thrown from a module
+      * constructor the message reaches the user and the process exits non-zero.
+      **/
     shared static this() {
         auto err_count_start = bindbc.loader.errorCount;
         bool load_status = loadLib;
@@ -64,7 +74,9 @@ version(PequeDynamic) {
             auto errors = bindbc.loader.errors[err_count_start .. bindbc.loader.errorCount]
                 .map!((e) => "%s: %s".format(e.error.fromStringz.idup, e.message.fromStringz.idup))
                 .join(",\n");
-            assert(0, "Cannot load libpq library! Errors: %s".format(errors));
+            throw new LibpqLoadError(
+                "Cannot load libpq library! Tried: %-(%s, %). Errors: %s".format(
+                    supportedLibNames, errors));
         }
     }
 }

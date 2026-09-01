@@ -161,9 +161,9 @@ unittest {
 }
 
 
-/// FD-leak regression: every wait dups the libpq fd and hands it to
-/// eventcore, which must close it. A leak here grows /proc/self/fd by one
-/// per wait cycle (historical bug fixed in "Vibe.d leaking file descriptors").
+/// Every wait dups the libpq fd and hands it to eventcore, which must close
+/// it. A leak here grows /proc/self/fd by one per wait cycle, so a long-lived
+/// vibe.d process eventually runs out of descriptors.
 version (linux)
 unittest {
     runVibeTest({

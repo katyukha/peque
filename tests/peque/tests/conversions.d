@@ -341,7 +341,7 @@ unittest {
         port:     environment.get("POSTGRES_PORT",     "5432"),
     );
 
-    // Values below ~5e-21 used to be zeroed by fixed-point formatting
+    // Fixed-point formatting zeroes values below ~5e-21
     auto res = c.execParams("SELECT $1::float8", 1.5e-25).ensureQueryOk;
     assert(res[0][0].get!double == 1.5e-25);
 
@@ -418,8 +418,8 @@ unittest {
     assert(res[0][0].get!(string[]) == [], "empty text array must decode to []");
 
     // NULL element in a non-nullable array: rejected loudly with
-    // ConversionError (previously a raw ConvException for int[], or the
-    // silent literal "NULL" string for text[]).
+    // ConversionError — never a raw ConvException, and never the silent
+    // literal "NULL" string.
     c.exec("SELECT ARRAY[1,NULL,3]::int[]")
         .ensureQueryOk
         [0][0].get!(int[])
@@ -503,7 +503,7 @@ unittest {
 
 
 // Converting a value whose pg type cannot map to the requested D type must
-// throw ConversionError (previously an assert(0), which is UB under -release).
+// throw ConversionError — an assert(0) here would be UB under -release.
 unittest {
     import std.datetime;
     import peque.exception: ConversionError;
@@ -764,9 +764,9 @@ unittest {
 // The instant is what peque guarantees; the attached zone is a rendering
 // detail, and it follows one rule so two rows of a result set cannot print in
 // different zones. Nothing here can be caught by an equality assertion —
-// opEquals compares stdTime — which is exactly why the parser used to return
-// the session's offset on the ordinary path and UTC on the local-mean-time and
-// BC ones without any test noticing.
+// opEquals compares stdTime — so a parser returning the session's offset on the
+// ordinary path and UTC on the local-mean-time and BC ones passes every other
+// test in this file.
 unittest {
     import std.datetime;
 
@@ -793,7 +793,7 @@ unittest {
 
         // Pre-1880s values are rendered in local mean time, whose offset carries
         // SECONDS, and a negative one pushes year 1 into the BC era. Both take
-        // the hand-rolled path — which is where the two rules used to diverge.
+        // the hand-rolled path, so it has to reach the same rule.
         mustBeUtc(c.exec(`SELECT '1883-11-18 12:00:00+00'::timestamptz`)
                    .getValue!SysTime(0, 0), "an 1883 timestamp under " ~ tz);
         mustBeUtc(c.exec(`SELECT '0001-01-01 00:00:00+00'::timestamptz`)
@@ -822,8 +822,8 @@ unittest {
 // ---------------------------------------------------------------------------
 
 // The rule the temporal conversions follow: peque returns what the value
-// contains, possibly less, but never more — and it never guesses a zone. Each
-// refusal below used to be a silent wrong answer.
+// contains, possibly less, but never more — and it never guesses a zone. The
+// alternative to each refusal below is a silent wrong answer.
 unittest {
     import std.datetime;
 
@@ -862,9 +862,9 @@ unittest {
         .getValue!Date(0, 0).assertThrown!ConversionError;
 
     // Array elements arrive without an OID, so the rendering carries the
-    // decision. Choosing by string length (`length == 19`) used to misread a
-    // naive value WITH fractional seconds as local time, and to reject
-    // "infinity" as too short.
+    // decision. Choosing by string length (`length == 19`) misreads a naive
+    // value WITH fractional seconds as local time, and rejects "infinity" as
+    // too short.
     c.exec(`SELECT ARRAY['2023-08-17 08:09:10'::timestamp]`)
         .getValue!(SysTime[])(0, 0).assertThrown!ConversionError;
     c.exec(`SELECT ARRAY['2023-08-17 08:09:10.5'::timestamp]`)
@@ -963,8 +963,8 @@ unittest {
 // A SysTime is an instant: writing one and reading it back must produce the
 // same instant whatever the session TimeZone, and whatever zone the D value
 // carries. LocalTime() is the case that matters — SysTime.toString omits the
-// UTC offset for it, so Clock.currTime used to go out as a naked wall clock and
-// PostgreSQL read it in the session zone.
+// UTC offset for it, so without the .toUTC normalisation Clock.currTime goes
+// out as a naked wall clock and PostgreSQL reads it in the session zone.
 unittest {
     import std.datetime;
     import std.algorithm.searching: canFind;
@@ -1015,8 +1015,8 @@ unittest {
         auto res = c.exec(`SELECT ts FROM peque_tz_session`);
         res.getValue!DateTime(0, 0).assertThrown!ConversionError;
 
-        // The message has to name the fix, not just the failure: this is the
-        // one conversion error a user is likely to hit on a working query.
+        // The message has to name the remedy, not just the failure: this is
+        // the one conversion error a user is likely to hit on a working query.
         auto e = collectException!ConversionError(res.getValue!DateTime(0, 0));
         assert(e !is null);
         assert(e.msg.canFind("SysTime"), e.msg);
@@ -1127,8 +1127,8 @@ unittest {
 // here rather than left to the server's default: with a zone that used local
 // mean time (all of them, before the 1880s) PostgreSQL emits a UTC offset with
 // SECONDS, and with a negative one it also pushes year 1 into the BC era.
-// Both forms are rejected by std.datetime's parser, so these rows used to be
-// completely unreadable — SysTime.init written to a column was enough.
+// Both forms are rejected by std.datetime's parser, so peque parses them
+// itself — writing SysTime.init to a column is enough to produce one.
 unittest {
     import std.datetime;
 
@@ -1194,8 +1194,8 @@ unittest {
     assert(c.exec("SELECT '-infinity'::date").getValue!Date(0, 0)           == Date.min);
 
     // " BC" years: PostgreSQL counts from 1, D from 0 (astronomical numbering),
-    // so 44 BC is year -43. Date and DateTime used to drop the suffix and
-    // silently return the positive year.
+    // so 44 BC is year -43. Dropping the suffix would silently return the
+    // positive year.
     assert(c.exec("SELECT '0001-01-01 BC'::date").getValue!Date(0, 0)
            == Date(0, 1, 1));
     assert(c.exec("SELECT '0044-03-15 12:00:00 BC'::timestamp").getValue!DateTime(0, 0)

@@ -4,7 +4,7 @@
   *  - count() / exists() / aggregate!() on a QuerySet with load! + path predicate
   *    (predicates resolve to the hydration-join alias, so the terminal must emit
   *    the same LEFT JOINs as all())
-  *  - the same terminals with a pure filter join (no load!) — regression guard
+  *  - the same terminals with a pure filter join (no load!)
   *  - asSubquery!() keeps orderBy + limit ("top N" subqueries)
   *  - delete_() / update() keep LEFT JOIN semantics for path predicates
   *    (F!"rel.field".isNull must match rows with NULL FK, exactly as in all())
@@ -118,7 +118,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// count / exists / aggregate with a pure filter join (no load!) — regression
+// count / exists / aggregate with a pure filter join (no load!)
 // ---------------------------------------------------------------------------
 
 unittest {

@@ -273,9 +273,9 @@ unittest {
     assert(repo.query().all().length == 1);
     assert(repo.query().where!"mixed"("v").count() == 1);
 
-    // The explicit-FK join: its column used to be the one unquoted identifier
-    // in the whole join pipeline, so this failed with `column _m.mycol does not
-    // exist` while the inferred-FK path worked.
+    // The explicit-FK join is a separate emission point from the inferred-FK
+    // one, so it needs its own coverage: an unquoted identifier here fails with
+    // `column _m.mycol does not exist` while the inferred path still works.
     auto joined = repo.query().load!"co"().all();
     assert(joined.length == 1);
     assert(!joined[0].co.isNull && joined[0].co.get.name == "acme");

@@ -1,4 +1,4 @@
-/** Integration tests for Phase 4a — struct hydration (ResultRow.as!T).
+/** Integration tests for struct hydration (ResultRow.as!T).
   *
   * Covers:
   *  - @model struct: @field, @primaryKey, explicit column name override
@@ -324,7 +324,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// Result.as!(T[]) rejects non-struct element types (CORE-13)
+// Result.as!(T[]) rejects non-struct element types
 // ---------------------------------------------------------------------------
 
 unittest {
@@ -336,10 +336,9 @@ unittest {
     // A slice of structs is the only supported form.
     static assert(__traits(compiles, res.as!(Item[])));
 
-    // string is immutable(char)[], so it satisfies `is(T == E[], E)` and used to
-    // reach the body, where std.range.ElementType auto-decoded it to dchar and
-    // the failure surfaced deep inside ResultRow.as. Now the static assert in
-    // Result.as catches it directly.
+    // string is immutable(char)[], so it satisfies `is(T == E[], E)` and reaches
+    // the body unless Result.as rejects it up front — there std.range.ElementType
+    // auto-decodes it to dchar and the failure surfaces deep inside ResultRow.as.
     static assert(!__traits(compiles, res.as!string));
     static assert(!__traits(compiles, res.as!(char[])));
     static assert(!__traits(compiles, res.as!(int[])));
@@ -347,12 +346,12 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// @many2one in instance form is a column field (CORE-10)
+// @many2one in instance form is a column field
 // ---------------------------------------------------------------------------
 
 // The FK target is irrelevant to hydration — what matters is that both UDA
-// spellings mark the field as a DB column. The instance form used to be missed
-// by hasMany2OneUDA, so the field was silently skipped and left at .init.
+// spellings mark the field as a DB column. A spelling hasMany2OneUDA misses is
+// silently skipped and left at .init, which is indistinguishable from a NULL.
 @model("peque_hydration_m2o_parent")
 private struct M2OParent {
     @primaryKey int    id;
@@ -413,8 +412,8 @@ unittest {
 // fromRow must return T to be selected by the dispatch chain
 // ---------------------------------------------------------------------------
 
-// A fromRow returning something else used to satisfy the "does it compile"
-// gate, after which the call failed with a bare "cannot implicitly convert"
+// A fromRow returning something else must not satisfy the "does it compile"
+// gate: the call would then fail with a bare "cannot implicitly convert"
 // instead of falling through to the dispatch-chain static assert.
 private struct WrongFromRow {
     string label;

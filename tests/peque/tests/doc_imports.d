@@ -50,6 +50,9 @@ unittest {
     static assert(__traits(compiles, { try {} catch (ConnectionError e) {} }));
     static assert(__traits(compiles, { try {} catch (NotSupportedError e) {} }));
     static assert(__traits(compiles, { try {} catch (ResultError e) {} }));
+    // Named unconditionally, so a `catch` compiles in static builds too even
+    // though only a dynamic one can throw it.
+    static assert(__traits(compiles, { try {} catch (LibpqLoadError e) {} }));
 
     // Schema-only UDAs deliberately stay behind `import peque.orm;` — they mean
     // nothing without the ORM, and exporting names like `check`/`index` from the

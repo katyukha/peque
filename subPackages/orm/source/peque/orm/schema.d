@@ -601,8 +601,8 @@ private string _buildIndexSQL(M)() {
                 names  ~= _fieldIndexName!(uda, hashIndex,   "hash_", table, col)();
             }}
         } else {
-            // An index UDA here used to be dropped without a word, so the schema
-            // deployed "successfully" with the index missing.
+            // Reject rather than ignore: a dropped index UDA would deploy
+            // "successfully" with the index simply missing.
             static foreach (uda; __traits(getAttributes, F)) {{
                 static assert(!_isFieldIndexUDA!uda,
                     "Index UDA on `" ~ M.stringof ~ "." ~ memberName ~ "` has no " ~

@@ -41,6 +41,7 @@ private void setup(ref Connection c) {
 
 unittest {
     // Everything peque throws is reachable from a single catch.
+    static assert(is(LibpqLoadError      : PequeException));
     static assert(is(ConnectionError     : PequeException));
     static assert(is(NotSupportedError   : PequeException));
     static assert(is(ConversionError     : PequeException));
@@ -60,6 +61,11 @@ unittest {
     // query or result, so ConversionError must not hang under a result parent.
     static assert(!is(ConversionError : ResultError));
     static assert(!is(ConversionError : QueryError));
+
+    // A libpq that will not load is a packaging fault, not a connectivity one:
+    // no connection can succeed in this process, so a caller retrying on
+    // ConnectionError must not sweep it up.
+    static assert(!is(LibpqLoadError : ConnectionError));
 }
 
 

@@ -248,8 +248,8 @@ unittest {
     );
 
     assertThrown!MigrationError(m.migrate());
-    // rollback() used to skip checksum validation entirely, so down() ran
-    // against state the runner had never verified.
+    // rollback() validates checksums too: without it, down() runs against
+    // state the runner has never verified.
     assertThrown!MigrationError(m.rollback(1));
 }
 
@@ -460,8 +460,8 @@ unittest {
     cleanup(c, "mig_conc_ns");
 
     auto m = Migrator!(NonTxMigs)(&c, "mig_conc_ns");
-    // Before the opt-out this failed with "CREATE INDEX CONCURRENTLY cannot run
-    // inside a transaction block".
+    // Without `enum transactional = false` this fails with "CREATE INDEX
+    // CONCURRENTLY cannot run inside a transaction block".
     m.migrate();
 
     foreach (s; m.status()) assert(s.applied);
@@ -480,9 +480,9 @@ unittest {
     auto c = makeConn();
     cleanup(c, "mig_gap");
 
-    // A gap: v2 applied while v1 is not. With position-based versioning this
-    // means the list was reordered or grown in the middle; migrate() used to
-    // silently apply v1 *after* v2.
+    // A gap: v2 applied while v1 is not. With position-based versioning that
+    // means the list was reordered or grown in the middle, and applying v1
+    // *after* v2 is not something the runner may do silently.
     c.execParams(
         `INSERT INTO __peque_migrations (namespace, version, description, checksum)
          VALUES ($1, 2, 'out of order', '')`,
@@ -493,9 +493,9 @@ unittest {
     assertThrown!MigrationError(m.status());
     assertThrown!MigrationError(m.rollback(1));
 
-    // A version beyond the compiled list: the database was migrated by a newer
-    // build. Previously invisible to migrate()/status(), and rollback() counted
-    // it as rolled back without doing anything.
+    // A version beyond the compiled list means the database was migrated by a
+    // newer build. Every entry point must refuse: silently ignoring it would
+    // let rollback() report work it did not do.
     cleanup(c, "mig_newer");
     c.execParams(
         `INSERT INTO __peque_migrations (namespace, version, description, checksum)
@@ -513,7 +513,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// Two Migrators racing the advisory lock (long-standing test gap)
+// Two Migrators racing the advisory lock
 // ---------------------------------------------------------------------------
 
 unittest {
@@ -522,8 +522,8 @@ unittest {
     auto setup = makeConn();
     setup.exec(`DROP TABLE IF EXISTS mig_foo`);
     cleanup(setup, "mig_race");
-    // Drop the tracking table too, so both threads race to create it as well —
-    // that creation now happens under the lock rather than before it.
+    // Drop the tracking table too, so both threads race to create it as well:
+    // that creation happens under the lock, not before it.
     setup.exec(`DROP TABLE IF EXISTS __peque_migrations`);
 
     shared string[] failures;

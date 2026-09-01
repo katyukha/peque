@@ -1,4 +1,4 @@
-/** Integration tests for peque:orm Phase 4b — Repository + CRUDMixin.
+/** Integration tests for peque:orm — Repository + CRUDMixin.
   *
   * Covers:
   *  - Repository!(M, Connection) for all five CRUD operations

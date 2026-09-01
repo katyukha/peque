@@ -6,10 +6,11 @@
   * its body is compiled in the INSTANTIATING module's scope, so anything it
   * references must be reachable from there.
   *
-  * That is invisible to a test living inside the package. It shipped a defect:
-  * a selective `import peque.orm.schema : _partialUniqueIndexPred;` inside
-  * CRUDMixin, which resolves fine for peque's own tests and fails for everyone
-  * else with "member _partialUniqueIndexPred is not visible from module …".
+  * That is invisible to a test living inside the package. A selective import
+  * of a `package(peque.orm)` symbol inside CRUDMixin, say
+  * `import peque.orm.schema : _partialUniqueIndexPred;`, resolves fine for
+  * peque's own tests and fails for everyone else with "member
+  * _partialUniqueIndexPred is not visible from module …".
   *
   * This module is named outside the package on purpose. Anything a consumer
   * would write belongs here — especially direct `mixin CRUDMixin!`, which the
