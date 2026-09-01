@@ -1,5 +1,5 @@
 name "orm"
-description "ORM layer for peque — repository, CRUD mixin, compile-time SQL generation"
+description "ORM layer for peque — repository, CRUD mixin, QuerySet, compile-time SQL and schema generation (experimental: API may break on a minor version bump)"
 homepage "https://github.com/katyukha/peque"
 authors "Dmytro Katyukha"
 copyright "Copyright © 2023, Dmytro Katyukha"

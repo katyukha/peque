@@ -1,5 +1,5 @@
 name "migrate"
-description "Database migration runner for peque — compile-time D-based migrations"
+description "Database migration runner for peque — compile-time D-based migrations (experimental: API may break on a minor version bump)"
 homepage "https://github.com/katyukha/peque"
 authors "Dmytro Katyukha"
 copyright "Copyright © 2023, Dmytro Katyukha"

@@ -1,11 +1,14 @@
 # Peque — PostgreSQL client for D
 
-Peque is a lightweight [libpq](https://www.postgresql.org/docs/current/libpq.html)
-wrapper for the D programming language.
+Peque is a PostgreSQL client for the D programming language: a lightweight
+[libpq](https://www.postgresql.org/docs/current/libpq.html) wrapper, plus
+optional subpackages providing a compile-time ORM, a migration runner and
+vibe.d integration.
 
 It uses `SafeRefCounted` (from `std.typecons`) to manage libpq objects
 deterministically — connections and results are freed as soon as they go out of
-scope, without depending on the GC.
+scope, without depending on the GC. The ORM and migration layers are separate
+subpackages, so a project that only wants the binding pays nothing for them.
 
 ## Features
 
@@ -20,6 +23,20 @@ scope, without depending on the GC.
 - **`peque:orm`** — compile-time ORM with type-safe WHERE predicates, QuerySet, and schema generation
 - **`peque:migrate`** — compile-time D-struct migration runner with rollback and opt-in checksum pinning
 - **`peque:vibe`** — vibe.d fiber-aware integration (`VibeWaitStrategy` + `VibeConnectionPool`)
+
+## Status of the subpackages
+
+`peque:orm` and `peque:migrate` are **experimental**. They are used and tested,
+but their APIs are still moving: expect breaking changes on a **minor** version
+bump, not only a major one. Pin an exact version if that matters to you. The
+core package (`Connection`, `Result`, the converters, the pool) is stable by
+comparison — breaking changes there are rare and called out in the changelog.
+
+The `peque:orm`, `peque:migrate` and `peque:vibe` subpackages were implemented
+with heavy use of AI coding assistants running in an autonomous mode. Every
+change is covered by the test suite described in [Running tests](#running-tests)
+and reviewed before merging, but the volume of generated code is large, so treat
+these subpackages with the scrutiny you would give any young dependency.
 
 ## Supported types
 
@@ -318,6 +335,10 @@ c.transaction!(OnSuccess.commit, IsolationLevel.serverDefault)((ref tx) { ... })
 ---
 
 ## ORM (`peque:orm`)
+
+> **Experimental.** The API is still moving — expect breaking changes on a
+> minor version bump. Implemented with heavy use of AI coding assistants in
+> autonomous mode; see [Status of the subpackages](#status-of-the-subpackages).
 
 `peque:orm` is a compile-time ORM that generates SQL from model UDA metadata.
 Nothing is reflected at runtime — all column names, table names, and SELECT
@@ -1019,6 +1040,10 @@ auto rest = prodRepo.query()
 
 ## Migrations (`peque:migrate`)
 
+> **Experimental.** The API is still moving — expect breaking changes on a
+> minor version bump. Implemented with heavy use of AI coding assistants in
+> autonomous mode; see [Status of the subpackages](#status-of-the-subpackages).
+
 Migrations are plain D structs compiled into the application binary. Each
 struct has `up()` and optionally `down()`. Version numbers are assigned by
 position in `MigrationList` — never reorder migrations.
@@ -1145,6 +1170,9 @@ but unrecorded, and the next run retries it.
 ---
 
 ## vibe.d (`peque:vibe`)
+
+> Implemented with heavy use of AI coding assistants in autonomous mode; see
+> [Status of the subpackages](#status-of-the-subpackages).
 
 `peque:vibe` provides a fiber-aware wait strategy and connection pool for
 vibe.d applications. Instead of blocking the OS thread while waiting for

@@ -74,5 +74,11 @@ jobs:
       - name: Run tests
         run: dub test -b unittest-cov -c "unittest${{ matrix.buildConf }}"
 
+      - name: Run tests (orm)
+        run: dub test :orm -c "unittest${{ matrix.buildConf }}"
+
+      - name: Run tests (migrate)
+        run: dub test :migrate -c "unittest${{ matrix.buildConf }}"
+
       - name: Run tests (vibe)
         run: dub test :vibe -c "unittest${{ matrix.buildConf }}"
