@@ -1633,6 +1633,12 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** Execute a partial / bulk UPDATE using accumulated set!() assignments.
       *
+      * WITHOUT a where() this rewrites EVERY row in the table — there is no
+      * guard, exactly as in delete_(). `repo.query().set!"active"(false).update()`
+      * is a valid way to reset a column across the table; make sure that is what
+      * you meant. A missing set!() is a QueryClientError rather than a silent
+      * no-op, but a missing where() cannot be told apart from an intended one.
+      *
       * Builds: UPDATE table SET col1=$1, col2=$2 WHERE (renumbered_where)
       * Set values are bound as $1..$N; WHERE params follow as $(N+1)..$(N+M).
       *

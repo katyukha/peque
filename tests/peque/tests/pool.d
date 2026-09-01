@@ -169,34 +169,78 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// Contention under OS threads: more threads than connections — excess
-// threads block on the semaphore, at most `capacity` borrows run at once,
-// and every thread completes.
+// Contention under OS threads: more threads than connections
 // ---------------------------------------------------------------------------
+
+/** Three properties, none of which the others imply.
+  *
+  * Bounded above — never more concurrent borrows than the pool's capacity.
+  * Bounded below — concurrency actually REACHES the capacity: a pool that
+  * serialised every borrow would satisfy the upper bound while defeating the
+  * point of having one, so the upper bound alone proves very little.
+  * Exclusive — no two threads ever hold the same connection. That is the
+  * invariant `_acquireSlot` guards, and libpq would not necessarily complain
+  * about the violation: two threads on one `PGconn` interleave their protocol
+  * traffic, which surfaces as a corrupt result long after the fact.
+  *
+  * Backend PIDs identify the connections, and their count also shows the slots
+  * are reused rather than reconnected per borrow.
+  *
+  * A violation is RECORDED and asserted after the join, never asserted inside
+  * the borrow: an Error unwinding out of a `synchronized` block on several
+  * threads at once does not release the monitor, so an in-place assert hangs
+  * the suite instead of failing it — which is no guard at all.
+  **/
 unittest {
     import core.thread: Thread;
-    import core.atomic: atomicOp, atomicLoad;
+    import core.sync.mutex: Mutex;
 
-    auto pool = ThreadConnectionPool(2, makeFactory());
-    shared int active = 0;
-    shared int done = 0;
+    enum size_t capacity = 2;
+    enum size_t workers  = 6;
+
+    auto pool = ThreadConnectionPool(capacity, makeFactory());
+    auto mtx  = new Mutex();
+
+    size_t   active, maxActive, completed;
+    bool     sharedConn;   // set if two borrows ever held one connection
+    bool[int] livePids;    // connections borrowed right now
+    bool[int] seenPids;    // every connection this test ever touched
 
     Thread[] threads;
-    foreach (i; 0 .. 6)
+    foreach (i; 0 .. workers)
         threads ~= new Thread({
             pool.borrow((ref Connection c) {
-                immutable now = atomicOp!"+="(active, 1);
-                assert(now <= 2, "more concurrent borrows than pool capacity");
+                immutable pid = c.exec("SELECT pg_backend_pid()").getValue!int(0, 0);
+                synchronized (mtx) {
+                    if (pid in livePids) sharedConn = true;
+                    livePids[pid] = true;
+                    seenPids[pid] = true;
+                    if (++active > maxActive) maxActive = active;
+                }
+                // Held long enough that any thread starting meanwhile overlaps.
                 c.exec("SELECT pg_sleep(0.05)");
-                atomicOp!"-="(active, 1);
+                synchronized (mtx) {
+                    --active;
+                    livePids.remove(pid);
+                }
             });
-            atomicOp!"+="(done, 1);
+            synchronized (mtx) ++completed;
         }).start();
 
     foreach (t; threads)
         t.join();   // rethrows any in-thread failure, including asserts
 
-    assert(atomicLoad(done) == 6);
-    assert(atomicLoad(active) == 0);
+    assert(!sharedConn, "two borrows held the same connection at once");
+    assert(completed == workers, "every thread must finish its borrow");
+    assert(active == 0, "every borrow must have been released");
+
+    assert(maxActive <= capacity,
+        "more concurrent borrows than pool capacity");
+    assert(maxActive == capacity,
+        "borrows never overlapped: the pool serialised work it should run " ~
+        "concurrently");
+    assert(seenPids.length <= capacity,
+        "pool opened more connections than its capacity instead of reusing slots");
+
     pool.close();
 }
