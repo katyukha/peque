@@ -565,7 +565,96 @@ alias AppReg = Registry!(Bind!(Partner, ModelRepo!Partner));
 conn.exec(schemaSQL!AppReg());
 ```
 
+`Bind!(M, RepoTpl)` associates a model with a repository *template* — one taking
+a single query-context parameter. `ModelRepo!M` is the ready-made one for models
+needing no custom methods; write your own where they do:
+
+```d
+struct PartnerRepo(Ctx) {
+    private Ctx* _ctx;
+    this(Ctx* ctx) { _ctx = ctx; }
+    mixin CRUDMixin!(Partner, Ctx);
+
+    Partner[] findActive() { return query().where!"active"(true).all(); }
+}
+
+alias AppReg = Registry!(Bind!(Partner, PartnerRepo));
+```
+
+### Getting a repository
+
+peque provides no global session or environment object on purpose. When you know
+the model — which is nearly always — name its repository directly:
+
+```d
+auto partners = PartnerRepo!Connection(&conn);
+auto active   = partners.findActive();
+
+// Inside a transaction, the same repository against a different context:
+conn.transaction((ref Transaction tx) {
+    PartnerRepo!Transaction(&tx).insert(p);
+});
+```
+
+That is the ordinary path, and a registry adds nothing to it. What a registry
+gives you is the *other* direction: code generic over the model, which cannot
+name a repository type because it does not know one yet.
+
+```d
+struct AppEnv {
+    Connection* conn;
+
+    auto repo(M)() {
+        // D cannot chain `!` instantiations, so RegistryRepoFor!(AppReg, M)!Connection
+        // does not parse. Resolve the lookup into an alias first.
+        alias RepoTpl = RegistryRepoFor!(AppReg, M);
+        return RepoTpl!Connection(conn);
+    }
+}
+
+// Worth it when M is a template parameter — a generic CRUD endpoint, an
+// import routine, an admin view — not when you could have written the type.
+void deleteAny(M)(ref AppEnv env, int id) { env.repo!M.deleteById(id); }
+```
+
+The lookup is compile time: a model with no binding is a compile error naming the
+model and the registry, never a runtime null.
+
+The borrowing rule in the next section applies to both forms: a repository — and
+an `AppEnv` holding a `Connection*` — does not own its context and must not
+outlive it.
+
+### Splitting a registry across modules
+
+`MergeRegistries` concatenates registries, so each module can declare the
+bindings for the models it owns and the application assembles the whole:
+
+```d
+// crm/models.d
+alias CrmReg = Registry!(Bind!(Partner, PartnerRepo));
+
+// billing/models.d
+alias BillingReg = Registry!(Bind!(Invoice, ModelRepo!Invoice));
+
+// app.d
+alias AppReg = MergeRegistries!(CrmReg, BillingReg);
+
+conn.exec(schemaSQL!AppReg());   // every table, from both modules
+```
+
+Merging is a plain concatenation and does not check for duplicates. Binding one
+model in two merged registries compiles, and `schemaSQL` then emits its
+`CREATE TABLE` twice; `RegistryRepoFor!(AppReg, M)` is what reports it, as a
+"Duplicate binding" compile error.
+
 ### Repository CRUD
+
+A repository **borrows** its context: it holds a bare `Connection*` (or
+`Transaction*`) and neither owns it nor keeps it alive. Build one where you use
+it rather than storing it in a long-lived object — returning a repository built
+from a local `Connection`, or keeping one past the end of a `transaction()`
+delegate, leaves it pointing at something gone. `query()` passes the same
+borrowed pointer to the QuerySet it returns, so the same limit applies there.
 
 ```d
 auto repo = Repository!(Partner, Connection)(&conn);

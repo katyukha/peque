@@ -53,6 +53,11 @@ template isModel(M) {
   *  - M must satisfy isModel!M.
   *  - Ctx must satisfy isQueryContext!Ctx.
   *
+  * `_ctx` is BORROWED. The host struct does not own the context, does not
+  * extend its lifetime, and must not outlive it — see Repository for what that
+  * rules out. A host that stores its `Ctx*` beyond the context's scope carries
+  * the same bug wherever it is written.
+  *
   * Generated methods:
   *  - findAll()            → M[]
   *  - findById(id)         → Nullable!M
@@ -564,6 +569,32 @@ unittest {
   * For simple cases where you only need standard CRUD and no custom methods,
   * use this directly.  For custom domain queries, define your own struct and
   * use `mixin CRUDMixin!(M, Ctx)` alongside them.
+  *
+  * Must not outlive the context it was built from. A Repository holds a plain
+  * `Ctx*` — it borrows, and nothing here keeps the context alive. Connection is
+  * SafeRefCounted and can keep itself alive; taking its address opts out of
+  * that, so build a repository where you use it rather than storing one:
+  * ---
+  * // WRONG — conn's refcount drops to zero on return, so &conn dangles.
+  * auto makeRepo() {
+  *     auto conn = Connection(...);
+  *     return Repository!(Partner, Connection)(&conn);
+  * }
+  * ---
+  *
+  * The sharper case is Transaction, which isQueryContext accepts. A Transaction
+  * must not outlive its `transaction()` delegate, and a Repository built from
+  * one inherits that limit through the pointer — nothing propagates it for you:
+  * ---
+  * // WRONG — the repository escapes the scope that owns the transaction.
+  * conn.transaction((ref Transaction tx) {
+  *     cached = Repository!(Partner, Transaction)(&tx);
+  * });
+  * cached.findAll();   // tx is gone, and its transaction already committed
+  * ---
+  *
+  * `query()` hands the same borrowed pointer to the QuerySet it returns, so a
+  * QuerySet is bounded by the same scope as the repository that made it.
   *
   * Example:
   * ---

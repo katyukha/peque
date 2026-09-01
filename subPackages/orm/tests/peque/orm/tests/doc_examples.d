@@ -78,6 +78,91 @@ alias DocReg = Registry!(
     Bind!(PartnerWithDefaults, ModelRepo!PartnerWithDefaults),
 );
 
+
+// --- README: "Registry and schema" (custom repository template) -------------
+
+struct PartnerRepo(Ctx) {
+    private Ctx* _ctx;
+    this(Ctx* ctx) { _ctx = ctx; }
+    mixin CRUDMixin!(Partner, Ctx);
+
+    Partner[] findActive() { return query().where!"active"(true).all(); }
+}
+
+
+// --- README: "Getting a repository" -----------------------------------------
+
+alias CrmReg = Registry!(Bind!(Partner, PartnerRepo));
+
+struct AppEnv {
+    Connection* conn;
+
+    auto repo(M)() {
+        // D cannot chain `!` instantiations, so RegistryRepoFor!(CrmReg, M)!Connection
+        // does not parse. Resolve the lookup into an alias first.
+        alias RepoTpl = RegistryRepoFor!(CrmReg, M);
+        return RepoTpl!Connection(conn);
+    }
+}
+
+
+// --- README: "Splitting a registry across modules" --------------------------
+
+// Each "module" declares the bindings for the models it owns...
+// (the README calls this one Invoice; Product stands in here because it has no
+// foreign key, so schemaSQL!MergedReg can run without the other module's tables)
+alias BillingReg = Registry!(Bind!(Product, ModelRepo!Product));
+// ...and the application assembles the whole.
+alias MergedReg  = MergeRegistries!(CrmReg, BillingReg);
+
+
+// Worth it when M is a template parameter — a generic CRUD endpoint, an
+// import routine, an admin view — not when you could have written the type.
+void deleteAny(M)(ref AppEnv env, int id) { env.repo!M.deleteById(id); }
+
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS products`);
+    c.exec(`DROP TABLE IF EXISTS res_partner`);
+
+    // One schema from bindings declared in two places.
+    c.exec(schemaSQL!MergedReg());
+
+    // The lookup resolves through the merge, at compile time.
+    static assert(__traits(isSame, RegistryRepoFor!(MergedReg, Partner), PartnerRepo));
+    static assert(__traits(isSame, RegistryRepoFor!(MergedReg, Product), ModelRepo!Product));
+
+    // The ordinary path: name the repository directly.
+    auto partners = PartnerRepo!Connection(&c);
+
+    auto seed  = Partner(0, "Acme", "acme@example.com", true);
+    auto saved = partners.insert(seed);
+    assert(saved.id > 0);
+
+    auto dormant  = Partner(0, "Dormant", "d@example.com", false);
+    auto dormantS = partners.insert(dormant);
+
+    auto active = partners.findActive();
+    assert(active.length == 1);
+    assert(active[0].name == "Acme");
+
+    // The same repository against a different context.
+    c.transaction((ref Transaction tx) {
+        auto p = Partner(0, "InTx", "tx@example.com", true);
+        PartnerRepo!Transaction(&tx).insert(p);
+    });
+    assert(partners.findAll().length == 3);
+
+    // The registry path: only needed where M is a template parameter.
+    auto env = AppEnv(&c);
+    deleteAny!Partner(env, dormantS.id);
+    assert(partners.findById(dormantS.id).isNull);
+
+    c.exec(`DROP TABLE IF EXISTS products`);
+    c.exec(`DROP TABLE IF EXISTS res_partner`);
+}
+
 private Connection makeConn() {
     return Connection(
         dbname:   environment.get("POSTGRES_DB",       "peque-test"),

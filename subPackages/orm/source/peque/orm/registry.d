@@ -42,6 +42,8 @@ private import peque.orm.repository: isModel, CRUDMixin;
   * Use as the RepoTpl argument of Bind!(M, ModelRepo!M) when you need only
   * standard CRUD operations.  For custom domain queries, define your own
   * single-Ctx-param struct and use that instead.
+  *
+  * Borrows its context exactly as Repository does, and must not outlive it.
   **/
 template ModelRepo(M) if (isModel!M) {
     struct ModelRepo(Ctx) if (isQueryContext!Ctx) {

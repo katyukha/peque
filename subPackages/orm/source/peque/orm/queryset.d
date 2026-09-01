@@ -780,6 +780,10 @@ private struct _QSSet {
   * been added via .joinOne!(fieldName).  The type expands when joinOne! is
   * called, producing a new QuerySet type.
   *
+  * Holds the same borrowed `Ctx*` the repository does, so it must not outlive
+  * the context either — a QuerySet stored past the end of a `transaction()`
+  * delegate points at a transaction that has already committed.
+  *
   * Obtain one from a repository via .query():
   * ---
   * auto rows = repo.query()
