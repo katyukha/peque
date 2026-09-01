@@ -589,6 +589,14 @@ private string _buildIndexSQL(M)() {
         static if (_isColField!F) {
             enum col = _colName!(F, memberName);
             static foreach (uda; __traits(getAttributes, F)) {{
+              // Only an index UDA can produce an index. Without this guard the
+              // ten templates below are instantiated for EVERY attribute on
+              // every column field — @field, @unique, @pgNotNull, @pgDefault —
+              // each parameterised on (uda, table, col), so nothing is shared
+              // between fields and almost all of them return "". The guard is
+              // the same predicate the else-branch uses, so the two agree on
+              // what counts as a field index UDA.
+              static if (_isFieldIndexUDA!uda) {
                 result ~= _tryBuildFieldIndex!(uda, index,       false, "btree", "idx_",  table, col)();
                 names  ~= _fieldIndexName!(uda, index,       "idx_",  table, col)();
                 result ~= _tryBuildFieldIndex!(uda, uniqueIndex, true,  "btree", "uniq_", table, col)();
@@ -599,6 +607,7 @@ private string _buildIndexSQL(M)() {
                 names  ~= _fieldIndexName!(uda, gistIndex,   "gist_", table, col)();
                 result ~= _tryBuildFieldIndex!(uda, hashIndex,   false, "hash",  "hash_", table, col)();
                 names  ~= _fieldIndexName!(uda, hashIndex,   "hash_", table, col)();
+              }
             }}
         } else {
             // Reject rather than ignore: a dropped index UDA would deploy
