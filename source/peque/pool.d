@@ -4,7 +4,8 @@ private import core.sync.semaphore: CoreSemaphore = Semaphore;
 private import core.sync.mutex: Mutex;
 
 private import peque.connection: Connection;
-private import peque.lib.libpq: CONNECTION_OK;
+private import peque.lib.libpq: CONNECTION_OK, PQTRANS_IDLE;
+private import peque.exception: QueryClientError;
 
 
 /** Thin wrapper around core.sync.semaphore.Semaphore that exposes lock()/unlock()
@@ -99,13 +100,15 @@ struct ConnectionPool(Sem, Mtx) {
         scope(exit) _sem.unlock();
 
         immutable idx = _acquireSlot();
-        // Scope guards execute LIFO.  Order: failure-flag → replace → release.
+        // Scope guards execute LIFO.
+        // Order: failure-flag → reclaim → replace → release.
         scope(exit) _releaseSlot(idx);
         bool _connOk = true;
         scope(exit) {
             if (!_connOk || _conns[idx].status != CONNECTION_OK)
                 _replaceBrokenSafe(idx);
         }
+        scope(exit) _reclaimSlot(idx, _connOk);
         // Mark connection suspect whenever fun exits via exception —
         // even when PQstatus still caches CONNECTION_OK (stale TCP socket).
         scope(failure) _connOk = false;
@@ -151,8 +154,47 @@ struct ConnectionPool(Sem, Mtx) {
     }
 
     private void _healthCheck(size_t idx) {
-        if (_conns[idx].status != CONNECTION_OK)
+        if (_conns[idx].status != CONNECTION_OK) {
             _conns[idx] = _factory();
+            return;
+        }
+        // A slot should never arrive dirty — _reclaimSlot cleans it before
+        // release — but reset quietly rather than hand on someone else's
+        // transaction. No caller to blame at this point.
+        if (_hasOpenTransaction(idx) && !_rollbackSafe(idx))
+            _conns[idx] = _factory();
+    }
+
+    /** Roll back a transaction the borrow left open, and do not hide the leak.
+      *
+      * The rollback DISCARDS the borrow's writes, so reporting it matters: a
+      * silent one would lose data with no signal. When fun threw, the
+      * transaction was being abandoned anyway — stay quiet so the caller's
+      * exception propagates unchained. Clearing connOk on a failed rollback
+      * lets the outer guard replace a connection that cannot be cleaned.
+      **/
+    private void _reclaimSlot(size_t idx, ref bool connOk) {
+        if (!_hasOpenTransaction(idx)) return;
+        immutable borrowSucceeded = connOk;
+        if (!_rollbackSafe(idx)) { connOk = false; return; }
+        if (borrowSucceeded)
+            throw new QueryClientError(
+                "A pooled connection was returned with a transaction still " ~
+                "open, so the pool rolled it back — every write it made is " ~
+                "gone. Something in the borrow ran BEGIN without a matching " ~
+                "COMMIT or ROLLBACK; use conn.transaction(), which does both " ~
+                "for you.");
+    }
+
+    private bool _hasOpenTransaction(size_t idx) nothrow {
+        try { return _conns[idx].transactionStatus != PQTRANS_IDLE; }
+        catch (Exception) { return false; }
+    }
+
+    /// False when the rollback could not be sent at all.
+    private bool _rollbackSafe(size_t idx) nothrow {
+        try { _conns[idx].exec("ROLLBACK"); return true; }
+        catch (Exception) { return false; }
     }
 
     // D forbids catch inside scope(exit), so this nothrow wrapper replaces

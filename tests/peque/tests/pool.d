@@ -8,12 +8,14 @@ module peque.tests.pool;
 
 private import std.process: environment;
 private import std.exception: assertThrown, collectException;
+private import std.algorithm.searching: canFind;
 
 private import core.sys.posix.sys.socket: shutdown, SHUT_RDWR;
 
-private import peque.connection: Connection;
+private import peque.connection: Connection, Transaction;
+private import peque.lib.libpq: PQTRANS_IDLE;
 private import peque.pool: ThreadConnectionPool;
-private import peque.exception: QueryError;
+private import peque.exception: QueryError, QueryClientError;
 
 
 private Connection delegate() makeFactory() {
@@ -145,7 +147,7 @@ unittest {
 /** close() must be a safe no-op on a default-constructed (never-connected)
   * Connection — the state a pool slot is in when, under GC ownership, the
   * Connection's own destructor runs before the pool's ~this reaches it.
-  * Regression: previously threw AssertError "uninitialized payload". **/
+  * Touching the SafeRefCounted payload there is an AssertError. **/
 unittest {
     Connection c;      // default-init: SafeRefCounted store is uninitialized
     c.close();         // must not throw
@@ -169,34 +171,148 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// Contention under OS threads: more threads than connections — excess
-// threads block on the semaphore, at most `capacity` borrows run at once,
-// and every thread completes.
+// Contention under OS threads: more threads than connections
 // ---------------------------------------------------------------------------
+
+/** Three properties, none of which the others imply.
+  *
+  * Bounded above — never more concurrent borrows than the pool's capacity.
+  * Bounded below — concurrency actually REACHES the capacity: a pool that
+  * serialised every borrow would satisfy the upper bound while defeating the
+  * point of having one, so the upper bound alone proves very little.
+  * Exclusive — no two threads ever hold the same connection. That is the
+  * invariant `_acquireSlot` guards, and libpq would not necessarily complain
+  * about the violation: two threads on one `PGconn` interleave their protocol
+  * traffic, which surfaces as a corrupt result long after the fact.
+  *
+  * Backend PIDs identify the connections, and their count also shows the slots
+  * are reused rather than reconnected per borrow.
+  *
+  * A violation is RECORDED and asserted after the join, never asserted inside
+  * the borrow: an Error unwinding out of a `synchronized` block on several
+  * threads at once does not release the monitor, so an in-place assert hangs
+  * the suite instead of failing it — which is no guard at all.
+  **/
 unittest {
     import core.thread: Thread;
-    import core.atomic: atomicOp, atomicLoad;
+    import core.sync.mutex: Mutex;
 
-    auto pool = ThreadConnectionPool(2, makeFactory());
-    shared int active = 0;
-    shared int done = 0;
+    enum size_t capacity = 2;
+    enum size_t workers  = 6;
+
+    auto pool = ThreadConnectionPool(capacity, makeFactory());
+    auto mtx  = new Mutex();
+
+    size_t   active, maxActive, completed;
+    bool     sharedConn;   // set if two borrows ever held one connection
+    bool[int] livePids;    // connections borrowed right now
+    bool[int] seenPids;    // every connection this test ever touched
 
     Thread[] threads;
-    foreach (i; 0 .. 6)
+    foreach (i; 0 .. workers)
         threads ~= new Thread({
             pool.borrow((ref Connection c) {
-                immutable now = atomicOp!"+="(active, 1);
-                assert(now <= 2, "more concurrent borrows than pool capacity");
+                immutable pid = c.exec("SELECT pg_backend_pid()").getValue!int(0, 0);
+                synchronized (mtx) {
+                    if (pid in livePids) sharedConn = true;
+                    livePids[pid] = true;
+                    seenPids[pid] = true;
+                    if (++active > maxActive) maxActive = active;
+                }
+                // Held long enough that any thread starting meanwhile overlaps.
                 c.exec("SELECT pg_sleep(0.05)");
-                atomicOp!"-="(active, 1);
+                synchronized (mtx) {
+                    --active;
+                    livePids.remove(pid);
+                }
             });
-            atomicOp!"+="(done, 1);
+            synchronized (mtx) ++completed;
         }).start();
 
     foreach (t; threads)
         t.join();   // rethrows any in-thread failure, including asserts
 
-    assert(atomicLoad(done) == 6);
-    assert(atomicLoad(active) == 0);
+    assert(!sharedConn, "two borrows held the same connection at once");
+    assert(completed == workers, "every thread must finish its borrow");
+    assert(active == 0, "every borrow must have been released");
+
+    assert(maxActive <= capacity,
+        "more concurrent borrows than pool capacity");
+    assert(maxActive == capacity,
+        "borrows never overlapped: the pool serialised work it should run " ~
+        "concurrently");
+    assert(seenPids.length <= capacity,
+        "pool opened more connections than its capacity instead of reusing slots");
+
+    pool.close();
+}
+
+
+// ---------------------------------------------------------------------------
+// A leaked transaction never rides into the next borrower
+// ---------------------------------------------------------------------------
+
+/** A borrow that leaves a transaction open must be rolled back — otherwise the
+  * next borrower inherits it — and since that discards the writes, the leak is
+  * reported rather than swallowed. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+    pool.borrow((ref Connection c) {
+        c.exec(`DROP TABLE IF EXISTS peque_pool_leak`);
+        c.exec(`CREATE TABLE peque_pool_leak (v text)`);
+    });
+
+    auto ex = collectException!QueryClientError(
+        pool.borrow((ref Connection c) {
+            c.exec(`BEGIN`);
+            c.exec(`INSERT INTO peque_pool_leak VALUES ('leaked')`);
+            // returns without COMMIT or ROLLBACK
+        }));
+    assert(ex !is null, "a leaked transaction must be reported, not swallowed");
+    assert(ex.msg.canFind("rolled it back"), ex.msg);
+
+    // The next borrow gets a clean connection, and the leaked write is gone.
+    pool.borrow((ref Connection c) {
+        assert(c.transactionStatus == PQTRANS_IDLE,
+            "the next borrower must not inherit an open transaction");
+        assert(c.exec(`SELECT count(*) FROM peque_pool_leak`).getValue!long(0, 0) == 0);
+        c.exec(`DROP TABLE IF EXISTS peque_pool_leak`);
+    });
+    pool.close();
+}
+
+/// When the borrow itself throws the transaction was being abandoned anyway:
+/// roll back quietly and let the caller's exception through.
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+
+    auto ex = collectException!Exception(
+        pool.borrow((ref Connection c) {
+            c.exec(`BEGIN`);
+            throw new Exception("the caller's own failure");
+        }));
+    assert(ex !is null);
+    assert(ex.msg == "the caller's own failure", ex.msg);
+    // D chains an exception thrown while unwinding onto the in-flight one
+    // rather than replacing it, so .msg alone cannot detect the pool
+    // complaining here — .next is what shows it.
+    assert(ex.next is null,
+        "the pool must stay quiet when the borrow itself threw; got chained: " ~
+        (ex.next is null ? "" : ex.next.msg));
+
+    pool.borrow((ref Connection c) {
+        assert(c.transactionStatus == PQTRANS_IDLE);
+        assert(c.exec(`SELECT 7`).getValue!int(0, 0) == 7);
+    });
+    pool.close();
+}
+
+/// A borrow that closes its own transaction is not a leak — no false positives.
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+    auto n = pool.borrow((ref Connection c) =>
+        c.transaction((ref Transaction tx) => tx.exec(`SELECT 5`).getValue!int(0, 0)));
+    assert(n == 5);
+    pool.borrow((ref Connection c) { assert(c.transactionStatus == PQTRANS_IDLE); });
     pool.close();
 }

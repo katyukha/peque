@@ -1,0 +1,51 @@
+name "orm"
+description "ORM layer for peque — repository, CRUD mixin, QuerySet, compile-time SQL and schema generation (experimental: API may break on a minor version bump)"
+homepage "https://github.com/katyukha/peque"
+authors "Dmytro Katyukha"
+copyright "Copyright © 2023, Dmytro Katyukha"
+license "MPL-2"
+targetType "library"
+
+dependency "peque" path="../.."
+
+configuration "libraryStatic" {
+    libs "pq"
+    versions "PequeStatic"
+    subConfiguration "peque" "libraryStatic"
+}
+
+configuration "libraryDynamic" {
+    dependency "bindbc-loader" version=">=1.1.5"
+    versions "PequeDynamic"
+    subConfiguration "peque" "libraryDynamic"
+}
+
+configuration "sourceLibraryStatic" {
+    targetType "sourceLibrary"
+    libs "pq"
+    versions "PequeStatic"
+    subConfiguration "peque" "sourceLibraryStatic"
+}
+
+configuration "sourceLibraryDynamic" {
+    targetType "sourceLibrary"
+    dependency "bindbc-loader" version=">=1.1.5"
+    versions "PequeDynamic"
+    subConfiguration "peque" "sourceLibraryDynamic"
+}
+
+configuration "unittestStatic" {
+    dflags "-checkaction=context" "-allinst"
+    sourcePaths "tests"
+    libs "pq"
+    versions "PequeStatic"
+    subConfiguration "peque" "libraryStatic"
+}
+
+configuration "unittestDynamic" {
+    dependency "bindbc-loader" version=">=1.1.5"
+    dflags "-checkaction=context" "-allinst"
+    sourcePaths "tests"
+    versions "PequeDynamic"
+    subConfiguration "peque" "libraryDynamic"
+}

@@ -213,8 +213,9 @@ if (is(T == float) || is(T == double) || is(T == real))
         else
             break;
     }
-    enforce!ConversionError(seenDigit,
-        "Invalid floating-point text: " ~ s.idup);
+    if (!seenDigit)
+        throw new ConversionError(
+            "Invalid floating-point text: " ~ s.idup, "text", T.stringof, s.idup);
 
     long expPart = 0;
     if (i < s.length && (s[i] == 'e' || s[i] == 'E')) {
@@ -224,16 +225,19 @@ if (is(T == float) || is(T == double) || is(T == real))
             eneg = s[i] == '-';
             i++;
         }
-        enforce!ConversionError(i < s.length && s[i] >= '0' && s[i] <= '9',
-            "Invalid exponent in floating-point text: " ~ s.idup);
+        if (!(i < s.length && s[i] >= '0' && s[i] <= '9'))
+            throw new ConversionError(
+                "Invalid exponent in floating-point text: " ~ s.idup,
+                "text", T.stringof, s.idup);
         for (; i < s.length && s[i] >= '0' && s[i] <= '9'; i++)
             if (expPart < 10_000_000)   // clamp: magnitude checks below decide
                 expPart = expPart * 10 + (s[i] - '0');
         if (eneg)
             expPart = -expPart;
     }
-    enforce!ConversionError(i == s.length,
-        "Invalid floating-point text: " ~ s.idup);
+    if (i != s.length)
+        throw new ConversionError(
+            "Invalid floating-point text: " ~ s.idup, "text", T.stringof, s.idup);
 
     if (dig.length == 0)                  // ±0 (all digits were zeros)
         return neg ? -T(0) : T(0);
@@ -374,7 +378,8 @@ if (is(T == float) || is(T == double) || is(T == real))
         }
         return neg ? -g : g;
     }
-    throw new ConversionError("Floating-point parse did not converge: " ~ s.idup);
+    throw new ConversionError(
+        "Floating-point parse did not converge: " ~ s.idup, "text", T.stringof, s.idup);
 }
 
 
@@ -505,8 +510,8 @@ unittest {
     assert(parseExactFloat!double("9007199254740995") == 9007199254740996.0);
 
     // more significant digits than the guess mantissa (19) holds — the
-    // extended 38-digit seed must kick in (regression: binary128's 36-digit
-    // spelling of 2/3 overran the verification walk)
+    // extended 38-digit seed must kick in, or binary128's 36-digit spelling
+    // of 2/3 overruns the verification walk
     assert(parseExactFloat!double("0.666666666666666666666666666666666635")
         == 2.0 / 3.0);
     assert(parseExactFloat!double(

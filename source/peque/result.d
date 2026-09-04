@@ -1,7 +1,6 @@
 module peque.result;
 
 private import std.typecons;
-private import std.exception: enforce;
 private import std.format: format;
 private import std.string: toStringz, fromStringz;
 private import std.algorithm: canFind;
@@ -9,6 +8,7 @@ private import std.conv;
 
 private import peque.lib.libpq;
 private import peque.pg_type;
+private import std.exception: enforce;
 private import peque.exception;
 private import peque.converter;
 
@@ -42,11 +42,23 @@ private struct ResultInternalData {
     // Return the column index for name.
     // Delegates to PQfnumber on the first access per distinct name (O(F)),
     // then serves subsequent accesses for that name from the cache (O(1)).
-    // PQfnumber handles identifier case-folding, so this matches its semantics
-    // exactly without any custom lowercasing logic.
+    /** Column index for a name, or -1.
+      *
+      * Two kinds of name reach here and they need different matching, so both
+      * are tried. Model columns are emitted quoted and so keep their exact case
+      * — `@field("MyCol")` really is `MyCol` in the result — and PQfnumber only
+      * matches those when the name it is given is quoted too. Synthetic join
+      * aliases (`__partner_name`) are emitted bare and therefore folded, which
+      * is what an unquoted lookup matches.
+      *
+      * Exact first: a quoted lookup cannot accidentally match a folded column,
+      * whereas the reverse can.
+      **/
     package int _colIdx(in string name) @trusted {
         if (auto p = name in _colCache) return *p;
-        immutable idx = PQfnumber(_pg_result, name.toStringz);
+        auto idx = PQfnumber(_pg_result, ('"' ~ name ~ '"').toStringz);
+        if (idx < 0)
+            idx = PQfnumber(_pg_result, name.toStringz);
         _colCache[name] = idx;
         return idx;
     }
@@ -105,9 +117,10 @@ struct ResultValue {
       * Null values and nullable types are handled in `get` method.
       **/
     private T getImpl(T)() {
-        enforce!ConversionError(
-            getFormat == ColFormat.text,
-            "At the moment, peque supports only deserialization of postgres text types.");
+        if (getFormat != ColFormat.text)
+            throw new ConversionError(
+                "At the moment, peque supports only deserialization of postgres text types.",
+                "binary", T.stringof, "");
 
         scope const char* val = _result.borrow!((auto ref res) @trusted {
             return PQgetvalue(res._pg_result, _row_number, _col_number);
@@ -121,11 +134,12 @@ struct ResultValue {
             if (isNull) return T.init;
             return Nullable!U(getImpl!U);
         } else {
-            enforce!ConversionError(
-                !isNull,
-                "Attempt to call 'get' on NULL value. " ~
-                "Check value via .isNull method before calling get or " ~
-                "expect Nullable type.");
+            if (isNull)
+                throw new ConversionError(
+                    "Attempt to call 'get' on NULL value. " ~
+                    "Check value via .isNull method before calling get or " ~
+                    "expect Nullable type.",
+                    "NULL", T.stringof, "");
             return getImpl!T;
         }
     }
@@ -162,18 +176,28 @@ struct ResultRow {
     }
 
     auto opIndex(in int col_number) {
-        enforce!ColNotExistsError(
-            col_number >= 0 && col_number < nfields,
-            "Column %s does not exists in result!".format(col_number));
+        enforce(col_number >= 0 && col_number < nfields,
+            new ColNotExistsError(col_number, nfields));
         return ResultValue(_result, _row_number, col_number);
     }
 
     auto opIndex(in string col_name) {
         int col_number = _fieldIndex(col_name);
-        enforce!ColNotExistsError(
-            col_number >= 0,
-            "Column %s does not exists in result!".format(col_name));
+        // The exception argument is lazy, so _fieldNames() only runs on failure.
+        enforce(col_number >= 0,
+            new ColNotExistsError(col_name, nfields, _fieldNames()));
         return ResultValue(_result, _row_number, col_number);
+    }
+
+    // Names of the columns this result actually has — attached to
+    // ColNotExistsError so a caller can report or match on them instead of
+    // re-querying or parsing the message.
+    private string[] _fieldNames() @trusted {
+        string[] names;
+        immutable n = nfields;
+        foreach (i; 0 .. n)
+            names ~= PQfname(_result._pg_result, i).fromStringz.idup;
+        return names;
     }
 
     /** Return the column index for the given name, or -1 if not found.
@@ -186,13 +210,28 @@ struct ResultRow {
             return res._colIdx(name);
         });
     }
+
+    /** Hydrate this row into a struct T.
+      *
+      * Dispatches through the hydration chain in peque.hydration.hydrateRow:
+      *   1. T has this(ref ResultRow)              → user constructor
+      *   2. T has static T fromRow(ref ResultRow)  → user factory
+      *   3. @model on T                            → map @field/@primaryKey fields
+      *   4. @autoHydrate on T                      → map all fields by convention
+      *   5. None of the above                      → compile-time error
+      *
+      * See also: Result.as!(T[]) to hydrate all rows at once.
+      **/
+    T as(T)() if (is(T == struct)) {
+        import peque.hydration: hydrateRow;
+        return hydrateRow!T(this);
+    }
 }
 
 /** This struct represents result of query and allows to fetch data received
   * from postgresql
   **/
 struct Result {
-    // TODO: Add ability to return number of affected rows
     private ResultInternal _result;
 
     // Current row index. Used for Range api.
@@ -226,15 +265,74 @@ struct Result {
         return PQresultErrorMessage(_result._pg_result).fromStringz.idup;
     }
 
+    // Read one diagnostic field, or "" when the server did not supply it.
+    private string _errField(int code) @trusted {
+        auto p = PQresultErrorField(_result._pg_result, code);
+        return p is null ? "" : p.fromStringz.idup;
+    }
+
+    /** Build the exception for a failed result.
+      *
+      * Diagnostics are copied onto the exception here: the PGresult is
+      * refcounted and cleared as the stack unwinds, so a catch block could
+      * never read them.
+      *
+      * The type comes from the SQLSTATE class (first two chars), not the full
+      * code — PostgreSQL adds codes but rarely classes, so an unrecognised
+      * class-23 code is still an IntegrityError.
+      **/
+    private QueryServerError _buildServerError() @trusted {
+        immutable msg   = errorMessage;
+        immutable state = _errField(PG_DIAG_SQLSTATE);
+        immutable cls   = state.length >= 2 ? state[0 .. 2] : "";
+
+        QueryServerError e;
+        if (cls == "23") {
+            auto ie = new IntegrityError(msg);
+            switch (state) {
+                case "23502": ie.kind = IntegrityKind.notNull;    break;
+                case "23503": ie.kind = IntegrityKind.foreignKey; break;
+                case "23505": ie.kind = IntegrityKind.unique;     break;
+                case "23514": ie.kind = IntegrityKind.check;      break;
+                case "23P01": ie.kind = IntegrityKind.exclusion;  break;
+                case "23001": ie.kind = IntegrityKind.restrict;   break;
+                default:      ie.kind = IntegrityKind.other;      break;
+            }
+            e = ie;
+        } else if (cls == "40") {
+            e = new SerializationError(msg);
+        } else {
+            e = new QueryServerError(msg);
+        }
+
+        e.sqlstate         = state;
+        e.constraintName   = _errField(PG_DIAG_CONSTRAINT_NAME);
+        e.columnName       = _errField(PG_DIAG_COLUMN_NAME);
+        e.tableName        = _errField(PG_DIAG_TABLE_NAME);
+        e.schemaName       = _errField(PG_DIAG_SCHEMA_NAME);
+        e.datatypeName     = _errField(PG_DIAG_DATATYPE_NAME);
+        e.messagePrimary   = _errField(PG_DIAG_MESSAGE_PRIMARY);
+        e.messageDetail    = _errField(PG_DIAG_MESSAGE_DETAIL);
+        e.messageHint      = _errField(PG_DIAG_MESSAGE_HINT);
+        e.statementPosition = _errField(PG_DIAG_STATEMENT_POSITION);
+        return e;
+    }
+
     /// Ensure that result is Ok
     auto ensureQueryOk() {
+        // An empty (or comment-only) statement is a caller mistake, and carries
+        // no SQLSTATE — routing it to QueryServerError would leave `sqlstate`
+        // empty, contradicting that type's contract.
+        if (status.statusType == PGRES_EMPTY_QUERY)
+            throw new QueryClientError(
+                "Empty query: the statement contained no SQL.");
+
         static immutable bad_states = [
             PGRES_FATAL_ERROR,
             PGRES_BAD_RESPONSE,
-            PGRES_EMPTY_QUERY,
         ];
         if (bad_states.canFind(status.statusType))
-            throw new QueryError(errorMessage);
+            throw _buildServerError();
 
         // Use an explicit named copy rather than `return this` to avoid a
         // DMD optimization bug where returning `this` directly from a method
@@ -286,13 +384,11 @@ struct Result {
       *
       **/
     auto getValue(in int row_number, in int col_number) {
-        enforce!RowNotExistsError(
-            row_number >= 0 && row_number < ntuples,
-            "Row %s does not exists in result!".format(row_number));
-        // fix: check column index against number of fields, not number of tuples
-        enforce!ColNotExistsError(
-            col_number >= 0 && col_number < nfields(),
-            "Column %s does not exists in result!".format(col_number));
+        enforce(row_number >= 0 && row_number < ntuples,
+            new RowNotExistsError(row_number, ntuples));
+        // column index is checked against the field count, not the tuple count
+        enforce(col_number >= 0 && col_number < nfields(),
+            new ColNotExistsError(col_number, nfields()));
         return ResultValue(_result, row_number, col_number);
     }
 
@@ -307,9 +403,8 @@ struct Result {
       *     row_number = number of row to get
       **/
     auto getRow(in int row_number) {
-        enforce!RowNotExistsError(
-            row_number >= 0 && row_number < ntuples,
-            "Row %s does not exists in result!".format(row_number));
+        enforce(row_number >= 0 && row_number < ntuples,
+            new RowNotExistsError(row_number, ntuples));
         return ResultRow(_result, row_number);
     }
 
@@ -325,7 +420,35 @@ struct Result {
         return getValue(row_number, col_number);
     }
 
-    /** Check if result is empty (or consumed by foreach loop)
+    /** Hydrate all rows into a D array.
+     *
+     * T must be a slice of structs (e.g. Partner[]). Each element is hydrated
+     * via ResultRow.as!ElemType using the same dispatch chain as the single-row
+     * method.
+     *
+     * Example:
+     * ---
+     * auto partners = conn.exec("SELECT id, name FROM res_partner")
+     *                     .as!(Partner[]);
+     * ---
+     **/
+    T as(T)() if (is(T == E[], E)) {
+        // typeof(T.init[0]), not std.range.ElementType: the latter auto-decodes,
+        // so as!string would report dchar and fail deep inside ResultRow.as
+        // instead of at the static assert below.
+        alias Elem = typeof(T.init[0]);
+        static assert(is(Elem == struct),
+            "Result.as!(" ~ T.stringof ~ ") needs a struct element type, got " ~
+            Elem.stringof ~ ". Rows hydrate into structs; to read a single " ~
+            "value use result[row][col].get!T instead.");
+        T results;
+        results.length = ntuples;
+        foreach (i; 0 .. ntuples)
+            results[i] = getRow(i).as!Elem;
+        return results;
+    }
+
+   /** Check if result is empty (or consumed by foreach loop)
       *
       * Returns True for both cases: if result was originally empty
       * or if result was consumed via range API

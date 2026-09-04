@@ -211,7 +211,7 @@ unittest {
         password: environment.get("POSTGRES_PASSWORD", "peque"),
         host:     environment.get("POSTGRES_HOST",     "localhost"),
         port:     environment.get("POSTGRES_PORT",     "5432"),
-        NoTimeoutWS(),
+        ws: NoTimeoutWS(),
     );
 
     // Ordinary queries work fine without the timed overload…
@@ -237,7 +237,7 @@ unittest {
         password: environment.get("POSTGRES_PASSWORD", "peque"),
         host:     environment.get("POSTGRES_HOST",     "localhost"),
         port:     environment.get("POSTGRES_PORT",     "5432"),
-        MockWS(&mock),
+        ws: MockWS(&mock),
     );
 
     // timedResult=false simulates an immediate timeout: the timed slot is

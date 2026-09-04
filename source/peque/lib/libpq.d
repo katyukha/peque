@@ -34,6 +34,19 @@ enum
 };
 alias int ConnStatusType;
 
+// PGTransactionStatusType — the connection's transaction state.
+// INTRANS/INERROR both mean a transaction block is open; INERROR additionally
+// means it has already failed and only ROLLBACK is accepted.
+enum
+{
+    PQTRANS_IDLE = 0,      // connection idle, no transaction open
+    PQTRANS_ACTIVE = 1,    // a command is in progress
+    PQTRANS_INTRANS = 2,   // idle, inside a valid transaction block
+    PQTRANS_INERROR = 3,   // idle, inside a FAILED transaction block
+    PQTRANS_UNKNOWN = 4    // cannot determine (bad connection)
+}
+alias int PGTransactionStatusType;
+
 // ExecStatusType
 enum
 {
@@ -49,6 +62,33 @@ enum
     PGRES_SINGLE_TUPLE = 9
 }
 alias int ExecStatusType;
+
+/** Field codes for PQresultErrorField, from postgres_ext.h.
+  *
+  * All of them are bound, not only the ones peque currently reads: they are
+  * single-character codes and adding the rest later would be pure churn.
+  *
+  * PG_DIAG_SEVERITY_NONLOCALIZED requires PostgreSQL 9.6+; on older servers
+  * PQresultErrorField simply returns null for it.
+  **/
+enum PG_DIAG_SEVERITY              = 'S';
+enum PG_DIAG_SEVERITY_NONLOCALIZED = 'V';
+enum PG_DIAG_SQLSTATE              = 'C';
+enum PG_DIAG_MESSAGE_PRIMARY       = 'M';
+enum PG_DIAG_MESSAGE_DETAIL        = 'D';
+enum PG_DIAG_MESSAGE_HINT          = 'H';
+enum PG_DIAG_STATEMENT_POSITION    = 'P';
+enum PG_DIAG_INTERNAL_POSITION     = 'p';
+enum PG_DIAG_INTERNAL_QUERY        = 'q';
+enum PG_DIAG_CONTEXT               = 'W';
+enum PG_DIAG_SCHEMA_NAME           = 's';
+enum PG_DIAG_TABLE_NAME            = 't';
+enum PG_DIAG_COLUMN_NAME           = 'c';
+enum PG_DIAG_DATATYPE_NAME         = 'd';
+enum PG_DIAG_CONSTRAINT_NAME       = 'n';
+enum PG_DIAG_SOURCE_FILE           = 'F';
+enum PG_DIAG_SOURCE_LINE           = 'L';
+enum PG_DIAG_SOURCE_FUNCTION       = 'R';
 
 struct pg_conn;
 struct pg_result;
@@ -84,6 +124,7 @@ mixin(joinFnBinds!staticBinding((){
         {q{void}, q{PQfinish}, q{PGconn* conn}},
 
         {q{ConnStatusType}, q{PQstatus}, q{const(PGconn)* conn}},
+        {q{PGTransactionStatusType}, q{PQtransactionStatus}, q{const(PGconn)* conn}},
         {q{int}, q{PQserverVersion}, q{const(PGconn)* conn}},
 
         {q{PGresult*}, q{PQexec}, q{PGconn* conn, const(char)* query}},
@@ -93,6 +134,7 @@ mixin(joinFnBinds!staticBinding((){
         {q{ExecStatusType}, q{PQresultStatus}, q{const(PGresult)* res}},
         {q{char*}, q{PQresStatus}, q{ExecStatusType status}},
         {q{char*}, q{PQresultErrorMessage}, q{const(PGresult)* res}},
+        {q{char*}, q{PQresultErrorField}, q{const(PGresult)* res, int fieldcode}},
 
         {q{int}, q{PQntuples}, q{const(PGresult)* res}},
         {q{int}, q{PQnfields}, q{const(PGresult)* res}},

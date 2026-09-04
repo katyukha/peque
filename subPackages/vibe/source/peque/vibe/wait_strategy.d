@@ -5,7 +5,7 @@
   * inside a vibe.d application:
   *
   * ---
-  * auto conn = Connection(params, VibeWaitStrategy());
+  * auto conn = Connection(params, ws: VibeWaitStrategy());
   * ---
   *
   * Or let makeVibePool inject it automatically (recommended).

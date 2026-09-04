@@ -8,10 +8,10 @@ private import std.algorithm;
 private import std.json: JSONValue;
 private import std.uuid: UUID;
 private import std.traits:
-    isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray;
+    isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint, isArray,
+    Unqual;
 private import std.range: ElementType;
 private import std.typecons: Nullable;
-private import std.exception: enforce;
 
 private import peque.pg_type;
 private import peque.pg_format;
@@ -31,9 +31,10 @@ private import peque.exception: ConversionError;
              "PGValue value must be null-terminated!");
         // Data-driven (huge user value), so a runtime enforce rather than an
         // assert: length() casts to int for the libpq call.
-        enforce!ConversionError(
-            is_null || value.length < int.max,
-             "Too large value length for PGValue!");
+        if (!(is_null || value.length < int.max))
+            throw new ConversionError(
+                "Too large value length for PGValue!",
+                "char[]", type.to!string, "");
         this.type = type;
         this.format = format;
         this.value = value;
@@ -54,14 +55,41 @@ private import peque.exception: ConversionError;
   **/
 PGValue convertToPG(T) (in T value)
 @safe pure if (isSomeString!T) {
-    // libpq receives text-format params as C strings — an embedded NUL would
-    // silently truncate the value. Must be a runtime enforce, not a
-    // contract/assert: the guard has to survive -release builds.
-    enforce!ConversionError(
-        !value.canFind('\0'),
-        "String value cannot contain null (\\0) characters!");
-    return PGValue(PGType.TEXT, PGFormat.TEXT, value.to!(char[]) ~ "\0");
+    import std.exception: enforce;
+    import std.string: indexOf;
+
+    // std.string.indexOf, not countUntil: it scans code units without decoding,
+    // so it is cheaper on this hot path (every string parameter passes through
+    // here), reports an index consistent with value.length, and keeps the NUL
+    // check independent of whether the string is valid UTF.
+    //
+    // libpq takes text-format params as C strings, so an embedded NUL would
+    // silently truncate the value. A runtime check, not a contract/assert: the
+    // guard has to survive -release builds.
+    //
+    // The value itself is never attached to the error — only where the NUL is.
+    // convertToPG runs on every string parameter, so echoing it would put
+    // passwords and other secrets into an exception that usually reaches a log.
+    immutable nulAt = value.indexOf('\0');
+    enforce(nulAt < 0, new ConversionError(
+        format!("String value cannot contain null (\\0) characters " ~
+                "(found at index %d of %d)")(nulAt, value.length),
+        T.stringof, "text"));
+
+    // Transcoding validates UTF, so a wstring/dstring holding a lone surrogate
+    // raises std.utf's UnicodeException. Translate it: everything peque throws
+    // must derive from PequeException.
+    //
+    // A narrow string needs no transcoding and so is not validated here — that
+    // would cost a full UTF-8 scan of every string parameter. PostgreSQL
+    // rejects invalid bytes itself with SQLSTATE 22021.
+    try
+        return PGValue(PGType.TEXT, PGFormat.TEXT, value.to!(char[]) ~ "\0");
+    catch (Exception e)
+        throw new ConversionError(
+            "String value is not valid UTF: " ~ e.msg, T.stringof, "text", "", e);
 }
+
 
 /// ditto
 PGValue convertToPG(T) (in T value)
@@ -136,33 +164,64 @@ PGValue convertToPG(T) (in T value)
     );
 }
 
+/** PostgreSQL's spelling of a D ISO-extended date/timestamp.
+  *
+  * Only the year is rewritten; the rest of D's output parses as-is. The two
+  * disagree at both ends of the range:
+  *
+  *  - D numbers years astronomically and writes `-0001-06-15`; PostgreSQL has
+  *    no negative years — it counts BC from 1 and wants `0002-06-15 BC`.
+  *  - Past 9999 D writes a leading `+`, which PostgreSQL reads as the start of
+  *    a UTC offset ("time zone displacement out of range").
+  **/
+private char[] _pgCalendarText(scope const(char)[] iso, in int year) @safe pure {
+    // The year runs to the first '-' that is not its own sign.
+    size_t i = (iso.length > 0 && (iso[0] == '-' || iso[0] == '+')) ? 1 : 0;
+    while (i < iso.length && iso[i] != '-') ++i;
+    auto rest = iso[i .. $];        // "-MM-DD[T…]"
+
+    if (year > 0)
+        return (format!"%04d"(year) ~ rest).to!(char[]);
+    return (format!"%04d"(1 - year) ~ rest ~ " BC").to!(char[]);
+}
+
+
 /// ditto
 PGValue convertToPG(T) (in T value)
-@safe pure if (is(T == Date)) {
-    auto s = value.toISOExtString;
-    return PGValue(PGType.DATE, PGFormat.TEXT, (s.to!(char[]) ~ '\0'));
+@safe pure if (is(Unqual!T == Date)) {
+    return PGValue(PGType.DATE, PGFormat.TEXT,
+                   _pgCalendarText(value.toISOExtString, value.year) ~ '\0');
 }
 
 /// ditto
 PGValue convertToPG(T) (in T value)
-@safe pure if (is(T == DateTime)) {
-    auto s = value.toISOExtString;
-    return PGValue(PGType.TIMESTAMP, PGFormat.TEXT, (s.to!(char[]) ~ '\0'));
+@safe pure if (is(Unqual!T == DateTime)) {
+    return PGValue(PGType.TIMESTAMP, PGFormat.TEXT,
+                   _pgCalendarText(value.toISOExtString, value.year) ~ '\0');
 }
 
-/// ditto
+/** ditto
+  *
+  * Normalised to UTC first, so the value means the same thing on every server.
+  * Without it a `SysTime` in `LocalTime()` — what `Clock.currTime` returns —
+  * renders with no UTC offset at all, and PostgreSQL reads the naked wall clock
+  * in the session TimeZone. Nothing is lost by sending UTC: timestamptz stores
+  * an instant and discards the input offset anyway.
+  **/
 PGValue convertToPG(T) (in T value)
-@safe if (is(T == SysTime)) {
+@safe if (is(Unqual!T == SysTime)) {
+    // The year must come from the UTC value: converting can cross a boundary.
+    auto utc = value.toUTC;
     return PGValue(
         PGType.TIMESTAMPTZ,
         PGFormat.TEXT,
-        (value.to!(char[]) ~ '\0'),
+        _pgCalendarText(utc.toISOExtString, utc.year) ~ '\0',
     );
 }
 
 /// ditto
 PGValue convertToPG(T)(in T value)
-@safe if (is(T == JSONValue)) {
+@safe if (is(Unqual!T == JSONValue)) {
     auto s = value.toString();
     return PGValue(
         PGType.JSONB,
@@ -189,7 +248,8 @@ PGValue convertToPG(T) (in T value)
      */
     char[] result = ['{'];
     static if ((isIntegral!TI || isFloatingPoint!TI || isBoolean!TI ||
-                is(TI == Date) || is(TI == DateTime) || is(TI == SysTime)) ||
+                is(Unqual!TI == Date) || is(Unqual!TI == DateTime) ||
+                is(Unqual!TI == SysTime)) ||
                (isArray!TI && !isSomeString!TI)) {
         // No quoting needed — numeric, boolean, date, or nested array types
         result ~= value.map!((v) => convertToPG(v).value[0 .. $-1]).join(",");
@@ -228,15 +288,15 @@ PGValue convertToPG(T) (in T value)
 
 /// ditto
 PGValue convertToPG(T)(in T value)
-@safe pure if (is(T == UUID)) {
+@safe pure if (is(Unqual!T == UUID)) {
     return PGValue(PGType.UUID, PGFormat.TEXT, value.toString().to!(char[]) ~ '\0');
 }
 
 /// ditto — Nullable: sends SQL NULL when empty, delegates to inner type when set
 PGValue convertToPG(T)(in T value)
-@safe if (is(T == Nullable!U, U)) {
+@safe if (is(Unqual!T == Nullable!U, U)) {
     // Re-bind U inside the function body; the constraint's alias is not in scope here.
-    static if (is(T == Nullable!Inner, Inner)) {
+    static if (is(Unqual!T == Nullable!Inner, Inner)) {
         if (value.isNull)
             return PGValue(convertToPG!Inner(Inner.init).type, PGFormat.TEXT, value: null, is_null: true);
         return convertToPG!Inner(value.get);
@@ -246,11 +306,57 @@ PGValue convertToPG(T)(in T value)
 }
 
 
-// Test that conversion of string with null is not allowed
-// (must throw ConversionError — a catchable exception that survives -release)
+// String parameters: embedded NUL, invalid UTF, and what the error may reveal.
 unittest {
-    import std.exception: assertThrown;
+    import std.exception: assertThrown, collectException;
+    import std.algorithm.searching: canFind;
+
+    // An embedded NUL is rejected for every string width — libpq would
+    // otherwise silently truncate the value at that byte.
     convertToPG("t1\0; H").assertThrown!ConversionError;
+    convertToPG("t1\0; H"w).assertThrown!ConversionError;
+    convertToPG("t1\0; H"d).assertThrown!ConversionError;
+
+    // The reported index counts code units, so it lines up with .length rather
+    // than with decoded characters (indexOf, not countUntil).
+    enum multibyte = "héllo\0x";          // 'é' occupies two bytes
+    auto nul = collectException!ConversionError(convertToPG(multibyte));
+    assert(nul !is null);
+    assert(nul.msg.canFind("index 6 of 8"), nul.msg);
+
+    // The value never appears in the error: convertToPG runs on every string
+    // parameter, so echoing it would leak secrets into logs.
+    auto secret = collectException!ConversionError(convertToPG("hunter2\0pw"));
+    assert(secret !is null);
+    assert(secret.value == "");
+    assert(!secret.msg.canFind("hunter2"), secret.msg);
+
+    // A lone surrogate is invalid UTF; transcoding raises std.utf's
+    // UnicodeException, which must not escape peque's hierarchy.
+    wstring loneSurrogate = cast(wstring)[cast(wchar)0xD800, 'A'];
+    auto utf = collectException!ConversionError(convertToPG(loneSurrogate));
+    assert(utf !is null, "invalid UTF must raise ConversionError");
+    assert(utf.msg.canFind("not valid UTF"), utf.msg);
+    assert(utf.value == "", "an invalid parameter must not be echoed either");
+    assert(utf.next !is null, "the original UnicodeException must be chained");
+
+    // A dstring holding an invalid code point is rejected the same way.
+    dstring badCodePoint = cast(dstring)[cast(dchar)0x110000];
+    assertThrown!ConversionError(convertToPG(badCodePoint));
+
+    // A narrow string is NOT validated here: string -> char[] needs no
+    // transcoding, so checking it would mean a full UTF-8 scan of every string
+    // parameter for something PostgreSQL already rejects precisely (SQLSTATE
+    // 22021, "invalid byte sequence for encoding UTF8"). Only wstring/dstring,
+    // which must be transcoded anyway, are validated client-side.
+    string invalidUtf8 = cast(string)[cast(char)0xFF, cast(char)0xFE];
+    assert(convertToPG(invalidUtf8).value.length == 3);   // passed through
+
+    // Valid values of every width still convert.
+    assert(convertToPG("ok").value == "ok\0");
+    assert(convertToPG("ok"w).value == "ok\0");
+    assert(convertToPG("ok"d).value == "ok\0");
+    assert(convertToPG("héllo").value == "héllo\0");
 }
 
 // Test that numeric params are declared with native OIDs — a NUMERIC-typed
@@ -271,8 +377,9 @@ unittest {
     assert(convertToPG([1.0, 2.0]).type == PGType._FLOAT8);
 }
 
-// Test that float serialization is round-trip exact for tiny and precise
-// magnitudes (fixed-point "%.20f" used to zero anything below ~5e-21).
+// Float serialization must be round-trip exact for tiny and precise
+// magnitudes. Fixed-point formatting cannot do this: "%.20f" zeroes anything
+// below ~5e-21.
 unittest {
     import std.math: nextUp;
 
@@ -284,8 +391,8 @@ unittest {
     // lexer rejects the 4.9e-324 literal as "not representable"
     immutable minSub = nextUp(0.0);
 
-    // The %.20f regression: tiny magnitudes must switch to scientific
-    // notation instead of flushing to zeros.
+    // Tiny magnitudes must switch to scientific notation rather than flush
+    // to a row of zeros.
     assert(pgText(1.5e-25).canFind('e'));
     assert(pgText(-minSub).canFind('e'));
 

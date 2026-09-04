@@ -1,6 +1,8 @@
 name "peque"
 subPackage "subPackages/vibe"
-description "Light postgresql binding to libpq"
+subPackage "subPackages/orm"
+subPackage "subPackages/migrate"
+description "PostgreSQL client for D: a lightweight libpq binding, with an optional compile-time ORM, migration runner and vibe.d integration"
 homepage "https://github.com/katyukha/peque"
 authors "Dmytro Katyukha"
 copyright "Copyright © 2023, Dmytro Katyukha"
@@ -9,7 +11,7 @@ target "library"
 
 /* dflags "-preview=dip1000" */
 
-dependency "versioned" version=">=0.1.0"
+dependency "versioned" version=">=0.1.1"
 dependency "bindbc-common" version=">=1.0.5"
 
 

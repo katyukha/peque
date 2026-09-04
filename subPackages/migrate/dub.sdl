@@ -1,0 +1,58 @@
+name "migrate"
+description "Database migration runner for peque — compile-time D-based migrations (experimental: API may break on a minor version bump)"
+homepage "https://github.com/katyukha/peque"
+authors "Dmytro Katyukha"
+copyright "Copyright © 2023, Dmytro Katyukha"
+license "MPL-2"
+targetType "library"
+
+dependency "peque" path="../.."
+dependency "peque:orm" path="../.."
+
+configuration "libraryStatic" {
+    libs "pq"
+    versions "PequeStatic"
+    subConfiguration "peque" "libraryStatic"
+    subConfiguration "peque:orm" "libraryStatic"
+}
+
+configuration "libraryDynamic" {
+    dependency "bindbc-loader" version=">=1.1.5"
+    versions "PequeDynamic"
+    subConfiguration "peque" "libraryDynamic"
+    subConfiguration "peque:orm" "libraryDynamic"
+}
+
+configuration "sourceLibraryStatic" {
+    targetType "sourceLibrary"
+    libs "pq"
+    versions "PequeStatic"
+    subConfiguration "peque" "sourceLibraryStatic"
+    subConfiguration "peque:orm" "sourceLibraryStatic"
+}
+
+configuration "sourceLibraryDynamic" {
+    targetType "sourceLibrary"
+    dependency "bindbc-loader" version=">=1.1.5"
+    versions "PequeDynamic"
+    subConfiguration "peque" "sourceLibraryDynamic"
+    subConfiguration "peque:orm" "sourceLibraryDynamic"
+}
+
+configuration "unittestStatic" {
+    dflags "-checkaction=context" "-allinst"
+    sourcePaths "tests"
+    libs "pq"
+    versions "PequeStatic"
+    subConfiguration "peque" "libraryStatic"
+    subConfiguration "peque:orm" "libraryStatic"
+}
+
+configuration "unittestDynamic" {
+    dependency "bindbc-loader" version=">=1.1.5"
+    dflags "-checkaction=context" "-allinst"
+    sourcePaths "tests"
+    versions "PequeDynamic"
+    subConfiguration "peque" "libraryDynamic"
+    subConfiguration "peque:orm" "libraryDynamic"
+}

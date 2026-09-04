@@ -4,6 +4,167 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`peque:orm`** — compile-time ORM: model registry, schema generation,
+  QuerySets and CRUD. `select!DTO` projects into a flat struct whose members are
+  columns on the queried table; `@field(related: "partner.name")` projects a
+  value reached through a relation, sharing its `LEFT JOIN` with
+  `where`/`orderBy`/`load!`. Relation paths and the field names in
+  `@uniqueTogether` / `@indexTogether` / `@uniqueIndexTogether` are validated at
+  compile time. **Experimental** — the API may break on a minor version bump.
+- **`peque:migrate`** — file-based migration runner with rollback and opt-in
+  checksum pinning. **Experimental**, on the same terms.
+- **Struct hydration** in the core package, usable without `peque:orm`:
+  `ResultRow.as!T` / `Result.as!(T[])`, with a documented dispatch chain (user
+  constructor, `fromRow` factory, `@model` strict mapping, annotated-fields
+  mapping, `@autoHydrate` convention mapping). Column names come from one
+  resolver shared by DDL, CRUD, QuerySet and hydration: `camelToSnake` of the D
+  member name with runs of capitals kept whole (`myURL` is `my_url`), or
+  `@field("col")` for an exact name. Table names are never derived — `@model`
+  always takes the name, so renaming a struct cannot rename a table.
+- **`timezone` on `Connection`** — pins the session `TimeZone` at connect via
+  `set_config()`, so an unknown zone fails the connection. It is its own
+  argument on every constructor rather than a key in the libpq `string[string]`
+  map, and `makeVibePool` / `connectViaEnvParams` forward it. It governs only
+  what the *server* renders; values peque sends and reads are
+  session-independent regardless.
+
+  **Breaking**: `timezone` precedes `ws`, so a `WaitStrategy` passed as the
+  sixth positional argument must now be named — `ws: myStrategy`.
+- **`groupByRaw!("name", "SQL expr")`** on `QuerySet` / `GroupedQuerySet` — an
+  expression as a GROUP BY key, emitted into both `GROUP BY` and the SELECT
+  list, which `annotate!` alone cannot do. Embedded verbatim, so trusted
+  literals only. `groupBy!` now also works on `GroupedQuerySet`, so column and
+  expression keys compose in either order.
+- **`select!DTO` rejects a partly-annotated DTO** — without `@autoHydrate` the
+  unannotated members were SELECTed and then left at `.init`. Now a compile
+  error: annotate every member, or add `@autoHydrate`.
+- **`@pgType` may not contradict the D type about time zones** —
+  `@pgType("TIMESTAMPTZ") DateTime` and the like are now a `static assert`. The
+  cast would run in the session `TimeZone`, storing a server-dependent instant.
+
+### Changed
+
+- **Temporal conversions no longer guess a time zone** (breaking). One rule
+  covers all of them: peque returns what the value contains, possibly less, but
+  never more. `timestamp` → `Date` still drops the time, while `timestamptz` →
+  `DateTime`/`Date` and `timestamp` → `SysTime` now throw `ConversionError`
+  naming the fix. Each was previously a silently different answer per server.
+  The check follows the value's rendering rather than its OID, so array elements
+  are covered too.
+- **Every `SysTime` is returned in UTC.** The attached zone used to follow two
+  rules, so two rows of one result set could print in different zones. Render
+  with `.toLocalTime()` / `.toOtherTZ(tz)`; instants and comparisons are
+  unaffected.
+- **Exception tree redesigned** (breaking). Everything peque throws derives from
+  `PequeException`, so a single `catch` covers the library. New types:
+  `QueryClientError` and `QueryServerError` under `QueryError`; `IntegrityError`
+  (SQLSTATE class 23, with an `IntegrityKind`) and `SerializationError`
+  (class 40) under that; `NotSupportedError`; `LibpqLoadError`; and
+  `ResultError` grouping `RowNotExistsError` and `ColNotExistsError`.
+  `QueryEscapingError` moved under `QueryClientError`.
+
+  Reclassified: libpq transport failures (`PQsendQuery`, `PQflush`,
+  `PQconsumeInput`, `poll()`) raise `ConnectionError` — the link is broken, not
+  the statement. COPY TO/FROM STDOUT, nested `exists!()` and `waitNotifications`
+  without a timed `WaitStrategy` raise `NotSupportedError`.
+
+  Exceptions now carry structured fields rather than only a message:
+  `QueryServerError` has `sqlstate`, the backend diagnostics and
+  `isRetriable()`; `ConversionError` has the source and target types and the
+  offending value; the result errors carry the index or name, the result size
+  and the columns that were available.
+- **A dynamic build that cannot load `libpq` throws `LibpqLoadError`** instead
+  of tripping `assert(0)`, which halted with no message under `-release`. It is
+  a sibling of `ConnectionError`, not a subclass: no connection can succeed in
+  the process, so retrying is pointless.
+- **Conversion failures no longer escape peque's hierarchy** (breaking).
+  `std.conv.ConvException`, `core.time.TimeException`, `std.json.JSONException`
+  and `std.uuid.UUIDParsingException` used to propagate out of value conversion,
+  so `catch (PequeException)` missed malformed text for most of the type table.
+  All are now translated to `ConversionError`, preserving the original message —
+  including `get!byte` on an out-of-range value, previously
+  `ConvOverflowException`.
+- `ConversionError` now reports `sourceType`, `targetType` and the offending
+  `value` at every throw site, in both directions.
+- The exception types are now re-exported from `peque` and `peque.orm`;
+  `catch (QueryError)` after `import peque;` was previously an undefined
+  identifier.
+
+### Fixed
+
+- **A nested `transaction()` silently committed the OUTER transaction** (breaking
+  — it now throws `QueryClientError`). PostgreSQL ignores a nested `BEGIN`, so
+  the inner `COMMIT` committed the enclosing transaction and the outer rollback
+  did nothing: work the caller believed was rolled back was committed instead.
+  The check reads libpq's protocol state, so it also catches a transaction
+  opened by a bare `exec("BEGIN")`. `savepoint()` remains the way to nest, and
+  `Connection.transactionStatus()` is now public.
+
+- **A pooled connection could carry an open transaction into the next
+  borrower** — the health check asked only `PQstatus`, which says nothing about
+  transaction state. The pool now rolls back before releasing the slot. That
+  rollback discards the borrow's writes, so a leak is reported as
+  `QueryClientError` rather than losing data silently; when the borrow itself
+  threw, the rollback is quiet and the caller's exception propagates unchanged.
+
+- **BC dates and years past 9999 could be read but not written.** PostgreSQL
+  rejects D's `-0001-06-15` (it counts BC from 1 and wants `0002-06-15 BC`) and
+  reads the leading sign of `+12345-01-01` as the start of a UTC offset. The
+  year is now rewritten on the way out for `Date`, `DateTime` and `SysTime`, so
+  a value peque can read is one it can write.
+- **`SysTime` values were written using the session's time zone, silently
+  shifting the instant.** `SysTime.toString` omits the UTC offset for
+  `LocalTime()` values — what `Clock.currTime` returns — so PostgreSQL received
+  a naked wall clock and read it in the *session* `TimeZone`: a host in
+  `Europe/Kyiv` writing to a session in `UTC` stored everything three hours in
+  the future, with no error. Values are now normalised with `.toUTC` first.
+- **`infinity` / `-infinity` timestamps crashed.** The parser sliced these
+  8-9 byte values as if they were `YYYY-MM-DD` — an `ArraySliceError` in a debug
+  build and a **segfault under `-release`**. They now map to the D type's
+  `.max`/`.min`.
+- **`BC` dates silently returned the wrong year** for `Date`, `DateTime` and
+  naive `timestamp` → `SysTime`: the suffix was dropped, so `0044-03-15 BC` read
+  back as year 44 instead of -43. All timestamp paths now map PostgreSQL's BC
+  years to D's astronomical numbering (1 BC = year 0).
+- **`timestamptz` values rendered in local mean time could not be read at all.**
+  Timestamps predating a zone's adoption of standard time carry a UTC offset
+  with *seconds* (`+02:02:04`), and with a negative offset year 1 is pushed into
+  the `BC` era — both rejected by `std.datetime`'s parser. Writing `SysTime.init`
+  to a column was enough to trigger it, as was any date before the 1880s.
+- **Array elements decoded by string length.** They carry no type OID, and the
+  zoned/naive choice was made by `length == 19`: a naive value with fractional
+  seconds is longer, so it came back in the *client's* local time, and
+  `infinity` is shorter, so it was rejected as "too short". The decision now
+  follows the rendering.
+- **`const` / `immutable` values could not be passed as query parameters.**
+  `is(T == DateTime)` is false for `immutable(DateTime)`, so such a value
+  matched no `convertToPG` overload at all. `Date`, `DateTime`, `SysTime`,
+  `JSONValue`, `UUID` and `Nullable!T` now match through qualifiers.
+- A year outside D's representable range (it stores a year in a `short`, while
+  PostgreSQL reaches 294276) now reports that plainly instead of `Invalid
+  format`. A malformed UTC offset such as `+0230` is rejected rather than
+  silently read as `+02:00`.
+
+### Documentation
+
+- **Which name goes where** — peque takes the D field name wherever it names a
+  model member, and a SQL name only where no D name exists. `Target.columns!`'s
+  error suggests the D field and lists the available ones, mirroring the schema
+  UDAs' message.
+- **Fields named after D keywords** — `@field("version") int version_;`. The D
+  side keeps the underscore everywhere; only the emitted SQL drops it.
+- **Where a column default belongs** — a D field initialiser for compile-time
+  constants, `applyDefaults()` for computed values, and `@pgDefault` for
+  database-level declarations only. `@pgDefault` never affects what peque
+  inserts, which was undocumented and led to `@pgDefault("now()")` silently
+  storing `SysTime.init`.
+
+---
+
 ## [0.2.0]
 
 ### Added

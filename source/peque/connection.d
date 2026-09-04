@@ -133,17 +133,19 @@ struct Connection {
 
     /** Construct from a connection string. WaitStrategy defaults to PollWaitStrategy.
       *
-      * Pass a custom WaitStrategy as the second argument to override:
+      * `timezone` pins the session TimeZone (empty leaves it to the server).
+      * A custom WaitStrategy comes last, so name it when the zone is omitted:
       * ---
       * // vibe.d pool factory:
-      * auto conn = Connection(connStr, VibeWaitStrategy());
+      * auto conn = Connection(connStr, ws: VibeWaitStrategy());
       *
       * // Tests:
       * MockWaitStrategy mock;
-      * auto conn = Connection(connStr, MockWS(&mock));
+      * auto conn = Connection(connStr, ws: MockWS(&mock));
       * ---
       **/
-    this(WS = PollWaitStrategy)(in string conn_info, WS ws = WS.init)
+    this(WS = PollWaitStrategy)(in string conn_info, in string timezone = "",
+            WS ws = WS.init)
             if (isWaitStrategy!WS) {
         _connection = ConnectionInternal(conn_info);
         enforce!ConnectionError(
@@ -153,10 +155,18 @@ struct Connection {
             status == CONNECTION_OK,
             "Cannot connect to db: %s!".format(errorMessage));
         _setHooks(ws);
+
+        if (timezone.length > 0) _applySessionTimezone(timezone);
     }
 
-    /// ditto
-    this(WS = PollWaitStrategy)(in string[string] params, WS ws = WS.init)
+    /** ditto
+      *
+      * `params` reaches libpq untouched: every entry is a libpq keyword, and
+      * libpq rejects any it does not recognise. peque's own settings, such as
+      * `timezone`, are separate parameters for that reason.
+      **/
+    this(WS = PollWaitStrategy)(in string[string] params, in string timezone = "",
+            WS ws = WS.init)
             if (isWaitStrategy!WS) {
         _connection = ConnectionInternal(params);
         enforce!ConnectionError(
@@ -166,11 +176,26 @@ struct Connection {
             status == CONNECTION_OK,
             "Cannot connect to db: %s!".format(errorMessage));
         _setHooks(ws);
+
+        if (timezone.length > 0) _applySessionTimezone(timezone);
     }
 
-    /// ditto
+    /** ditto
+      *
+      * Params:
+      *     timezone = session `TimeZone` to pin, e.g. "UTC" or "Europe/Kyiv".
+      *         Empty (the default) leaves it to the server's configuration or
+      *         `PGTZ`. It governs what the SERVER renders (`now()::text`,
+      *         `to_char`, a `timestamptz` cast to text) — never the meaning of a
+      *         value peque sends or reads, which is session-independent by
+      *         construction. Applied once, at connect.
+      **/
+    // `timezone` precedes `ws` because a named argument cannot skip a
+    // template-typed parameter: reversed, `timezone: "UTC"` binds to `ws` and
+    // fails to compile. A positional `ws` must therefore be named `ws:`.
     this(WS = PollWaitStrategy)(in string dbname, in string user, in string password,
-            in string host, in string port, WS ws = WS.init)
+            in string host, in string port, in string timezone = "",
+            WS ws = WS.init)
             if (isWaitStrategy!WS) {
         string[string] p;
         if (dbname && dbname.length > 0)   p["dbname"]   = dbname.dup;
@@ -178,7 +203,29 @@ struct Connection {
         if (password && password.length > 0) p["password"] = password.dup;
         if (host && host.length > 0)       p["host"]     = host.dup;
         if (port && port.length > 0)       p["port"]     = port.dup;
-        this(p, ws);
+        this(p, timezone, ws);
+    }
+
+    /** Pin this session's TimeZone, once, at connect time.
+      *
+      * Governs what the SERVER renders (`now()::text`, `to_char`, a timestamptz
+      * cast to text) — never the meaning of a value peque sends or reads, which
+      * is session-independent by construction.
+      *
+      * Uses `set_config()` because `SET TIME ZONE` takes no placeholders and the
+      * zone would otherwise have to be escaped into the statement text.
+      *
+      * Connect-time only: a pooled connection keeps session state across
+      * borrows, so setting the zone per request would leak it into the next
+      * borrower. For a per-user zone, convert at the edges or say
+      * `AT TIME ZONE $1` in the query.
+      **/
+    private void _applySessionTimezone(in string tz) {
+        try
+            execParams(`SELECT set_config('TimeZone', $1, false)`, tz);
+        catch (QueryError e)
+            throw new ConnectionError(
+                "Cannot set session timezone to '" ~ tz ~ "': " ~ e.msg, e);
     }
 
     private void _setHooks(WS)(WS ws) if (isWaitStrategy!WS) {
@@ -210,6 +257,18 @@ struct Connection {
 
     /// Check status of connection
     auto status() { return _connection.borrow!((auto ref conn) @trusted => PQstatus(conn._pg_conn)); }
+
+    /** The connection's transaction state — one of the PQTRANS_* values.
+      *
+      * `PQTRANS_INTRANS` and `PQTRANS_INERROR` both mean a transaction block is
+      * open; `INERROR` additionally means it has already failed and the server
+      * will accept nothing but ROLLBACK. Read from libpq's own protocol state,
+      * so it also sees a transaction opened by a bare `exec("BEGIN")`.
+      **/
+    auto transactionStatus() {
+        return _connection.borrow!(
+            (auto ref conn) @trusted => PQtransactionStatus(conn._pg_conn));
+    }
 
     /// Return most recent error message
     auto errorMessage() {
@@ -343,7 +402,7 @@ struct Connection {
       *     `bool wait(int fd, WaitMask mask, Duration timeout)` overload.
       **/
     Notification[] waitNotifications(Duration timeout) {
-        enforce!PequeException(
+        enforce!NotSupportedError(
             _asyncHooks.waitTimed !is null,
             "waitNotifications requires a WaitStrategy providing "
             ~ "`bool wait(int fd, WaitMask mask, Duration timeout)`; the strategy "
@@ -429,9 +488,9 @@ struct Connection {
             while (true) {
                 int r = PQflush(conn._pg_conn);
                 if (r == 0) return;
-                enforce!QueryError(r > 0, "PQflush failed: " ~ errorMessage);
+                enforce!ConnectionError(r > 0, "PQflush failed: " ~ errorMessage);
                 _asyncHooks.wait(fd, WaitMask.readWrite);
-                enforce!QueryError(
+                enforce!ConnectionError(
                     PQconsumeInput(conn._pg_conn) == 1,
                     "PQconsumeInput failed during flush: " ~ errorMessage);
             }
@@ -450,7 +509,7 @@ struct Connection {
     private void _waitWhileBusy(PGconn* pg) @trusted {
         while (PQisBusy(pg) == 1) {
             _asyncHooks.wait(PQsocket(pg), WaitMask.read);
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQconsumeInput(pg) == 1,
                 "PQconsumeInput failed: " ~ errorMessage);
         }
@@ -488,7 +547,7 @@ struct Connection {
                 _abortCopy(pg, st2);
         }
 
-        throw new QueryError(
+        throw new NotSupportedError(
             "COPY TO/FROM STDOUT/STDIN is not supported by peque. "
             ~ "Use COPY with a server-side file, or psql's \\copy.");
     }
@@ -539,7 +598,7 @@ struct Connection {
         _connection.borrow!((auto ref conn) @trusted {
             while (true) {
                 _asyncHooks.wait(fd, WaitMask.read);
-                enforce!QueryError(
+                enforce!ConnectionError(
                     PQconsumeInput(conn._pg_conn) == 1,
                     "PQconsumeInput failed: " ~ errorMessage);
                 if (PQisBusy(conn._pg_conn) == 0) return;
@@ -557,7 +616,7 @@ struct Connection {
     private Result _collectResult() @trusted {
         return _connection.borrow!((auto ref conn) @trusted {
             auto cur = PQgetResult(conn._pg_conn);
-            enforce!QueryError(cur !is null,
+            enforce!ConnectionError(cur !is null,
                 "PQgetResult returned null — query send failed");
             // Free the in-flight result if the walk throws mid-way
             // (_rejectCopy nulls cur before throwing, so no double-free).
@@ -628,7 +687,7 @@ struct Connection {
       **/
     auto exec(in string query) {
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendQuery(conn._pg_conn, query.toStringz) == 1,
                 "PQsendQuery failed: " ~ errorMessage);
         });
@@ -652,7 +711,7 @@ struct Connection {
       **/
     auto execMulti(in string query) {
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendQuery(conn._pg_conn, query.toStringz) == 1,
                 "PQsendQuery failed: " ~ errorMessage);
         });
@@ -675,7 +734,7 @@ struct Connection {
       **/
     auto execParams(in string query) {
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendQueryParams(
                     conn._pg_conn,
                     query.toStringz,
@@ -718,6 +777,16 @@ struct Connection {
     Result execParams(string query, in PGValue[] params) {
         if (params.length == 0) return execParams(query);
 
+        // The Bind message carries an int16 parameter count. Over the limit
+        // libpq fails client-side without touching the socket, so this is a
+        // caller error, not a broken link — the distinction matters to anyone
+        // retrying on ConnectionError.
+        enforce!QueryClientError(
+            params.length <= 65535,
+            format!("Query binds %s parameters, over PostgreSQL's limit of " ~
+                    "65535 per statement. Split the values into batches.")(
+                    params.length));
+
         auto pTypes   = new uint[params.length];
         auto pValues  = new const(char)*[params.length];
         auto pLengths = new int[params.length];
@@ -736,7 +805,7 @@ struct Connection {
         }
 
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendQueryParams(
                     conn._pg_conn,
                     query.toStringz,
@@ -771,14 +840,14 @@ struct Connection {
     auto prepare(in string name, in string query) {
         import std.ascii: isAlpha, isAlphaNum;
         import std.algorithm: all;
-        enforce!QueryError(
+        enforce!QueryClientError(
             name.length > 0 &&
             (name[0] == '_' || isAlpha(name[0])) &&
             name[1 .. $].all!(c => c == '_' || isAlphaNum(c)),
             "PreparedStatement name must be alphanumeric+underscore, got: " ~ name);
 
         _connection.borrow!((auto ref conn) @trusted {
-            enforce!QueryError(
+            enforce!ConnectionError(
                 PQsendPrepare(
                     conn._pg_conn,
                     name.toStringz,
@@ -819,10 +888,45 @@ struct Connection {
       *
       * Returns: whatever fun returns (void is allowed)
       **/
+    /** Refuse to open a transaction inside one that is already open.
+      *
+      * PostgreSQL ignores a nested BEGIN, so the inner COMMIT would commit the
+      * OUTER transaction and the outer rollback would find nothing to undo —
+      * silent data loss. savepoint() is the supported way to nest.
+      **/
+    private void _rejectNestedTransaction() {
+        immutable st = transactionStatus();
+        if (st == PQTRANS_IDLE) return;
+
+        if (st == PQTRANS_INTRANS)
+            throw new QueryClientError(
+                "transaction() called while a transaction is already open. A " ~
+                "nested BEGIN is ignored by PostgreSQL, so the inner COMMIT " ~
+                "would commit the outer transaction. Use the Transaction " ~
+                "handle's savepoint() to nest.");
+
+        if (st == PQTRANS_INERROR)
+            throw new QueryClientError(
+                "transaction() called inside a transaction that has already " ~
+                "failed. PostgreSQL accepts nothing but ROLLBACK until it " ~
+                "ends, so nothing here could be committed.");
+
+        if (st == PQTRANS_ACTIVE)
+            throw new QueryClientError(
+                "transaction() called while a command is still in flight. " ~
+                "peque waits for every result before returning, so the " ~
+                "Connection is being used from two places at once — borrow " ~
+                "one per task from a ConnectionPool.");
+
+        throw new ConnectionError(
+            "Cannot determine transaction status: " ~ errorMessage);
+    }
+
     auto transaction(
             OnSuccess onSuccess = OnSuccess.commit,
             IsolationLevel isolation = IsolationLevel.readCommitted,
             T)(scope T delegate(ref Transaction) fun) {
+        _rejectNestedTransaction();
         auto tx = Transaction(this);
         static if (isolation == IsolationLevel.serverDefault)
             exec("BEGIN");
@@ -964,7 +1068,7 @@ struct PreparedStatement {
     auto exec(T...)(T params) {
         static if (T.length == 0) {
             _conn._connection.borrow!((auto ref conn) @trusted {
-                enforce!QueryError(
+                enforce!ConnectionError(
                     PQsendQueryPrepared(
                         conn._pg_conn,
                         _name.toStringz,
@@ -1000,7 +1104,7 @@ struct PreparedStatement {
             }
 
             _conn._connection.borrow!((auto ref conn) @trusted {
-                enforce!QueryError(
+                enforce!ConnectionError(
                     PQsendQueryPrepared(
                         conn._pg_conn,
                         _name.toStringz,

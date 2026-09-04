@@ -9,8 +9,8 @@ private import peque.result;
   *   - exec(string query) returning Result
   *   - execParams(string query, T... params) returning Result
   *
-  * This constraint is the key that makes the ORM (Phase 4) async-agnostic:
-  * ORM types parameterised on Ctx where isQueryContext!Ctx never need WaitStrategy
+  * This constraint is the key that makes the ORM async-agnostic: ORM types
+  * parameterised on Ctx where isQueryContext!Ctx never need WaitStrategy
   * propagation — Connection is non-templated, so no !WS anywhere in business logic.
   *
   * Transaction satisfies this automatically because it already forwards both

@@ -2,8 +2,23 @@ module peque.tests.transaction;
 
 private import std.process: environment;
 
+private import std.exception: assertThrown, collectException;
+private import std.algorithm.searching: canFind;
+
 private import peque.connection: Connection, Transaction, OnSuccess, IsolationLevel;
+private import peque.exception: QueryClientError;
 private import peque.result: Result;
+
+
+private Connection makeConn() {
+    return Connection(
+        dbname:   environment.get("POSTGRES_DB",       "peque-test"),
+        user:     environment.get("POSTGRES_USER",     "peque"),
+        password: environment.get("POSTGRES_PASSWORD", "peque"),
+        host:     environment.get("POSTGRES_HOST",     "localhost"),
+        port:     environment.get("POSTGRES_PORT",     "5432"),
+    );
+}
 
 
 unittest {
@@ -326,4 +341,83 @@ unittest {
             "SELECT current_setting('transaction_isolation')")[0][0].get!string;
         assert(level == "repeatable read");
     });
+}
+
+
+// ---------------------------------------------------------------------------
+// Nested transaction() is refused
+// ---------------------------------------------------------------------------
+
+/** A nested BEGIN is ignored by PostgreSQL, so the inner COMMIT would commit
+  * the OUTER transaction and the outer rollback would do nothing — work the
+  * caller expected to be discarded gets committed. Refused before any of it
+  * can happen. **/
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS peque_nest_t`);
+    c.exec(`CREATE TABLE peque_nest_t (v text)`);
+    scope(exit) c.exec(`DROP TABLE IF EXISTS peque_nest_t`);
+
+    bool innerRan = false;
+    auto e = collectException!QueryClientError(
+        c.transaction((ref Transaction outer_) {
+            outer_.exec(`INSERT INTO peque_nest_t VALUES ('outer')`);
+            c.transaction((ref Transaction inner) { innerRan = true; });
+        }));
+
+    assert(e !is null, "a nested transaction() must be refused");
+    assert(!innerRan, "the nested delegate must not run");
+    assert(e.msg.canFind("savepoint"), "the error must point at the remedy: " ~ e.msg);
+
+    // The escaping exception rolls the outer transaction back, so the row is
+    // gone. This is the guarantee a nested COMMIT would break.
+    assert(c.exec(`SELECT count(*) FROM peque_nest_t`).getValue!long(0, 0) == 0,
+        "outer transaction must have rolled back");
+
+    // And the connection is still usable afterwards.
+    assert(c.exec(`SELECT 1`).getValue!int(0, 0) == 1);
+}
+
+/// The guard reads libpq's protocol state, so it also catches a hand-rolled BEGIN.
+unittest {
+    auto c = makeConn();
+    scope(exit) c.exec(`ROLLBACK`);
+    c.exec(`BEGIN`);
+    assertThrown!QueryClientError(
+        c.transaction((ref Transaction tx) { assert(false, "must not run"); }));
+}
+
+/// A failed transaction gets its own message: nothing in it could be committed,
+/// so "use savepoint" would be wrong advice.
+unittest {
+    auto c = makeConn();
+    scope(exit) c.exec(`ROLLBACK`);
+    c.exec(`BEGIN`);
+    try c.exec(`SELECT * FROM peque_no_such_table_here`); catch (Exception) {}
+
+    auto e = collectException!QueryClientError(
+        c.transaction((ref Transaction tx) { assert(false, "must not run"); }));
+    assert(e !is null);
+    assert(e.msg.canFind("already"), e.msg);
+}
+
+/// savepoint() remains the supported way to nest, and still works.
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS peque_nest_sp`);
+    c.exec(`CREATE TABLE peque_nest_sp (v text)`);
+    scope(exit) c.exec(`DROP TABLE IF EXISTS peque_nest_sp`);
+
+    c.transaction((ref Transaction tx) {
+        tx.exec(`INSERT INTO peque_nest_sp VALUES ('kept')`);
+        try {
+            tx.savepoint((ref Transaction sp) {
+                sp.exec(`INSERT INTO peque_nest_sp VALUES ('discarded')`);
+                throw new Exception("inner fails");
+            });
+        } catch (Exception) {}
+    });
+    auto rows = c.exec(`SELECT v FROM peque_nest_sp`);
+    assert(rows.ntuples == 1);
+    assert(rows.getValue!string(0, 0) == "kept");
 }

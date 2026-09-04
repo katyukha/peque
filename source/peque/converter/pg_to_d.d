@@ -16,6 +16,130 @@ private import std.typecons: Nullable;
 private import peque.pg_type;
 private import peque.exception;
 
+// ConversionError for a read, carrying the direction and the offending value.
+// std.exception.enforce cannot forward extra constructor arguments, so callers
+// throw explicitly rather than enforcing.
+private ConversionError _readError(T)(
+        string msg, in PGType pg_type,
+        scope const char* data, in int length,
+        Throwable cause = null) pure @trusted {
+    return new ConversionError(
+        msg, pg_type.to!string, T.stringof,
+        (data !is null && length > 0) ? data[0 .. length].idup : "",
+        cause);
+}
+
+// Run a Phobos parser and translate anything it throws into ConversionError,
+// keeping the original message. std.conv, std.datetime, std.json and std.uuid
+// each raise their own type; letting those escape would break the guarantee
+// that everything peque throws derives from PequeException.
+private T _tryParse(T)(lazy T expr, string what, in PGType pg_type,
+                       scope const char* data, in int length) pure @trusted {
+    try
+        return expr();
+    catch (PequeException e)
+        throw e;                                   // already ours
+    catch (Exception e)
+        // Chain the original: its type and stack trace are the useful part.
+        throw _readError!T(what ~ ": " ~ e.msg, pg_type, data, length, e);
+}
+
+// PostgreSQL's date/timestamp rendering -> ISO extended, which Phobos accepts.
+//
+// Three things differ from ISO. A " BC" suffix means the year is counted from 1
+// backwards, while D uses astronomical numbering (1 BC == year 0). Years outside
+// 0..9999 need an explicit sign. And the date and time are separated by a space
+// rather than 'T'.
+//
+// Returns null for the "infinity"/"-infinity" sentinels, which are legal
+// timestamp values and much shorter than a date, so callers must check the
+// flags before indexing.
+private const(char)[] _pgTimestampToISO(scope const(char)[] s, out bool infinite,
+                                        out bool negInfinite) pure @safe {
+    infinite    = (s == "infinity");
+    negInfinite = (s == "-infinity");
+    if (infinite || negInfinite) return null;
+
+    immutable bc = s.length > 3 && s[$ - 3 .. $] == " BC";
+    if (bc) s = s[0 .. $ - 3];
+
+    // Year runs to the first '-' (a leading '-' would be part of the year).
+    size_t dash = 0;
+    while (dash < s.length && s[dash] != '-') ++dash;
+    enforce!ConversionError(dash > 0 && dash < s.length,
+        "Cannot parse timestamp: malformed year in: " ~ s.idup);
+
+    int year = to!int(s[0 .. dash]);
+    if (bc) year = 1 - year;
+    // D stores a year in a short; PostgreSQL goes to 294276. Say so plainly —
+    // Phobos would otherwise report a bare "Invalid format".
+    enforce!ConversionError(year >= short.min && year <= short.max,
+        format!("Year %d is outside the range D can represent (%d .. %d); " ~
+                "read the column as text instead.")(year, short.min, short.max));
+
+    const(char)[] ys;
+    if (year < 0)          ys = format("-%04d", -year);
+    else if (year > 9999)  ys = format("+%04d", year);
+    else if (bc)           ys = format("%04d", year);
+    else                   ys = s[0 .. dash];   // unchanged — avoid reformatting
+
+    auto rest = s[dash .. $];                   // "-MM-DD[ HH:MM:SS[.frac][+TZ]]"
+    // Date and time are space-separated in PostgreSQL, 'T'-separated in ISO.
+    size_t sp = 0;
+    while (sp < rest.length && rest[sp] != ' ') ++sp;
+    if (sp >= rest.length) return ys ~ rest;    // date only
+    return ys ~ rest[0 .. sp] ~ "T" ~ rest[sp + 1 .. $];
+}
+
+// Index of the 'T' separator in an ISO string produced above, or length when
+// the value is date-only. The date part is NOT a fixed 10 characters once the
+// year is signed or longer than four digits.
+private size_t _isoDateEnd(scope const(char)[] iso) pure @safe nothrow @nogc {
+    size_t i = 0;
+    while (i < iso.length && iso[i] != 'T') ++i;
+    return i;
+}
+
+
+/** Index of the UTC offset in an ISO rendering, or -1 when there is none.
+  *
+  * Starts past the date so a signed year is not mistaken for an offset. Shared
+  * by every temporal decoder, so they cannot disagree about whether a value
+  * carries a zone.
+  **/
+private ptrdiff_t _utcOffsetPos(scope const(char)[] iso, in size_t dateEnd)
+pure @safe nothrow @nogc {
+    foreach_reverse (i; dateEnd .. iso.length)
+        if (iso[i] == '+' || iso[i] == '-') return i;
+    return -1;
+}
+
+
+/** The temporal conversions peque refuses, and how to spell them instead.
+  *
+  * One rule covers all three: return what the value contains, possibly less,
+  * never more, and never guess a time zone. Each answer would otherwise depend
+  * on the server's session TimeZone — wrong by an offset, or by a whole day.
+  **/
+private enum _dateIsZonelessMsg =
+    "the calendar date of an instant depends on the zone you ask in, and " ~
+    "timestamptz carries none of its own. Read the column as SysTime and name " ~
+    "the zone — sysTime.toOtherTZ(tz).toDate() — or ask the server: " ~
+    "(ts AT TIME ZONE 'Europe/Kyiv')::date.";
+
+/// ditto
+private enum _dateTimeIsZonelessMsg =
+    "timestamptz holds an instant and DateTime has no zone to hold it in, so " ~
+    "the offset would be dropped. Read the column as SysTime, which keeps the " ~
+    "instant, or as string for the raw text.";
+
+/// ditto
+private enum _sysTimeNeedsZoneMsg =
+    "a timestamp without a time zone is a wall clock and SysTime is an " ~
+    "instant, so naming one would mean inventing a zone. Read the column as " ~
+    "DateTime, then say which zone it is in: SysTime(dt, UTC()) if the column " ~
+    "stores UTC, SysTime(dt, tz) if it stores local times.";
+
 /** Convert postgresql's text type value to D type T
   *
   * Params:
@@ -37,7 +161,8 @@ pure @trusted if (isSomeString!T) {
     // reinterpret the UTF-8 bytes as wchar/dchar and yield garbage.
     if (data is null)
         return T.init;
-    return data[0 .. length].to!T;
+    return _tryParse!T(data[0 .. length].to!T,
+        "Cannot parse " ~ T.stringof ~ " value", pg_type, data, length);
 }
 
 /// ditto
@@ -59,7 +184,8 @@ T convertTextTypeToD(T)(
 pure @trusted if (isScalarType!T) {
     // We have to take into account postgres types here
     static if (isIntegral!T)
-        return data[0 .. length].to!T;
+        return _tryParse!T(data[0 .. length].to!T,
+            "Cannot parse " ~ T.stringof ~ " value", pg_type, data, length);
     else static if (isFloatingPoint!T) {
         auto s = data[0 .. length];
         if (s == "NaN")       return T.nan;
@@ -77,8 +203,9 @@ pure @trusted if (isScalarType!T) {
             case "f":
                 return false;
             default:
-                throw new ConversionError(
-                    "Cannot parse boolean value from postgres: " ~ data[0 .. length].idup);
+                throw _readError!T(
+                    "Cannot parse boolean value from postgres: " ~ data[0 .. length].idup,
+                    pg_type, data, length);
         }
     else
         static assert(0, "Unsupported scalar type " ~ T.stringof);
@@ -94,14 +221,24 @@ pure @trusted if (is(T == Date)) {
         case PGType.GUESS:
         case PGType.DATE:
         case PGType.TIMESTAMP:
+            return _tryParse!T({
+                    bool inf, negInf;
+                    auto iso = _pgTimestampToISO(data[0 .. length], inf, negInf);
+                    if (inf)    return Date.max;
+                    if (negInf) return Date.min;
+                    // An offset means the value is an instant, whose date is
+                    // zone-dependent. Reached via GUESS: array elements have no OID.
+                    immutable e = _isoDateEnd(iso);
+                    enforce!ConversionError(_utcOffsetPos(iso, e) < 0,
+                        _dateIsZonelessMsg);
+                    return Date.fromISOExtString(iso[0 .. e]);
+                }(), "Cannot parse date", pg_type, data, length);
         case PGType.TIMESTAMPTZ:
-            enforce!ConversionError(
-                length >= 10,
-                "Cannot parse date '%s' from postgres".format(data[0 .. length]));
-            return Date.fromISOExtString(data[0 .. 10]);
+            throw _readError!T(_dateIsZonelessMsg, pg_type, data, length);
         default:
-            throw new ConversionError(
-                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+            throw _readError!T(
+                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof),
+                pg_type, data, length);
     }
 }
 
@@ -115,19 +252,102 @@ pure @trusted if (is(T == DateTime)) {
     switch(pg_type) {
         case PGType.GUESS:
         case PGType.TIMESTAMP:
+            return _tryParse!T({
+                    bool inf, negInf;
+                    auto iso = _pgTimestampToISO(data[0 .. length], inf, negInf);
+                    if (inf)    return DateTime.max;
+                    if (negInf) return DateTime.min;
+                    // Drop any fractional seconds: DateTime has none.
+                    immutable e = _isoDateEnd(iso);
+                    enforce!ConversionError(e + 9 <= iso.length,
+                        "Cannot parse DateTime from postgres: value is too short");
+                    // As for Date: an offset means an instant, not a wall clock.
+                    enforce!ConversionError(_utcOffsetPos(iso, e) < 0,
+                        _dateTimeIsZonelessMsg);
+                    return DateTime.fromISOExtString(iso[0 .. e + 9]);
+                }(), "Cannot parse timestamp", pg_type, data, length);
         case PGType.TIMESTAMPTZ:
-            enforce!ConversionError(
-                length >= 19,
-                "Cannot parse DateTime '%s' from postgres: value is too short".format(
-                    data[0 .. length]));
-            return DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]);
+            throw _readError!T(_dateTimeIsZonelessMsg, pg_type, data, length);
         default:
-            throw new ConversionError(
-                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+            throw _readError!T(
+                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof),
+                pg_type, data, length);
     }
 }
 
 /// ditto
+// Parse "+HH", "+HH:MM" or "+HH:MM:SS" into a signed Duration.
+// Shape is validated rather than inferred from length: "+0230" would otherwise
+// silently read as +02:00 and lose 30 minutes.
+private Duration _parseUtcOffset(scope const(char)[] off) {
+    enforce!ConversionError(
+        off.length == 3 || off.length == 6 || off.length == 9,
+        "Malformed UTC offset in timestamp: " ~ off.idup);
+    enforce!ConversionError(
+        (off.length < 6 || off[3] == ':') && (off.length < 9 || off[6] == ':'),
+        "Malformed UTC offset in timestamp: " ~ off.idup);
+
+    immutable sign = (off[0] == '-') ? -1 : 1;
+    immutable h    = to!int(off[1 .. 3]);
+    immutable m    = (off.length >= 6) ? to!int(off[4 .. 6]) : 0;
+    immutable sec  = (off.length >= 9) ? to!int(off[7 .. 9]) : 0;
+    return dur!"seconds"(sign * (h * 3600 + m * 60 + sec));
+}
+
+/** Parse a PostgreSQL `timestamptz` rendering into a SysTime, in UTC.
+  *
+  * Always UTC, whatever offset the server rendered: the instant is what peque
+  * guarantees, and one rule for the attached zone is the only way two rows of
+  * the same result set cannot print in different zones. It is also the only
+  * rule expressible here — a local-mean-time offset such as +02:02:04 is not a
+  * whole-minute SimpleTimeZone. Callers render with .toLocalTime() or
+  * .toOtherTZ().
+  *
+  * Normally delegates straight to SysTime.fromISOExtString. Two renderings it
+  * cannot handle are dealt with here, both produced by ordinary values:
+  *
+  *  - a UTC offset carrying SECONDS, e.g. "1883-11-18 14:02:04+02:02:04".
+  *    PostgreSQL renders timestamps predating the zone's adoption of standard
+  *    time in local mean time, whose offset is not a whole number of minutes,
+  *    and std.datetime rejects a seconds component outright.
+  *  - a " BC" era suffix, e.g. "0001-12-31 19:03:58-04:56:02 BC". Any zone with
+  *    a negative offset pushes year 1 back across the era boundary.
+  *
+  * Neither is exotic: SysTime.init round-tripped through a timestamptz column
+  * hits the first in Europe/Kyiv and both in America/New_York, and any
+  * historical date before the 1880s hits the first.
+  *
+  * For those cases the offset is parsed here and the wall-clock part is read as
+  * UTC and shifted by it, which is exact. PostgreSQL's BC years are converted
+  * to astronomical numbering (1 BC == year 0), which D represents natively.
+  **/
+private SysTime _parseTimestampTz(scope const(char)[] str) @trusted {
+    bool inf, negInf;
+    auto iso = _pgTimestampToISO(str, inf, negInf);
+    if (inf)    return SysTime.max;
+    if (negInf) return SysTime.min;
+
+    // Locate the UTC offset: search past the date, whose length varies once the
+    // year is signed or longer than four digits.
+    immutable dateEnd = _isoDateEnd(iso);
+    enforce!ConversionError(dateEnd < iso.length,
+        "Cannot parse timestamp: no time part in: " ~ str.idup);
+
+    // No offset means no instant. PostgreSQL always renders one for a
+    // timestamptz, so this only fires for a value that arrived through GUESS.
+    immutable ofs = _utcOffsetPos(iso, dateEnd);
+    enforce!ConversionError(ofs >= 0, _sysTimeNeedsZoneMsg);
+
+    // A whole-minute offset is what std.datetime accepts; only a seconds-bearing
+    // one (local mean time) needs to be applied by hand.
+    immutable secondsOffset = ofs > 0 && (iso.length - ofs) == 9;
+    if (!secondsOffset)
+        return SysTime.fromISOExtString(iso).toUTC();
+
+    immutable delta = _parseUtcOffset(iso[ofs .. $]);
+    return SysTime.fromISOExtString(iso[0 .. ofs] ~ "Z") - delta;
+}
+
 T convertTextTypeToD(T)(
         scope const char* data,
         in int length,
@@ -137,22 +357,21 @@ T convertTextTypeToD(T)(
     import std.datetime.timezone;
     switch(pg_type) {
         case PGType.GUESS:
-            enforce!ConversionError(
-                length >= 19,
-                "Cannot parse value as timestamp: value is too short");
-            if (length == 19)
-                // no timezone suffix: treat as UTC timestamp
-                return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
-            else
-                // timezone suffix present: parse as timestamp with timezone
-                return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
+            // No OID, so the rendering decides: _parseTimestampTz refuses a
+            // value without an offset. Deciding by string length instead would
+            // misread a naive value with fractional seconds, and reject
+            // "infinity" as too short.
+            return _tryParse!T(_parseTimestampTz(data[0 .. length]),
+                "Cannot parse timestamp with time zone", pg_type, data, length);
         case PGType.TIMESTAMP:
-            return SysTime(DateTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. 19]), UTC());
+            throw _readError!T(_sysTimeNeedsZoneMsg, pg_type, data, length);
         case PGType.TIMESTAMPTZ:
-            return SysTime.fromISOExtString(data[0 .. 10] ~ "T" ~ data[11 .. length]);
+            return _tryParse!T(_parseTimestampTz(data[0 .. length]),
+                "Cannot parse timestamp with time zone", pg_type, data, length);
         default:
-            throw new ConversionError(
-                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+            throw _readError!T(
+                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof),
+                pg_type, data, length);
     }
 }
 
@@ -162,7 +381,8 @@ T convertTextTypeToD(T)(
         in int length,
         in PGType pg_type)
 pure @trusted if (is(T == UUID)) {
-    return UUID(data[0 .. length].idup);
+    return _tryParse!T(UUID(data[0 .. length].idup),
+        "Cannot parse uuid", pg_type, data, length);
 }
 
 /// ditto
@@ -175,10 +395,12 @@ T convertTextTypeToD(T)(
         case PGType.GUESS:
         case PGType.JSON:
         case PGType.JSONB:
-            return parseJSON(data[0 .. length].idup);
+            return _tryParse!T(parseJSON(data[0 .. length].idup),
+                "Cannot parse json", pg_type, data, length);
         default:
-            throw new ConversionError(
-                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof));
+            throw _readError!T(
+                "Cannot convert pg type (%s) to D type %s".format(pg_type, T.stringof),
+                pg_type, data, length);
     }
 }
 
@@ -190,12 +412,12 @@ T convertTextTypeToD(T)(
 @trusted if (isArray!T && !isSomeString!T) {
     if (length <= 2)
         return T.init;
-    enforce!ConversionError(
-        data[0] == '{',
-        "Value is not array!\n Value: %s".format(data[0 .. length]));
-    enforce!ConversionError(
-        data[1] != '{',
-        "Multidimentional arrays are not supported at the moment");
+    enforce(data[0] == '{', _readError!T(
+        "Value is not array!\n Value: %s".format(data[0 .. length]),
+        pg_type, data, length));
+    enforce(data[1] != '{', _readError!T(
+        "Multidimensional arrays are not supported at the moment",
+        pg_type, data, length));
     T result;
     bool quoted = false;        // opened quote
     bool backslash = false;     // opened backslash
@@ -226,8 +448,9 @@ T convertTextTypeToD(T)(
                 if (!backslash && !quoted) {
                     if (quoted_value ) {
 
-                        // TODO: determine if backslashes were found in base loop
-                        //       and if there is no backslashes in array, then there is no need to unescape them
+                        // Possible optimisation: track in the outer loop whether
+                        // any backslash was seen, and skip unescaping entirely
+                        // when the array contains none.
                         char[] tmp_value;
                         tmp_value.reserve(pos - start);
                         uint ts = start + 1; // start iteration just after first quote
@@ -259,11 +482,12 @@ T convertTextTypeToD(T)(
                         static if (is(ElementType!T == Nullable!U, U))
                             result ~= ElementType!T.init;   // null element
                         else
-                            throw new ConversionError(
+                            throw _readError!T(
                                 "Array contains a NULL element, but the element " ~
                                 "type " ~ ElementType!T.stringof ~ " is not " ~
                                 "nullable. Hydrate into Nullable!" ~
-                                ElementType!T.stringof ~ "[] instead.");
+                                ElementType!T.stringof ~ "[] instead.",
+                                pg_type, data, length);
                     } else {
                         result ~= convertTextTypeToD!(ElementType!T)(&data[start], pos-start, PGType.GUESS);
                     }
@@ -375,4 +599,79 @@ unittest {
     assert(!nstrs[0].isNull);
     assert(nstrs[0] == "NULL".nullable);
     assert(nstrs[1] == "b".nullable);
+}
+
+// timestamptz with a seconds-bearing UTC offset. PostgreSQL renders timestamps
+// predating the zone's switch to standard time in local mean time, whose offset
+// is not a whole number of minutes — a form std.datetime's parser rejects
+// outright, so peque parses it itself.
+unittest {
+    import std.datetime.timezone: UTC;
+
+    // Europe/Kyiv LMT is +02:02:04. Year 1 — what SysTime.init round-trips to.
+    enum y1 = "0001-01-01 02:02:04+02:02:04";
+    assert(convertTextTypeToD!SysTime(y1.ptr, cast(int)y1.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1, 1, 1, 0, 0, 0), UTC()));
+
+    // Not just year 1: anything before the 1880s renders the same way.
+    enum hist = "1883-11-18 14:02:04+02:02:04";
+    assert(convertTextTypeToD!SysTime(hist.ptr, cast(int)hist.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1883, 11, 18, 12, 0, 0), UTC()));
+
+    // Negative seconds-bearing offset (e.g. America/New_York LMT -04:56:02).
+    enum neg = "1883-11-18 07:03:58-04:56:02";
+    assert(convertTextTypeToD!SysTime(neg.ptr, cast(int)neg.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1883, 11, 18, 12, 0, 0), UTC()));
+
+    // Fractional seconds alongside a seconds-bearing offset.
+    enum frac = "1883-11-18 14:02:04.5+02:02:04";
+    assert(convertTextTypeToD!SysTime(frac.ptr, cast(int)frac.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1883, 11, 18, 12, 0, 0), msecs(500), UTC()));
+
+    // " BC" era suffix: any negative offset pushes year 1 across the era
+    // boundary, so SysTime.init round-trips through BC in the Americas.
+    // PostgreSQL counts BC from 1; D uses astronomical numbering (1 BC == 0).
+    enum bcNy = "0001-12-31 19:03:58-04:56:02 BC";
+    assert(convertTextTypeToD!SysTime(bcNy.ptr, cast(int)bcNy.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(1, 1, 1, 0, 0, 0), UTC()));
+
+    // BC combined with a whole-minute offset also needs the manual path.
+    enum bcPlain = "0002-06-15 10:00:00+02:00 BC";
+    assert(convertTextTypeToD!SysTime(bcPlain.ptr, cast(int)bcPlain.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(-1, 6, 15, 8, 0, 0), UTC()));
+
+    // Ordinary whole-hour and whole-minute offsets keep the existing path.
+    enum modern = "2026-08-14 11:01:34.013441+03";
+    assert(convertTextTypeToD!SysTime(modern.ptr, cast(int)modern.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(2026, 8, 14, 8, 1, 34), usecs(13441), UTC()));
+    enum halfHour = "2026-08-14 14:31:34+05:30";
+    assert(convertTextTypeToD!SysTime(halfHour.ptr, cast(int)halfHour.length, PGType.TIMESTAMPTZ) ==
+           SysTime(DateTime(2026, 8, 14, 9, 1, 34), UTC()));
+}
+
+// Malformed timestamp text must raise ConversionError, never an Error: a bad
+// slice would be uncatchable and, under -release, a segfault.
+unittest {
+    import std.exception: assertThrown;
+
+    static void mustThrow(string v, PGType t = PGType.TIMESTAMPTZ) {
+        assertThrown!ConversionError(
+            convertTextTypeToD!SysTime(v.ptr, cast(int)v.length, t));
+    }
+
+    mustThrow("");                              // empty
+    mustThrow("2020-01-01");                    // date only, no time
+    mustThrow("0001-01-01 BC");                 // BC, no time part
+    mustThrow("1883-11-18 14:02:04+ BC");       // truncated offset
+    mustThrow("0001-01-01-01-01-01-01 BC");     // no space separator
+    mustThrow("garbage");
+
+    // A whole-minute offset must not be inferred from length alone: "+0230"
+    // would otherwise silently read as +02:00 and lose 30 minutes.
+    mustThrow("2020-01-01 00:00:00+0230");
+
+    // The forms PostgreSQL does emit still parse.
+    enum ok = "2020-01-01 00:00:00+02";
+    assert(convertTextTypeToD!SysTime(ok.ptr, cast(int)ok.length, PGType.TIMESTAMPTZ)
+           == SysTime(DateTime(2019, 12, 31, 22, 0, 0), UTC()));
 }
