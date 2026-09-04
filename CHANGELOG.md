@@ -96,6 +96,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A nested `transaction()` silently committed the OUTER transaction** (breaking
+  — it now throws `QueryClientError`). PostgreSQL ignores a nested `BEGIN`, so
+  the inner `COMMIT` committed the enclosing transaction and the outer rollback
+  did nothing: work the caller believed was rolled back was committed instead.
+  The check reads libpq's protocol state, so it also catches a transaction
+  opened by a bare `exec("BEGIN")`. `savepoint()` remains the way to nest, and
+  `Connection.transactionStatus()` is now public.
+
+- **A pooled connection could carry an open transaction into the next
+  borrower** — the health check asked only `PQstatus`, which says nothing about
+  transaction state. The pool now rolls back before releasing the slot. That
+  rollback discards the borrow's writes, so a leak is reported as
+  `QueryClientError` rather than losing data silently; when the borrow itself
+  threw, the rollback is quiet and the caller's exception propagates unchanged.
+
 - **BC dates and years past 9999 could be read but not written.** PostgreSQL
   rejects D's `-0001-06-15` (it counts BC from 1 and wants `0002-06-15 BC`) and
   reads the leading sign of `+12345-01-01` as the start of a UTC offset. The

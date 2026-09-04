@@ -34,6 +34,19 @@ enum
 };
 alias int ConnStatusType;
 
+// PGTransactionStatusType — the connection's transaction state.
+// INTRANS/INERROR both mean a transaction block is open; INERROR additionally
+// means it has already failed and only ROLLBACK is accepted.
+enum
+{
+    PQTRANS_IDLE = 0,      // connection idle, no transaction open
+    PQTRANS_ACTIVE = 1,    // a command is in progress
+    PQTRANS_INTRANS = 2,   // idle, inside a valid transaction block
+    PQTRANS_INERROR = 3,   // idle, inside a FAILED transaction block
+    PQTRANS_UNKNOWN = 4    // cannot determine (bad connection)
+}
+alias int PGTransactionStatusType;
+
 // ExecStatusType
 enum
 {
@@ -111,6 +124,7 @@ mixin(joinFnBinds!staticBinding((){
         {q{void}, q{PQfinish}, q{PGconn* conn}},
 
         {q{ConnStatusType}, q{PQstatus}, q{const(PGconn)* conn}},
+        {q{PGTransactionStatusType}, q{PQtransactionStatus}, q{const(PGconn)* conn}},
         {q{int}, q{PQserverVersion}, q{const(PGconn)* conn}},
 
         {q{PGresult*}, q{PQexec}, q{PGconn* conn, const(char)* query}},

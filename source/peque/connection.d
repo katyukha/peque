@@ -258,6 +258,18 @@ struct Connection {
     /// Check status of connection
     auto status() { return _connection.borrow!((auto ref conn) @trusted => PQstatus(conn._pg_conn)); }
 
+    /** The connection's transaction state — one of the PQTRANS_* values.
+      *
+      * `PQTRANS_INTRANS` and `PQTRANS_INERROR` both mean a transaction block is
+      * open; `INERROR` additionally means it has already failed and the server
+      * will accept nothing but ROLLBACK. Read from libpq's own protocol state,
+      * so it also sees a transaction opened by a bare `exec("BEGIN")`.
+      **/
+    auto transactionStatus() {
+        return _connection.borrow!(
+            (auto ref conn) @trusted => PQtransactionStatus(conn._pg_conn));
+    }
+
     /// Return most recent error message
     auto errorMessage() {
         return _connection.borrow!((auto ref conn) @trusted {
@@ -876,10 +888,45 @@ struct Connection {
       *
       * Returns: whatever fun returns (void is allowed)
       **/
+    /** Refuse to open a transaction inside one that is already open.
+      *
+      * PostgreSQL ignores a nested BEGIN, so the inner COMMIT would commit the
+      * OUTER transaction and the outer rollback would find nothing to undo —
+      * silent data loss. savepoint() is the supported way to nest.
+      **/
+    private void _rejectNestedTransaction() {
+        immutable st = transactionStatus();
+        if (st == PQTRANS_IDLE) return;
+
+        if (st == PQTRANS_INTRANS)
+            throw new QueryClientError(
+                "transaction() called while a transaction is already open. A " ~
+                "nested BEGIN is ignored by PostgreSQL, so the inner COMMIT " ~
+                "would commit the outer transaction. Use the Transaction " ~
+                "handle's savepoint() to nest.");
+
+        if (st == PQTRANS_INERROR)
+            throw new QueryClientError(
+                "transaction() called inside a transaction that has already " ~
+                "failed. PostgreSQL accepts nothing but ROLLBACK until it " ~
+                "ends, so nothing here could be committed.");
+
+        if (st == PQTRANS_ACTIVE)
+            throw new QueryClientError(
+                "transaction() called while a command is still in flight. " ~
+                "peque waits for every result before returning, so the " ~
+                "Connection is being used from two places at once — borrow " ~
+                "one per task from a ConnectionPool.");
+
+        throw new ConnectionError(
+            "Cannot determine transaction status: " ~ errorMessage);
+    }
+
     auto transaction(
             OnSuccess onSuccess = OnSuccess.commit,
             IsolationLevel isolation = IsolationLevel.readCommitted,
             T)(scope T delegate(ref Transaction) fun) {
+        _rejectNestedTransaction();
         auto tx = Transaction(this);
         static if (isolation == IsolationLevel.serverDefault)
             exec("BEGIN");
