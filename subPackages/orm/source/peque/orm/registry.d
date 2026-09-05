@@ -77,12 +77,50 @@ struct Bind(M, alias RepoTpl) if (isModel!M) {}
 // Registry
 // ---------------------------------------------------------------------------
 
+/** Names every model bound more than once, or "" when the bindings are clean.
+  *
+  * One pass with a seen-set rather than a pairwise scan: a merged registry in a
+  * modular application holds one binding per model per module, and O(n^2)
+  * mangleof comparisons would show up in build times.
+  **/
+package(peque.orm) string _duplicateBindingError(Bindings...)() {
+    bool[string] seen, reported;
+    string[] dups;
+    static foreach (B; Bindings) {{
+        static if (is(B == Bind!(M, RepoTpl), M, alias RepoTpl)) {
+            if (M.mangleof in seen) {
+                if (M.mangleof !in reported) {
+                    reported[M.mangleof] = true;
+                    dups ~= M.stringof;
+                }
+            } else
+                seen[M.mangleof] = true;
+        }
+    }}
+    if (dups.length == 0) return "";
+
+    string list;
+    foreach (i, d; dups) { if (i) list ~= ", "; list ~= d; }
+    return "Registry binds " ~ (dups.length == 1 ? "model " : "models ") ~ list ~
+        " more than once. schemaSQL would emit CREATE TABLE for it twice, and " ~
+        "RegistryRepoFor cannot choose between the bindings. Bind each model in " ~
+        "exactly one registry — when merging registries from separate modules, " ~
+        "two of them are claiming the same model.";
+}
+
 /** Compile-time registry of model→repository bindings.
   *
   * Pass Bind!(M, RepoTpl) instances as template arguments.
+  *
+  * Binding one model twice is a compile error, whether written directly or
+  * produced by MergeRegistries — the merge is a plain concatenation, so this is
+  * where the collision is caught.
   **/
 struct Registry(Bindings...) {
     alias _bindings = Bindings;
+
+    private enum _dupError = _duplicateBindingError!Bindings();
+    static assert(_dupError.length == 0, _dupError);
 }
 
 /// Composing a registry and looking a model up in it.

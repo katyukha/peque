@@ -34,7 +34,7 @@ private import peque.exception: ConversionError;
         if (!(is_null || value.length < int.max))
             throw new ConversionError(
                 "Too large value length for PGValue!",
-                "char[]", type.to!string, "");
+                "char[]", type.pgTypeName, "");
         this.type = type;
         this.format = format;
         this.value = value;
@@ -44,9 +44,15 @@ private import peque.exception: ConversionError;
     /// Compute length of value
     int length() @trusted { return cast(int)value.length; }
 
-    string toString() {
-        return "type=%s, format=%s, length=%s, value=%s".format(
-            this.type, this.format, this.length, this.value);
+    string toString() const {
+        import std.conv: text;
+        // Deliberately not std.format: formatting the PGType enum instantiates
+        // a formatter over all of its members, which is ~80ms of compile time
+        // in every build that touches a PGValue.
+        return text("type=", type.pgTypeName,
+                    ", format=", format == PGFormat.TEXT ? "TEXT" : "BINARY",
+                    ", length=", value.length,
+                    ", value=", value);
     }
 }
 

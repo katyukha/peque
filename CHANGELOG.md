@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`pgTypeName(PGType)`** — the type's name without `std.format`. `to!string`
+  on an enum falls back to std.format's generic machinery, which instantiates a
+  formatter over all 125 members; the two `PGValue` sites that did so cost ~260ms
+  of compile time in every build touching the conversion layer. Emitted as a jump
+  table by `tools/generate_pg_type.d` beside the enum. Unlike `getPgTypeInfo` it
+  is a plain `switch`: OIDs read from a result come from the server, so a type
+  from a newer PostgreSQL returns `"UNKNOWN"` rather than throwing.
+
 - **`peque:orm`** — compile-time ORM: model registry, schema generation,
   QuerySets and CRUD. `select!DTO` projects into a flat struct whose members are
   columns on the queried table; `@field(related: "partner.name")` projects a
@@ -95,6 +103,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   identifier.
 
 ### Fixed
+
+- **Binding one model twice in a `Registry` is now a compile error** (breaking).
+  `MergeRegistries` is a plain concatenation, so two modules each claiming a
+  model compiled silently: `schemaSQL` emitted its `CREATE TABLE` twice and only
+  `RegistryRepoFor` complained, and only if something looked that model up. The
+  error names the offending model(s).
+
+- **`getPgTypeInfo` crashed on a type it did not know** — `SwitchError` in a
+  debug build, **SIGILL under `-release`**, because a `final switch` compiles to
+  a halt once the check is stripped. Result column types are
+  `cast(PGType) PQftype(...)`, a raw server OID, so any user-defined type,
+  extension type (PostGIS `geometry`, `hstore`) or type from a newer PostgreSQL
+  reaches it as a non-member. It now reports `GUESS` — OID 0, the enum's
+  "unspecified" sentinel, which tells the server to infer — and is `nothrow`.
 
 - **A nested `transaction()` silently committed the OUTER transaction** (breaking
   — it now throws `QueryClientError`). PostgreSQL ignores a nested `BEGIN`, so

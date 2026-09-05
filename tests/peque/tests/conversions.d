@@ -1218,3 +1218,45 @@ unittest {
     assert(c.exec("SELECT now()").getValue!SysTime(0, 0).year >= 2020);
     c.exec("SET TimeZone = 'UTC'");
 }
+
+
+// ---------------------------------------------------------------------------
+// pgTypeName covers the whole enum
+// ---------------------------------------------------------------------------
+
+/** pgTypeName is a jump table emitted beside the enum, so it can go stale when
+  * a type is added. Comparing it against to!string for every member is what
+  * makes that a test failure rather than a wrong name in a diagnostic. **/
+unittest {
+    import std.conv: to;
+    import peque.pg_type: PGType, pgTypeName;
+
+    static foreach (m; __traits(allMembers, PGType))
+        assert(pgTypeName(__traits(getMember, PGType, m)) == m,
+               "pgTypeName is missing or wrong for " ~ m);
+
+    // OIDs come from the server, so an unrecognised one must not throw — a
+    // type from a newer PostgreSQL, or an extension type such as PostGIS
+    // geometry, reaches here on a path that only exists to build a message.
+    assert(pgTypeName(cast(PGType) 999_999) == "UNKNOWN");
+}
+
+/** getPgTypeInfo must survive an OID it does not know.
+  *
+  * Result column types are `cast(PGType) PQftype(...)` — a raw server OID — so
+  * a user-defined type, an extension type or a type from a newer PostgreSQL
+  * arrives as a non-member. A `final switch` answers that with SwitchError, and
+  * under `-release` with SIGILL. **/
+unittest {
+    import peque.pg_type: PGType, getPgTypeInfo, PGTypeInfo;
+
+    // Roughly where a `CREATE TYPE ... AS ENUM` lands.
+    enum userDefined = cast(PGType) 16_432;
+    auto info = getPgTypeInfo(userDefined);
+    assert(info.type == userDefined);
+    assert(info.array_type == PGType.GUESS,
+        "an unknown type has no known array type; GUESS lets the server infer");
+
+    // Known types are unaffected.
+    assert(getPgTypeInfo(PGType.INT4).array_type == PGType._INT4);
+}

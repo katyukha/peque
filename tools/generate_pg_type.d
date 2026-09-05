@@ -122,6 +122,36 @@ auto getPGTypeInfoByOid(in PGTypeInfo[] types, in int oid) {
 }
 
 
+auto generatePGTypeNameFunc(in PGTypeInfo[] types) {
+    immutable indent = "    ";
+    immutable dindent = indent ~ indent;
+    string result = q"<
+/** Name of a PGType, as a jump table.
+  *
+  * `std.conv.to!string` on an enum falls back to std.format's generic
+  * machinery, which instantiates a formatter over every member of this enum
+  * and costs ~80ms of compile time in any build that touches a PGValue. This
+  * answers the same question for nothing, and keeps std.format out of the
+  * conversion layer entirely.
+  *
+  * A plain switch rather than `final switch`: OIDs read from a result come from
+  * the SERVER, so a type from a newer PostgreSQL — or an extension type such as
+  * PostGIS geometry — is not a member here and must not throw from a path that
+  * exists to build a diagnostic.
+  **/
+string pgTypeName(in PGType type) @safe pure nothrow {
+    with(PGType) switch(type) {
+>";
+    foreach(type; types)
+        result ~= dindent ~ "case %s: return \"%s\";\n".format(
+            type.name.toUpper, type.name.toUpper);
+    result ~= dindent ~ "default: return \"UNKNOWN\";\n";
+    result ~= indent ~ "}\n";
+    result ~= "}\n";
+    return result;
+}
+
+
 auto generatePGTypeInfoFunc(in PGTypeInfo[] types) {
     immutable indent = "    ";
     immutable dindent = indent ~ indent;
@@ -140,8 +170,8 @@ immutable struct PGTypeInfo {
   *     type = PGType to get extra info for
   * Returns: PGTypeInfo struct that represents extra info about this PGType
   **/
-PGTypeInfo getPgTypeInfo(in PGType type) @safe pure {
-    with(PGType) final switch(type) {
+PGTypeInfo getPgTypeInfo(in PGType type) @safe pure nothrow {
+    with(PGType) switch(type) {
 >";
 
     foreach(type; types) {
@@ -152,6 +182,7 @@ PGTypeInfo getPgTypeInfo(in PGType type) @safe pure {
 
     }
 
+    result ~= dindent ~ "default: return PGTypeInfo(type, GUESS);\n";
     result ~= indent ~ "}\n";
     result ~= "}\n";
     return result;
@@ -176,5 +207,7 @@ void main() {
     result ~= generatePGTypeEnum(pg_types);
     result ~= "\n";
     result ~= generatePGTypeInfoFunc(pg_types);
+    result ~= "\n";
+    result ~= generatePGTypeNameFunc(pg_types);
     write(result);
 }

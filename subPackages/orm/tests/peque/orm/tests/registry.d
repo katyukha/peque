@@ -272,3 +272,68 @@ unittest {
     assert(notes[1].title == "High");
     assert(notes[2].title == "Mid");
 }
+
+
+// ---------------------------------------------------------------------------
+// A model may be bound only once
+// ---------------------------------------------------------------------------
+
+@model("dup_a") private struct DupA { @primaryKey int id; @field string name; }
+@model("dup_b") private struct DupB { @primaryKey int id; @field string name; }
+
+unittest {
+    // Directly declared duplicate.
+    static assert(!__traits(compiles,
+        Registry!(Bind!(DupA, ModelRepo!DupA), Bind!(DupA, ModelRepo!DupA))._bindings),
+        "binding one model twice must not compile");
+
+    // A different repo template for the same model is still a duplicate: the
+    // registry has no rule for choosing, and schemaSQL would emit the table
+    // twice either way.
+    static assert(!__traits(compiles,
+        Registry!(Bind!(DupA, ModelRepo!DupA), Bind!(DupA, TagRepo))._bindings),
+        "re-binding a model to another repo must not compile");
+
+    // The motivating case: two modules each claim the model, and the merge is a
+    // plain concatenation — so the collision has to be caught in Registry.
+    alias ModuleOne = Registry!(Bind!(DupA, ModelRepo!DupA));
+    alias ModuleTwo = Registry!(Bind!(DupA, ModelRepo!DupA), Bind!(DupB, ModelRepo!DupB));
+    static assert(!__traits(compiles, MergeRegistries!(ModuleOne, ModuleTwo)._bindings),
+        "merging two registries that both bind a model must not compile");
+
+    // Merging the same registry with itself is the same mistake.
+    static assert(!__traits(compiles, MergeRegistries!(ModuleOne, ModuleOne)._bindings),
+        "merging a registry with itself must not compile");
+
+    // No false positives: distinct models merge cleanly and stay findable.
+    alias Clean = MergeRegistries!(Registry!(Bind!(DupA, ModelRepo!DupA)),
+                                   Registry!(Bind!(DupB, ModelRepo!DupB)));
+    static assert(Clean._bindings.length == 2);
+    static assert(__traits(isSame, RegistryRepoFor!(Clean, DupA), ModelRepo!DupA));
+    static assert(__traits(isSame, RegistryRepoFor!(Clean, DupB), ModelRepo!DupB));
+}
+
+/// The message must name the offending model — with many modules merged, "some
+/// model is bound twice" would not be actionable.
+unittest {
+    import peque.orm.registry: _duplicateBindingError;
+    import std.algorithm.searching: canFind;
+
+    enum msg = _duplicateBindingError!(Bind!(DupA, ModelRepo!DupA),
+                                       Bind!(DupA, ModelRepo!DupA))();
+    static assert(msg.canFind("DupA"), msg);
+    static assert(msg.canFind("more than once"), msg);
+
+    // Every offender is listed, and each only once however often it repeats.
+    enum many = _duplicateBindingError!(
+        Bind!(DupA, ModelRepo!DupA), Bind!(DupB, ModelRepo!DupB),
+        Bind!(DupA, ModelRepo!DupA), Bind!(DupB, ModelRepo!DupB),
+        Bind!(DupA, ModelRepo!DupA))();
+    static assert(many.canFind("DupA") && many.canFind("DupB"), many);
+    import std.algorithm.searching: count;
+    static assert(many.count("DupA") == 1, "a model repeated 3x must be listed once: " ~ many);
+
+    // Clean bindings produce no message at all.
+    static assert(_duplicateBindingError!(Bind!(DupA, ModelRepo!DupA),
+                                          Bind!(DupB, ModelRepo!DupB))().length == 0);
+}

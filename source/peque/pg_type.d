@@ -154,12 +154,20 @@ immutable struct PGTypeInfo {
 
 /** Return extra info about postgres type
   *
+  * Not a `final switch`: OIDs read from a result are cast straight from
+  * PQftype, so a user-defined type, an extension type (PostGIS geometry,
+  * hstore) or a type from a newer PostgreSQL is a PGType value that is not a
+  * member here. A `final switch` answers that with SwitchError, and under
+  * `-release` with SIGILL. An unknown type has no known array type, so it
+  * reports GUESS — the enum's own "unspecified" sentinel, which is OID 0 and
+  * tells the server to infer.
+  *
   * Params:
   *     type = PGType to get extra info for
   * Returns: PGTypeInfo struct that represents extra info about this PGType
   **/
-PGTypeInfo getPgTypeInfo(in PGType type) @safe pure {
-    with(PGType) final switch(type) {
+PGTypeInfo getPgTypeInfo(in PGType type) @safe pure nothrow {
+    with(PGType) switch(type) {
         case GUESS: return PGTypeInfo(GUESS, GUESS);
         case BOOL: return PGTypeInfo(BOOL, _BOOL);
         case BYTEA: return PGTypeInfo(BYTEA, _BYTEA);
@@ -285,5 +293,151 @@ PGTypeInfo getPgTypeInfo(in PGType type) @safe pure {
         case _REGROLE: return PGTypeInfo(_REGROLE, GUESS);
         case _REGCOLLATION: return PGTypeInfo(_REGCOLLATION, GUESS);
         case _XID8: return PGTypeInfo(_XID8, GUESS);
+        default: return PGTypeInfo(type, GUESS);
+    }
+}
+
+
+/** Name of a PGType, as a jump table.
+  *
+  * `std.conv.to!string` on an enum falls back to std.format's generic
+  * machinery, which instantiates a formatter over every member of this enum
+  * and costs ~80ms of compile time in any build that touches a PGValue. This
+  * answers the same question for nothing, and keeps std.format out of the
+  * conversion layer entirely.
+  *
+  * A plain switch rather than `final switch`: OIDs read from a result come from
+  * the SERVER, so a type from a newer PostgreSQL — or an extension type such as
+  * PostGIS geometry — is not a member here and must not throw from a path that
+  * exists to build a diagnostic.
+  **/
+string pgTypeName(in PGType type) @safe pure nothrow {
+    with(PGType) switch(type) {
+        case GUESS: return "GUESS";
+        case BOOL: return "BOOL";
+        case BYTEA: return "BYTEA";
+        case CHAR: return "CHAR";
+        case NAME: return "NAME";
+        case INT8: return "INT8";
+        case INT2: return "INT2";
+        case INT2VECTOR: return "INT2VECTOR";
+        case INT4: return "INT4";
+        case REGPROC: return "REGPROC";
+        case TEXT: return "TEXT";
+        case OID: return "OID";
+        case TID: return "TID";
+        case XID: return "XID";
+        case CID: return "CID";
+        case OIDVECTOR: return "OIDVECTOR";
+        case JSON: return "JSON";
+        case XML: return "XML";
+        case POINT: return "POINT";
+        case LSEG: return "LSEG";
+        case PATH: return "PATH";
+        case BOX: return "BOX";
+        case POLYGON: return "POLYGON";
+        case LINE: return "LINE";
+        case CIDR: return "CIDR";
+        case FLOAT4: return "FLOAT4";
+        case FLOAT8: return "FLOAT8";
+        case CIRCLE: return "CIRCLE";
+        case MACADDR8: return "MACADDR8";
+        case MONEY: return "MONEY";
+        case MACADDR: return "MACADDR";
+        case INET: return "INET";
+        case ACLITEM: return "ACLITEM";
+        case BPCHAR: return "BPCHAR";
+        case VARCHAR: return "VARCHAR";
+        case DATE: return "DATE";
+        case TIME: return "TIME";
+        case TIMESTAMP: return "TIMESTAMP";
+        case TIMESTAMPTZ: return "TIMESTAMPTZ";
+        case INTERVAL: return "INTERVAL";
+        case TIMETZ: return "TIMETZ";
+        case BIT: return "BIT";
+        case VARBIT: return "VARBIT";
+        case NUMERIC: return "NUMERIC";
+        case REFCURSOR: return "REFCURSOR";
+        case REGPROCEDURE: return "REGPROCEDURE";
+        case REGOPER: return "REGOPER";
+        case REGOPERATOR: return "REGOPERATOR";
+        case REGCLASS: return "REGCLASS";
+        case REGTYPE: return "REGTYPE";
+        case UUID: return "UUID";
+        case TXID_SNAPSHOT: return "TXID_SNAPSHOT";
+        case TSVECTOR: return "TSVECTOR";
+        case TSQUERY: return "TSQUERY";
+        case GTSVECTOR: return "GTSVECTOR";
+        case REGCONFIG: return "REGCONFIG";
+        case REGDICTIONARY: return "REGDICTIONARY";
+        case JSONB: return "JSONB";
+        case JSONPATH: return "JSONPATH";
+        case REGNAMESPACE: return "REGNAMESPACE";
+        case REGROLE: return "REGROLE";
+        case REGCOLLATION: return "REGCOLLATION";
+        case XID8: return "XID8";
+        case _BOOL: return "_BOOL";
+        case _BYTEA: return "_BYTEA";
+        case _CHAR: return "_CHAR";
+        case _NAME: return "_NAME";
+        case _INT8: return "_INT8";
+        case _INT2: return "_INT2";
+        case _INT2VECTOR: return "_INT2VECTOR";
+        case _INT4: return "_INT4";
+        case _REGPROC: return "_REGPROC";
+        case _TEXT: return "_TEXT";
+        case _OID: return "_OID";
+        case _TID: return "_TID";
+        case _XID: return "_XID";
+        case _CID: return "_CID";
+        case _OIDVECTOR: return "_OIDVECTOR";
+        case _JSON: return "_JSON";
+        case _XML: return "_XML";
+        case _POINT: return "_POINT";
+        case _LSEG: return "_LSEG";
+        case _PATH: return "_PATH";
+        case _BOX: return "_BOX";
+        case _POLYGON: return "_POLYGON";
+        case _LINE: return "_LINE";
+        case _CIDR: return "_CIDR";
+        case _FLOAT4: return "_FLOAT4";
+        case _FLOAT8: return "_FLOAT8";
+        case _CIRCLE: return "_CIRCLE";
+        case _MACADDR8: return "_MACADDR8";
+        case _MONEY: return "_MONEY";
+        case _MACADDR: return "_MACADDR";
+        case _INET: return "_INET";
+        case _ACLITEM: return "_ACLITEM";
+        case _BPCHAR: return "_BPCHAR";
+        case _VARCHAR: return "_VARCHAR";
+        case _DATE: return "_DATE";
+        case _TIME: return "_TIME";
+        case _TIMESTAMP: return "_TIMESTAMP";
+        case _TIMESTAMPTZ: return "_TIMESTAMPTZ";
+        case _INTERVAL: return "_INTERVAL";
+        case _TIMETZ: return "_TIMETZ";
+        case _BIT: return "_BIT";
+        case _VARBIT: return "_VARBIT";
+        case _NUMERIC: return "_NUMERIC";
+        case _REFCURSOR: return "_REFCURSOR";
+        case _REGPROCEDURE: return "_REGPROCEDURE";
+        case _REGOPER: return "_REGOPER";
+        case _REGOPERATOR: return "_REGOPERATOR";
+        case _REGCLASS: return "_REGCLASS";
+        case _REGTYPE: return "_REGTYPE";
+        case _UUID: return "_UUID";
+        case _TXID_SNAPSHOT: return "_TXID_SNAPSHOT";
+        case _TSVECTOR: return "_TSVECTOR";
+        case _TSQUERY: return "_TSQUERY";
+        case _GTSVECTOR: return "_GTSVECTOR";
+        case _REGCONFIG: return "_REGCONFIG";
+        case _REGDICTIONARY: return "_REGDICTIONARY";
+        case _JSONB: return "_JSONB";
+        case _JSONPATH: return "_JSONPATH";
+        case _REGNAMESPACE: return "_REGNAMESPACE";
+        case _REGROLE: return "_REGROLE";
+        case _REGCOLLATION: return "_REGCOLLATION";
+        case _XID8: return "_XID8";
+        default: return "UNKNOWN";
     }
 }
