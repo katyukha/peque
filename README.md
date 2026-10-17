@@ -53,6 +53,49 @@ these subpackages with the scrutiny you would give any young dependency.
 | `SysTime` | `timestamptz` |
 | `T[]` | one-dimensional arrays |
 | `Nullable!T` | any nullable column |
+| your own type | see [Custom types](#custom-types) |
+
+### Custom types
+
+A type peque does not know, such as an extension type like PostGIS `geometry`
+or an application's own value type, plugs in by declaring two methods:
+
+```d
+import std.conv        : to;
+import peque.converter : PGValue;
+import peque.pg_type   : PGType;
+
+struct Money {
+    private long cents;
+    this(long c) { cents = c; }
+
+    static Money fromPGText(scope const(char)[] text, PGType oid) {
+        return Money(text.to!long);
+    }
+
+    PGValue toPGValue() const {
+        return PGValue.fromText(PGType.GUESS, cents.to!string);
+    }
+}
+```
+
+`Money` then works everywhere a built-in does: `execParams` parameters, model
+fields, hydration, `select!DTO` and QuerySet predicates, and also as
+`Nullable!Money` and `Money[]`.
+
+`PGType.GUESS` (oid 0) lets PostgreSQL infer the type from context, which is
+right for `INSERT INTO t (geom) VALUES ($1)`. An extension type's oid is
+assigned at `CREATE EXTENSION` time, so it is not a compile-time constant;
+where inference is not enough, such as `ST_Distance($1, $2)`, return an oid
+resolved at runtime or cast in the SQL (`$1::geometry`).
+
+- **Copy the text.** It points into libpq's result buffer, which is freed with
+  the `Result`; `scope` cannot enforce this, so a reader that keeps the slice
+  compiles and then dangles.
+- **`oid` is `PGType.GUESS` for array elements**, so a reader cannot tell types
+  apart by oid inside an array.
+- **Attributes are inferred.** `@safe` hooks give a `@safe` conversion, also
+  through `Nullable!T` and `T[]`; peque neither requires nor vouches for it.
 
 ### Time zones
 

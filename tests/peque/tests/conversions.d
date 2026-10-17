@@ -1218,3 +1218,31 @@ unittest {
     assert(c.exec("SELECT now()").getValue!SysTime(0, 0).year >= 2020);
     c.exec("SET TimeZone = 'UTC'");
 }
+
+
+// ---------------------------------------------------------------------------
+// pgTypeName covers the whole enum
+// ---------------------------------------------------------------------------
+
+/// pgTypeName returns the member's name for every member of the enum.
+unittest {
+    import peque.pg_type: PGType, pgTypeName;
+
+    static foreach (m; __traits(allMembers, PGType))
+        assert(pgTypeName(__traits(getMember, PGType, m)) == m,
+               "pgTypeName is missing or wrong for " ~ m);
+
+    // An OID from the server need not be a member.
+    assert(pgTypeName(cast(PGType) 999_999) == "UNKNOWN");
+}
+
+/// getPgTypeInfo survives an OID that is not an enum member.
+unittest {
+    import peque.pg_type: PGType, getPgTypeInfo, PGTypeInfo;
+
+    // Roughly where a `CREATE TYPE ... AS ENUM` lands.
+    enum userDefined = cast(PGType) 16_432;
+    auto info = getPgTypeInfo(userDefined);
+    assert(info.type == userDefined);
+    assert(info.array_type == PGType.GUESS);
+}

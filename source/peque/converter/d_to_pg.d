@@ -13,6 +13,8 @@ private import std.traits:
 private import std.range: ElementType;
 private import std.typecons: Nullable;
 
+private import peque.converter.pg_to_d: _isBuiltinPGStruct;
+
 private import peque.pg_type;
 private import peque.pg_format;
 private import peque.exception: ConversionError;
@@ -34,19 +36,32 @@ private import peque.exception: ConversionError;
         if (!(is_null || value.length < int.max))
             throw new ConversionError(
                 "Too large value length for PGValue!",
-                "char[]", type.to!string, "");
+                "char[]", type.pgTypeName, "");
         this.type = type;
         this.format = format;
         this.value = value;
         this.isNull = is_null;
     }
 
+    /** Build a text PGValue, appending the NUL terminator the constructor
+      * requires. Use it from a `toPGValue` hook, with `PGType.GUESS` unless
+      * the oid is known.
+      **/
+    static PGValue fromText(PGType type, scope const(char)[] text) @safe pure {
+        return PGValue(type, PGFormat.TEXT, text ~ '\0');
+    }
+
     /// Compute length of value
     int length() @trusted { return cast(int)value.length; }
 
-    string toString() {
-        return "type=%s, format=%s, length=%s, value=%s".format(
-            this.type, this.format, this.length, this.value);
+    string toString() const {
+        import std.conv: text;
+        // Not std.format: formatting the PGType enum instantiates a formatter
+        // over all of its members, at a noticeable compile-time cost.
+        return text("type=", type.pgTypeName,
+                    ", format=", format == PGFormat.TEXT ? "TEXT" : "BINARY",
+                    ", length=", value.length,
+                    ", value=", value);
     }
 }
 
@@ -232,9 +247,11 @@ PGValue convertToPG(T)(in T value)
 
 /// ditto
 PGValue convertToPG(T) (in T value)
-@safe if (isArray!T && !isSomeString!T) {
+// Attributes inferred: safety depends on the element type, which may be a
+// custom type whose writer is not @safe.
+if (isArray!T && !isSomeString!T) {
     alias TI = ElementType!T;
-    auto PGArrayType = getPgTypeInfo(convertToPG!(TI)(TI.init).type).array_type;
+    auto PGArrayType = getPgTypeInfo(_declaredPGType!TI()).array_type;
     if (value.length == 0)
         // If length of array is 0, than we could return empty array literal
         // without extra processing
@@ -294,15 +311,96 @@ PGValue convertToPG(T)(in T value)
 
 /// ditto — Nullable: sends SQL NULL when empty, delegates to inner type when set
 PGValue convertToPG(T)(in T value)
-@safe if (is(Unqual!T == Nullable!U, U)) {
+// Attributes inferred, for the same reason as the array overload above.
+if (is(Unqual!T == Nullable!U, U)) {
     // Re-bind U inside the function body; the constraint's alias is not in scope here.
     static if (is(Unqual!T == Nullable!Inner, Inner)) {
         if (value.isNull)
-            return PGValue(convertToPG!Inner(Inner.init).type, PGFormat.TEXT, value: null, is_null: true);
+            return PGValue(_declaredPGType!Inner(), PGFormat.TEXT, value: null, is_null: true);
         return convertToPG!Inner(value.get);
     } else {
         static assert(false, "Unreachable");
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Custom types
+// ---------------------------------------------------------------------------
+
+/// fromText NUL-terminates, and length counts the terminator.
+unittest {
+    auto v = PGValue.fromText(PGType.INT4, "42");
+    assert(v.value == "42\0");
+    assert(v.length == 3);
+
+    auto e = PGValue.fromText(PGType.GUESS, "");
+    assert(e.value == "\0");
+    assert(e.length == 1);
+}
+
+
+/** True when T writes itself to a PostgreSQL parameter:
+  *
+  *     PGValue toPGValue() const;
+  *
+  * Build the result with `PGValue.fromText`, using `PGType.GUESS` for an
+  * extension type: its oid is assigned at CREATE EXTENSION time, so it is not
+  * a compile-time constant.
+  *
+  * Built-in struct types are excluded, as for hasPGTextReader.
+  **/
+template hasPGValueWriter(T) {
+    private alias U = Unqual!T;
+    // Checked on a const value, because that is how convertToPG calls it.
+    enum hasPGValueWriter =
+        is(U == struct) && !_isBuiltinPGStruct!U &&
+        __traits(compiles, { PGValue v = (const U).init.toPGValue(); });
+}
+
+/// A type that declares toPGValue with the wrong signature; see the reader
+/// counterpart in pg_to_d.d.
+PGValue convertToPG(T)(in T value)
+if (is(Unqual!T == struct) && !_isBuiltinPGStruct!(Unqual!T) &&
+    __traits(hasMember, Unqual!T, "toPGValue") && !hasPGValueWriter!T)
+{
+    static assert(false,
+        T.stringof ~ " declares toPGValue, but not with the signature peque " ~
+        "calls. It must be callable on a const value and return a PGValue:\n" ~
+        "    PGValue toPGValue() const\n" ~
+        "Build the result with PGValue.fromText(type, text), which appends the " ~
+        "NUL terminator PGValue requires. Use PGType.GUESS unless you know the " ~
+        "oid.");
+}
+
+/// Write a custom type through its own toPGValue.
+PGValue convertToPG(T)(in T value)
+if (hasPGValueWriter!T) {
+    // Attributes inferred: asserting @safe would require it of every custom type.
+    return value.toPGValue();
+}
+
+/// Inference still deduces @safe through the array and Nullable overloads for
+/// peque's own element types.
+unittest {
+    static assert(__traits(compiles, () @safe { cast(void) convertToPG([1, 2, 3]); }),
+        "int[] must still convert in @safe code");
+    static assert(__traits(compiles, () @safe { cast(void) convertToPG(["a", "b"]); }),
+        "string[] must still convert in @safe code");
+    static assert(__traits(compiles, () @safe { cast(void) convertToPG(Nullable!int(1)); }),
+        "Nullable!int must still convert in @safe code");
+}
+
+
+/** The oid to declare for T when there is no value to ask (a SQL NULL, an
+  * empty array). A custom type reports GUESS rather than having its toPGValue
+  * called on T.init, which need not be a valid value.
+  **/
+package(peque) PGType _declaredPGType(T)() {
+    static if (hasPGValueWriter!T)
+        return PGType.GUESS;
+    else
+        return convertToPG!T(T.init).type;
 }
 
 

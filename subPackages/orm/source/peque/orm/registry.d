@@ -77,12 +77,42 @@ struct Bind(M, alias RepoTpl) if (isModel!M) {}
 // Registry
 // ---------------------------------------------------------------------------
 
+/// Names every model bound more than once, or "" when the bindings are clean.
+package(peque.orm) string _duplicateBindingError(Bindings...)() {
+    bool[string] seen, reported;
+    string[] dups;
+    static foreach (B; Bindings) {{
+        static if (is(B == Bind!(M, RepoTpl), M, alias RepoTpl)) {
+            if (M.mangleof in seen) {
+                if (M.mangleof !in reported) {
+                    reported[M.mangleof] = true;
+                    dups ~= M.stringof;
+                }
+            } else
+                seen[M.mangleof] = true;
+        }
+    }}
+    if (dups.length == 0) return "";
+
+    string list;
+    foreach (i, d; dups) { if (i) list ~= ", "; list ~= d; }
+    return "Registry binds " ~ (dups.length == 1 ? "model " : "models ") ~ list ~
+        " more than once. Bind each model in exactly one registry; if this one " ~
+        "comes from MergeRegistries, two of its inputs claim the same model.";
+}
+
 /** Compile-time registry of model→repository bindings.
   *
   * Pass Bind!(M, RepoTpl) instances as template arguments.
+  *
+  * Binding one model twice is a compile error, including through
+  * MergeRegistries, which is a plain concatenation.
   **/
 struct Registry(Bindings...) {
     alias _bindings = Bindings;
+
+    private enum _dupError = _duplicateBindingError!Bindings();
+    static assert(_dupError.length == 0, _dupError);
 }
 
 /// Composing a registry and looking a model up in it.

@@ -122,6 +122,29 @@ auto getPGTypeInfoByOid(in PGTypeInfo[] types, in int oid) {
 }
 
 
+auto generatePGTypeNameFunc(in PGTypeInfo[] types) {
+    immutable indent = "    ";
+    immutable dindent = indent ~ indent;
+    string result = q"<
+/** Name of a PGType, without std.format.
+  *
+  * `to!string` on an enum instantiates std.format's formatter over every
+  * member, at a noticeable compile-time cost. A plain switch, not
+  * `final switch`: an OID read from a result need not be a member.
+  **/
+string pgTypeName(in PGType type) @safe pure nothrow {
+    with(PGType) switch(type) {
+>";
+    foreach(type; types)
+        result ~= dindent ~ "case %s: return \"%s\";\n".format(
+            type.name.toUpper, type.name.toUpper);
+    result ~= dindent ~ "default: return \"UNKNOWN\";\n";
+    result ~= indent ~ "}\n";
+    result ~= "}\n";
+    return result;
+}
+
+
 auto generatePGTypeInfoFunc(in PGTypeInfo[] types) {
     immutable indent = "    ";
     immutable dindent = indent ~ indent;
@@ -136,12 +159,17 @@ immutable struct PGTypeInfo {
 
 /** Return extra info about postgres type
   *
+  * Not a `final switch`: an OID read from a result (a user-defined, extension
+  * or newer type) need not be a member, and `final switch` answers that with
+  * SwitchError, or SIGILL under `-release`. An unknown type's array type is
+  * GUESS.
+  *
   * Params:
   *     type = PGType to get extra info for
   * Returns: PGTypeInfo struct that represents extra info about this PGType
   **/
-PGTypeInfo getPgTypeInfo(in PGType type) @safe pure {
-    with(PGType) final switch(type) {
+PGTypeInfo getPgTypeInfo(in PGType type) @safe pure nothrow {
+    with(PGType) switch(type) {
 >";
 
     foreach(type; types) {
@@ -152,6 +180,7 @@ PGTypeInfo getPgTypeInfo(in PGType type) @safe pure {
 
     }
 
+    result ~= dindent ~ "default: return PGTypeInfo(type, GUESS);\n";
     result ~= indent ~ "}\n";
     result ~= "}\n";
     return result;
@@ -176,5 +205,7 @@ void main() {
     result ~= generatePGTypeEnum(pg_types);
     result ~= "\n";
     result ~= generatePGTypeInfoFunc(pg_types);
+    result ~= "\n";
+    result ~= generatePGTypeNameFunc(pg_types);
     write(result);
 }

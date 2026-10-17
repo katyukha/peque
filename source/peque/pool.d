@@ -84,9 +84,11 @@ struct ConnectionPool(Sem, Mtx) {
       * returns or throws — even if an exception propagates.
       *
       * A pre-use health check replaces the connection if its cached status
-      * is not CONNECTION_OK. A post-use health check additionally replaces
-      * connections that went dead during the call (e.g. server-side idle
-      * timeout that closed the TCP socket while PQstatus still reported OK).
+      * is not CONNECTION_OK or the server sent something on it while it sat
+      * idle (a terminated backend). A post-use health check replaces it if
+      * the status went bad during the call or fun threw — a socket that
+      * broke mid-call can leave PQstatus reporting OK, so any exception
+      * marks the connection suspect.
       * The post-use check is best-effort: if the factory throws, the broken
       * connection is left in the slot and the next borrower's pre-use check
       * will retry, so the pool never deadlocks.
@@ -154,7 +156,7 @@ struct ConnectionPool(Sem, Mtx) {
     }
 
     private void _healthCheck(size_t idx) {
-        if (_conns[idx].status != CONNECTION_OK) {
+        if (_conns[idx].status != CONNECTION_OK || _hasUnreadInput(idx)) {
             _conns[idx] = _factory();
             return;
         }
@@ -163,6 +165,26 @@ struct ConnectionPool(Sem, Mtx) {
         // transaction. No caller to blame at this point.
         if (_hasOpenTransaction(idx) && !_rollbackSafe(idx))
             _conns[idx] = _factory();
+    }
+
+    /** Whether the server sent anything while the connection sat idle.
+      *
+      * PQstatus is cached until libpq next reads the socket, so a backend the
+      * server terminated still reports CONNECTION_OK while its FATAL sits
+      * unread. An idle connection has nothing to read unless the server spoke
+      * unprompted, which is nearly always its last word; the benign case, a
+      * NOTIFY on a channel an earlier borrow LISTENed on, costs a reconnect.
+      * Zero-timeout poll: never waits.
+      **/
+    private bool _hasUnreadInput(size_t idx) nothrow {
+        import core.sys.posix.poll : poll, pollfd, POLLIN;
+        try {
+            auto pfd = pollfd(_conns[idx].socketFd(), POLLIN, 0);
+            // POLLHUP, POLLERR and POLLNVAL are reported regardless of events.
+            return poll(&pfd, 1, 0) > 0;
+        } catch (Exception) {
+            return true;
+        }
     }
 
     /** Roll back a transaction the borrow left open, and do not hide the leak.

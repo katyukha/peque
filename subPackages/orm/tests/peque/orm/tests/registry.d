@@ -272,3 +272,49 @@ unittest {
     assert(notes[1].title == "High");
     assert(notes[2].title == "Mid");
 }
+
+
+// ---------------------------------------------------------------------------
+// A model may be bound only once
+// ---------------------------------------------------------------------------
+
+@model("dup_a") private struct DupA { @primaryKey int id; @field string name; }
+@model("dup_b") private struct DupB { @primaryKey int id; @field string name; }
+
+unittest {
+    // Directly declared duplicate.
+    static assert(!__traits(compiles,
+        Registry!(Bind!(DupA, ModelRepo!DupA), Bind!(DupA, ModelRepo!DupA))._bindings),
+        "binding one model twice must not compile");
+
+    // A different repo template for the same model is still a duplicate.
+    static assert(!__traits(compiles,
+        Registry!(Bind!(DupA, ModelRepo!DupA), Bind!(DupA, TagRepo))._bindings),
+        "re-binding a model to another repo must not compile");
+
+    // Two modules each claim the model; the merge is a plain concatenation.
+    alias ModuleOne = Registry!(Bind!(DupA, ModelRepo!DupA));
+    alias ModuleTwo = Registry!(Bind!(DupA, ModelRepo!DupA), Bind!(DupB, ModelRepo!DupB));
+    static assert(!__traits(compiles, MergeRegistries!(ModuleOne, ModuleTwo)._bindings),
+        "merging two registries that both bind a model must not compile");
+
+    // Distinct models merge cleanly and stay findable.
+    alias Clean = MergeRegistries!(Registry!(Bind!(DupA, ModelRepo!DupA)),
+                                   Registry!(Bind!(DupB, ModelRepo!DupB)));
+    static assert(Clean._bindings.length == 2);
+    static assert(__traits(isSame, RegistryRepoFor!(Clean, DupA), ModelRepo!DupA));
+    static assert(__traits(isSame, RegistryRepoFor!(Clean, DupB), ModelRepo!DupB));
+}
+
+/// The message names every offending model, each once however often it repeats.
+unittest {
+    import peque.orm.registry: _duplicateBindingError;
+    import std.algorithm.searching: canFind, count;
+
+    enum many = _duplicateBindingError!(
+        Bind!(DupA, ModelRepo!DupA), Bind!(DupB, ModelRepo!DupB),
+        Bind!(DupA, ModelRepo!DupA), Bind!(DupB, ModelRepo!DupB),
+        Bind!(DupA, ModelRepo!DupA))();
+    static assert(many.canFind("DupA") && many.canFind("DupB"), many);
+    static assert(many.count("DupA") == 1, many);
+}

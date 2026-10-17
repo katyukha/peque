@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Custom types** — a type declaring
+  `static T fromPGText(scope const(char)[] text, PGType oid)` and
+  `PGValue toPGValue() const` works everywhere a built-in does, including as
+  `Nullable!T` and `T[]`; build the value with `PGValue.fromText`. Covers
+  extension types such as PostGIS `geometry`. See *Custom types* in the README.
+
+- **`pgTypeName(PGType)`** — a type's name without `std.format`, which
+  `to!string` on the enum pulls in at a noticeable compile-time cost. Returns
+  `"UNKNOWN"` for an OID that is not a member.
+
 - **`peque:orm`** — compile-time ORM: model registry, schema generation,
   QuerySets and CRUD. `select!DTO` projects into a flat struct whose members are
   columns on the queried table; `@field(related: "partner.name")` projects a
@@ -95,6 +105,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   identifier.
 
 ### Fixed
+
+- **The pool lent connections the server had already terminated** — after a
+  server restart, `pg_terminate_backend` or `idle_session_timeout`, the next
+  borrower's first statement failed with `FATAL: terminating connection`. The
+  pre-use check now also replaces a connection with unread input on its socket.
+
+- **Binding one model twice in a `Registry` is now a compile error** (breaking),
+  including through `MergeRegistries`. It compiled silently, and `schemaSQL`
+  emitted the model's `CREATE TABLE` twice.
+
+- **`getPgTypeInfo` crashed on an OID it did not know** — `SwitchError`, or
+  SIGILL under `-release`, for any user-defined, extension or newer type in a
+  result. Its array type is now reported as `GUESS`.
 
 - **A nested `transaction()` silently committed the OUTER transaction** (breaking
   — it now throws `QueryClientError`). PostgreSQL ignores a nested `BEGIN`, so
