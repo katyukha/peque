@@ -193,12 +193,8 @@ unittest {
 // A custom type through the whole ORM surface
 // ---------------------------------------------------------------------------
 
-/** The converter hooks are core, but the ORM is where they are actually used —
-  * a column type reaches convertToPG through a predicate and comes back through
-  * hydration. Covering it here rather than in the core suite keeps both halves
-  * of the claim honest: the hooks work for a consumer, and they work through
-  * the layer a consumer builds on.
-  **/
+/// A custom converter type as a model field: written through CRUD, predicates
+/// and set!, read back through RETURNING, findById and select!DTO.
 private struct Cents {
     long v;
 

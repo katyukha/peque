@@ -169,23 +169,18 @@ struct ConnectionPool(Sem, Mtx) {
 
     /** Whether the server sent anything while the connection sat idle.
       *
-      * PQstatus is cached: it changes only when libpq next reads the socket,
-      * so a backend the server terminated — a restart, pg_terminate_backend,
-      * idle_session_timeout — still reports CONNECTION_OK, and its FATAL and
-      * the close sit unread until the borrower's first statement fails on
-      * them.  An idle connection has nothing to read unless the server spoke
-      * unprompted, which is nearly always its last word. The benign case is
-      * a NOTIFY for a channel an earlier borrow LISTENed on: replacing that
-      * connection ends the subscription, which a pooled connection should
-      * not hold anyway.
-      * A zero-timeout poll, so the check never waits.
+      * PQstatus is cached until libpq next reads the socket, so a backend the
+      * server terminated still reports CONNECTION_OK while its FATAL sits
+      * unread. An idle connection has nothing to read unless the server spoke
+      * unprompted, which is nearly always its last word; the benign case, a
+      * NOTIFY on a channel an earlier borrow LISTENed on, costs a reconnect.
+      * Zero-timeout poll: never waits.
       **/
     private bool _hasUnreadInput(size_t idx) nothrow {
         import core.sys.posix.poll : poll, pollfd, POLLIN;
         try {
             auto pfd = pollfd(_conns[idx].socketFd(), POLLIN, 0);
-            // POLLHUP, POLLERR and POLLNVAL count too: poll reports them
-            // whatever was asked for in events.
+            // POLLHUP, POLLERR and POLLNVAL are reported regardless of events.
             return poll(&pfd, 1, 0) > 0;
         } catch (Exception) {
             return true;

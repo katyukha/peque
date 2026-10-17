@@ -412,13 +412,13 @@ T convertTextTypeToD(T)(
         in int length,
         in PGType pg_type)
 if (isArray!T && !isSomeString!T) {
-    // Attributes inferred: a blanket @trusted would let @safe code run a
-    // custom element reader peque has never seen. Only the slice is trusted.
+    // Only the slice is trusted: a blanket @trusted would let @safe code run a
+    // custom element reader that is not @safe.
     scope buf = () @trusted { return data[0 .. length]; }();
     if (length <= 2)
         return T.init;
     enforce(buf[0] == '{', _readError!T(
-        "Value is not array!\n Value: %s".format(buf[0 .. length]),
+        "Value is not array!\n Value: %s".format(buf),
         pg_type, data, length));
     enforce(buf[1] != '{', _readError!T(
         "Multidimensional arrays are not supported at the moment",
@@ -480,9 +480,7 @@ if (isArray!T && !isSomeString!T) {
 
                         // A quoted value is always a literal — a quoted "NULL"
                         // is the string "NULL", not a SQL NULL.
-                        // `.ptr` is @system, and &tmp_value[0] would
-                        // bounds-error on a legitimate empty element. Only the
-                        // pointer is trusted; the conversion stays outside.
+                        // Not &tmp_value[0]: an empty element is legitimate.
                         scope tvPtr = () @trusted {
                             return tmp_value.length ? &tmp_value[0] : null;
                         }();
@@ -523,12 +521,12 @@ if (isArray!T && !isSomeString!T) {
   *
   *     static T fromPGText(scope const(char)[] text, PGType oid);
   *
-  * The built-in struct types are excluded, or a fromPGText on Date or Nullable
-  * would make two overloads match and the call ambiguous.
+  * The built-in struct types are excluded, or two overloads would match and
+  * the call would be ambiguous.
   *
-  * COPY THE TEXT — do not retain the slice. It points into libpq's result
-  * buffer, freed with the Result. `scope` says so but cannot enforce it without
-  * -preview=dip1000, which peque does not use.
+  * Copy the text, do not retain the slice: it points into libpq's result
+  * buffer, freed with the Result. `scope` cannot enforce that without
+  * -preview=dip1000.
   **/
 template hasPGTextReader(T) {
     enum hasPGTextReader =
@@ -546,11 +544,8 @@ package(peque) template _isBuiltinPGStruct(T) {
         is(U == UUID) || is(U == JSONValue) || is(U == Nullable!V, V);
 }
 
-/** A type that declares fromPGText with the wrong signature.
-  *
-  * Without this the predicate is silently false and the caller sees "none of
-  * the overloads are callable", which never mentions fromPGText. Disjoint from
-  * hasPGTextReader, which requires the call to compile, so both can never match.
+/** A type that declares fromPGText with the wrong signature: name the expected
+  * one, instead of "none of the overloads are callable".
   **/
 T convertTextTypeToD(T)(
         scope const char* data,
@@ -572,11 +567,8 @@ T convertTextTypeToD(T)(
         in int length,
         in PGType pg_type)
 if (hasPGTextReader!T) {
-    // Attributes inferred, not asserted: @trusted here would have peque vouch
-    // for a reader it has never seen. Only the pointer slice is trusted.
-    //
-    // `oid` is PGType.GUESS for an ARRAY ELEMENT — the array parser has no
-    // per-element type — so a reader cannot distinguish types by oid there.
+    // Only the slice is trusted; the reader's own attributes decide the rest.
+    // For an array element pg_type is GUESS: the parser has no per-element type.
     scope text = () @trusted {
         return data is null ? null : data[0 .. length];
     }();

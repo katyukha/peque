@@ -126,18 +126,11 @@ auto generatePGTypeNameFunc(in PGTypeInfo[] types) {
     immutable indent = "    ";
     immutable dindent = indent ~ indent;
     string result = q"<
-/** Name of a PGType, as a jump table.
+/** Name of a PGType, without std.format.
   *
-  * `std.conv.to!string` on an enum falls back to std.format's generic
-  * machinery, which instantiates a formatter over every member of this enum
-  * and costs ~80ms of compile time in any build that touches a PGValue. This
-  * answers the same question for nothing, and keeps std.format out of the
-  * conversion layer entirely.
-  *
-  * A plain switch rather than `final switch`: OIDs read from a result come from
-  * the SERVER, so a type from a newer PostgreSQL — or an extension type such as
-  * PostGIS geometry — is not a member here and must not throw from a path that
-  * exists to build a diagnostic.
+  * `to!string` on an enum instantiates std.format's formatter over every
+  * member, at a noticeable compile-time cost. A plain switch, not
+  * `final switch`: an OID read from a result need not be a member.
   **/
 string pgTypeName(in PGType type) @safe pure nothrow {
     with(PGType) switch(type) {
@@ -165,6 +158,11 @@ immutable struct PGTypeInfo {
 
 
 /** Return extra info about postgres type
+  *
+  * Not a `final switch`: an OID read from a result (a user-defined, extension
+  * or newer type) need not be a member, and `final switch` answers that with
+  * SwitchError, or SIGILL under `-release`. An unknown type's array type is
+  * GUESS.
   *
   * Params:
   *     type = PGType to get extra info for

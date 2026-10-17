@@ -43,15 +43,11 @@ private import peque.exception: ConversionError;
         this.isNull = is_null;
     }
 
-    /** Build a text PGValue without having to know the NUL invariant.
-      *
-      * The constructor requires a NUL-terminated value and `length` counts the
-      * terminator; this appends it. Use it from a `toPGValue` hook, with
-      * `PGType.GUESS` unless the oid is known.
+    /** Build a text PGValue, appending the NUL terminator the constructor
+      * requires. Use it from a `toPGValue` hook, with `PGType.GUESS` unless
+      * the oid is known.
       **/
     static PGValue fromText(PGType type, scope const(char)[] text) @safe pure {
-        // `~` allocates the result once and copies; an intermediate .idup
-        // would double that for nothing.
         return PGValue(type, PGFormat.TEXT, text ~ '\0');
     }
 
@@ -60,9 +56,8 @@ private import peque.exception: ConversionError;
 
     string toString() const {
         import std.conv: text;
-        // Deliberately not std.format: formatting the PGType enum instantiates
-        // a formatter over all of its members, which is ~80ms of compile time
-        // in every build that touches a PGValue.
+        // Not std.format: formatting the PGType enum instantiates a formatter
+        // over all of its members, at a noticeable compile-time cost.
         return text("type=", type.pgTypeName,
                     ", format=", format == PGFormat.TEXT ? "TEXT" : "BINARY",
                     ", length=", value.length,
@@ -252,9 +247,8 @@ PGValue convertToPG(T)(in T value)
 
 /// ditto
 PGValue convertToPG(T) (in T value)
-// Attributes inferred: safety depends on the ELEMENT type, so asserting @safe
-// would bar arrays of a custom type whose writer is not. Built-ins still infer
-// @safe — pinned by a unittest below.
+// Attributes inferred: safety depends on the element type, which may be a
+// custom type whose writer is not @safe.
 if (isArray!T && !isSomeString!T) {
     alias TI = ElementType!T;
     auto PGArrayType = getPgTypeInfo(_declaredPGType!TI()).array_type;
@@ -334,15 +328,12 @@ if (is(Unqual!T == Nullable!U, U)) {
 // Custom types
 // ---------------------------------------------------------------------------
 
-/// fromText must NUL-terminate, and length counts the terminator — the whole
-/// reason a hook should use it instead of building a PGValue by hand.
+/// fromText NUL-terminates, and length counts the terminator.
 unittest {
     auto v = PGValue.fromText(PGType.INT4, "42");
     assert(v.value == "42\0");
     assert(v.length == 3);
-    assert(v.type == PGType.INT4);
 
-    // An empty value is legitimate and must still be terminated.
     auto e = PGValue.fromText(PGType.GUESS, "");
     assert(e.value == "\0");
     assert(e.length == 1);
@@ -353,22 +344,22 @@ unittest {
   *
   *     PGValue toPGValue() const;
   *
-  * Build the result with `PGValue.fromText`. `PGType.GUESS` lets PostgreSQL
-  * infer the type, which an extension type must do — its oid is assigned at
-  * CREATE EXTENSION time, so it is not a compile-time constant.
+  * Build the result with `PGValue.fromText`, using `PGType.GUESS` for an
+  * extension type: its oid is assigned at CREATE EXTENSION time, so it is not
+  * a compile-time constant.
   *
   * Built-in struct types are excluded, as for hasPGTextReader.
   **/
 template hasPGValueWriter(T) {
     private alias U = Unqual!T;
+    // Checked on a const value, because that is how convertToPG calls it.
     enum hasPGValueWriter =
         is(U == struct) && !_isBuiltinPGStruct!U &&
-        __traits(compiles, { PGValue v = U.init.toPGValue(); });
+        __traits(compiles, { PGValue v = (const U).init.toPGValue(); });
 }
 
 /// A type that declares toPGValue with the wrong signature; see the reader
 /// counterpart in pg_to_d.d.
-
 PGValue convertToPG(T)(in T value)
 if (is(Unqual!T == struct) && !_isBuiltinPGStruct!(Unqual!T) &&
     __traits(hasMember, Unqual!T, "toPGValue") && !hasPGValueWriter!T)
@@ -385,14 +376,12 @@ if (is(Unqual!T == struct) && !_isBuiltinPGStruct!(Unqual!T) &&
 /// Write a custom type through its own toPGValue.
 PGValue convertToPG(T)(in T value)
 if (hasPGValueWriter!T) {
-    // Attributes inferred, not asserted: forcing @safe would make it a
-    // requirement on every custom type.
+    // Attributes inferred: asserting @safe would require it of every custom type.
     return value.toPGValue();
 }
 
-/** Inference must still deduce @safe for peque's OWN element types, or relaxing
-  * the array and Nullable overloads silently costs every existing caller its
-  * guarantee. **/
+/// Inference still deduces @safe through the array and Nullable overloads for
+/// peque's own element types.
 unittest {
     static assert(__traits(compiles, () @safe { cast(void) convertToPG([1, 2, 3]); }),
         "int[] must still convert in @safe code");
@@ -403,13 +392,9 @@ unittest {
 }
 
 
-/** The oid to declare for T when there is no value to ask.
-  *
-  * A SQL NULL and an empty array still name a type. For peque's own types that
-  * means converting T.init. For a custom type it would mean calling the user's
-  * toPGValue on T.init purely to read an oid back — liable to throw on a type
-  * whose .init is not valid — so such a type reports GUESS and the server
-  * infers.
+/** The oid to declare for T when there is no value to ask (a SQL NULL, an
+  * empty array). A custom type reports GUESS rather than having its toPGValue
+  * called on T.init, which need not be a valid value.
   **/
 package(peque) PGType _declaredPGType(T)() {
     static if (hasPGValueWriter!T)

@@ -1,14 +1,8 @@
-/** Custom types, defined OUTSIDE the peque package.
+/** Custom types (`fromPGText` / `toPGValue`), as a consumer sees them.
   *
-  * `hasPGTextReader` / `hasPGValueWriter` are the extension point for types
-  * peque does not know — an extension type such as PostGIS geometry, or an
-  * application's own value type. Whether they actually work for a CONSUMER is
-  * not something a `peque.tests.*` module can answer: it sits inside the
-  * package and can reach what an outsider cannot. This module is named outside
-  * the namespace on purpose, exactly as `external_consumer.d` is for the ORM.
-  *
-  * Both directions are covered, plus the composition that should come for free
-  * because the Nullable and array overloads recurse into the element type.
+  * Named outside the `peque` package so that package-level access cannot make
+  * the hooks look usable when they are not, as `external_consumer.d` does for
+  * the ORM.
   **/
 module external_type;
 
@@ -26,14 +20,10 @@ private import peque.pg_type: PGType;
 // The custom types
 // ---------------------------------------------------------------------------
 
-/** A value type that PARSES rather than passing text through, so the hooks are
-  * doing real work in both directions.
+/** A value type that parses its text rather than passing it through.
   *
-  * `_constructed` is false in `Money.init`, and toPGValue asserts on it. That
-  * is deliberate: peque must never call the write hook on `T.init` merely to
-  * discover an oid for a SQL NULL or an empty array — a real custom type's
-  * `.init` is often not a valid value. If that guard regresses, these tests
-  * fail here rather than somewhere subtle.
+  * toPGValue asserts on `Money.init`: peque must not call the writer on
+  * `T.init` to find an oid for a SQL NULL or an empty array.
   **/
 struct Money {
     private long cents;
@@ -44,21 +34,17 @@ struct Money {
     long asCents() const { return cents; }
 
     static Money fromPGText(scope const(char)[] text, PGType oid) {
-        // Sent as a plain numeric string; oid is whatever the column declares.
         return Money(text.to!long);
     }
 
     PGValue toPGValue() const {
         assert(_constructed, "peque called toPGValue on Money.init");
-        // GUESS lets the server infer the type from context, which is what a
-        // type with no compile-time oid must do.
         return PGValue.fromText(PGType.GUESS, cents.to!string);
     }
 }
 
-/** A text-shaped custom type whose value can contain the characters that make
-  * a PostgreSQL array literal ambiguous — comma, quote, backslash, braces.
-  **/
+/// A text-shaped custom type, for array elements with comma, quote, backslash
+/// and braces.
 struct Label {
     string text;
 
@@ -99,18 +85,18 @@ unittest {
     static struct Plain { int x; }
     static assert(!hasPGTextReader!Plain && !hasPGValueWriter!Plain);
 
-    // Near-miss signatures must NOT satisfy the predicate — a lenient one would
-    // silently take a hook peque then calls wrongly. The catch-all overloads
-    // turn each of these into a static assert naming the expected signature.
+    // Near-miss signatures do not qualify, so the catch-all overloads report
+    // the expected signature instead of failing inside peque.
     static struct NoOid    { int v; static NoOid    fromPGText(scope const(char)[] t) { return NoOid(0); } }
     static struct NotStatic{ int v;        NotStatic fromPGText(scope const(char)[] t, PGType o) { return NotStatic(0); } }
     static struct BadRet   { int v; string toPGValue() const { return "0"; } }
+    static struct NonConst { int v; PGValue toPGValue() { return PGValue.fromText(PGType.GUESS, "0"); } }
     static assert(!hasPGTextReader!NoOid,     "a reader missing the oid parameter must not qualify");
     static assert(!hasPGTextReader!NotStatic, "a non-static reader must not qualify");
     static assert(!hasPGValueWriter!BadRet,   "a writer not returning PGValue must not qualify");
+    static assert(!hasPGValueWriter!NonConst, "a non-const writer must not qualify");
 
-    // peque's own struct types must never match, or the call would be
-    // ambiguous between two overloads rather than resolving to one.
+    // peque's own struct types never match, or the call would be ambiguous.
     static assert(!hasPGTextReader!Date && !hasPGValueWriter!Date);
     static assert(!hasPGTextReader!SysTime && !hasPGValueWriter!SysTime);
     static assert(!hasPGTextReader!UUID && !hasPGValueWriter!UUID);
@@ -128,7 +114,6 @@ unittest {
     auto res = c.execParams("SELECT $1::bigint", Money(1234)).ensureQueryOk;
     assert(res.getValue!Money(0, 0).asCents == 1234);
 
-    // A negative value, to be sure the text is not being mangled.
     assert(c.execParams("SELECT $1::bigint", Money(-99)).ensureQueryOk
             .getValue!Money(0, 0).asCents == -99);
 }
@@ -145,8 +130,7 @@ unittest {
     assert(c.execParams("SELECT $1::bigint", set).ensureQueryOk
             .getValue!(Nullable!Money)(0, 0).get.asCents == 500);
 
-    // The empty case names a type without a value to ask — if peque reached for
-    // Money.init.toPGValue() to find one, the assert in Money would fire.
+    // Must not call Money.init.toPGValue() to find an oid.
     Nullable!Money empty;
     auto r = c.execParams("SELECT $1::bigint", empty).ensureQueryOk;
     assert(r[0][0].isNull);
@@ -167,9 +151,6 @@ unittest {
     assert(back.length == 3);
     assert(back[0].asCents == 1 && back[1].asCents == 22 && back[2].asCents == 333);
 
-    // Comma, double quote, backslash and braces all have meaning inside an
-    // array literal; a custom element type must be quoted and escaped like any
-    // other non-numeric one.
     auto hostile = [Label(`a,b`), Label(`he said "hi"`), Label(`back\slash`),
                     Label(`{braced}`), Label(``)];
     auto labels = c.execParams("SELECT $1::text[]", hostile).ensureQueryOk
@@ -180,8 +161,7 @@ unittest {
     assert(labels[2].text == `back\slash`,   labels[2].text);
     assert(labels[3].text == `{braced}`,     labels[3].text);
 
-    // An empty array names a type with no element to ask — same guard as the
-    // Nullable case above.
+    // Must not call Money.init.toPGValue() either.
     Money[] none;
     assert(c.execParams("SELECT $1::bigint[]", none).ensureQueryOk
             .getValue!(Money[])(0, 0).length == 0);
@@ -232,18 +212,11 @@ unittest {
 // @safe is earned, not asserted
 // ---------------------------------------------------------------------------
 
-/** A reader peque has never seen must not be laundered into @safe.
-  *
-  * A blanket @trusted on the composing overloads (array, Nullable) would let
-  * @safe code reach a @system custom reader THROUGH them, even while the direct
-  * call is refused. Only peque's own pointer arithmetic is trusted, so the
-  * element conversion's attributes decide.
-  *
-  * Both directions matter: refusing the @system case must not cost peque's own
-  * types their @safe-callability.
+/** A @system custom reader stays @system through the array and Nullable
+  * overloads, and peque's own types stay @safe.
   **/
 unittest {
-    static struct SysReader {          // deliberately @system
+    static struct SysReader {
         int v;
         static SysReader fromPGText(scope const(char)[] t, PGType o) {
             int* p; auto q = p + 1;    // pointer arithmetic: @system
@@ -260,7 +233,7 @@ unittest {
         PGValue toPGValue() const @safe { return PGValue.fromText(PGType.GUESS, "0"); }
     }
 
-    // peque's own types keep @safe — the trusted narrowing must not cost this.
+    // peque's own types keep @safe.
     static assert(__traits(compiles, () @safe {
         cast(void) convertTextTypeToD!(int[])(null, 0, PGType.GUESS); }),
         "int[] must stay @safe-callable");

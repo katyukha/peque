@@ -8,22 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **Custom type support** — a type peque does not know plugs in by declaring
+- **Custom types** — a type declaring
   `static T fromPGText(scope const(char)[] text, PGType oid)` and
-  `PGValue toPGValue() const`. It then works everywhere a built-in does, and
-  `Nullable!T` / `T[]` come for free. `PGValue.fromText` builds the result
-  without exposing the NUL-termination invariant. Attributes are inferred, so
-  `@safe` is neither required of your type nor vouched for by peque. This is
-  what an extension type such as PostGIS `geometry` needs; the same hooks serve
-  `hstore`, `ltree`, `citext` and `pgvector`. See *Custom types* in the README.
+  `PGValue toPGValue() const` works everywhere a built-in does, including as
+  `Nullable!T` and `T[]`; build the value with `PGValue.fromText`. Covers
+  extension types such as PostGIS `geometry`. See *Custom types* in the README.
 
-- **`pgTypeName(PGType)`** — the type's name without `std.format`. `to!string`
-  on an enum falls back to std.format's generic machinery, which instantiates a
-  formatter over all 125 members; the two `PGValue` sites that did so cost ~260ms
-  of compile time in every build touching the conversion layer. Emitted as a jump
-  table by `tools/generate_pg_type.d` beside the enum. Unlike `getPgTypeInfo` it
-  is a plain `switch`: OIDs read from a result come from the server, so a type
-  from a newer PostgreSQL returns `"UNKNOWN"` rather than throwing.
+- **`pgTypeName(PGType)`** — a type's name without `std.format`, which
+  `to!string` on the enum pulls in at a noticeable compile-time cost. Returns
+  `"UNKNOWN"` for an OID that is not a member.
 
 - **`peque:orm`** — compile-time ORM: model registry, schema generation,
   QuerySets and CRUD. `select!DTO` projects into a flat struct whose members are
@@ -114,27 +107,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **The pool lent connections the server had already terminated** — after a
-  PostgreSQL restart, `pg_terminate_backend` or `idle_session_timeout`, the
-  borrower's first statement failed with `FATAL: terminating connection due to
-  administrator command`, once per pooled connection. `PQstatus` is cached and
-  changes only when libpq next reads the socket, where the server's farewell
-  sat unread. The pre-use check now polls the socket with a zero timeout and
-  replaces a connection that has unread input: an idle connection has none
-  unless the server spoke unprompted.
+  server restart, `pg_terminate_backend` or `idle_session_timeout`, the next
+  borrower's first statement failed with `FATAL: terminating connection`. The
+  pre-use check now also replaces a connection with unread input on its socket.
 
-- **Binding one model twice in a `Registry` is now a compile error** (breaking).
-  `MergeRegistries` is a plain concatenation, so two modules each claiming a
-  model compiled silently: `schemaSQL` emitted its `CREATE TABLE` twice and only
-  `RegistryRepoFor` complained, and only if something looked that model up. The
-  error names the offending model(s).
+- **Binding one model twice in a `Registry` is now a compile error** (breaking),
+  including through `MergeRegistries`. It compiled silently, and `schemaSQL`
+  emitted the model's `CREATE TABLE` twice.
 
-- **`getPgTypeInfo` crashed on a type it did not know** — `SwitchError` in a
-  debug build, **SIGILL under `-release`**, because a `final switch` compiles to
-  a halt once the check is stripped. Result column types are
-  `cast(PGType) PQftype(...)`, a raw server OID, so any user-defined type,
-  extension type (PostGIS `geometry`, `hstore`) or type from a newer PostgreSQL
-  reaches it as a non-member. It now reports `GUESS` — OID 0, the enum's
-  "unspecified" sentinel, which tells the server to infer — and is `nothrow`.
+- **`getPgTypeInfo` crashed on an OID it did not know** — `SwitchError`, or
+  SIGILL under `-release`, for any user-defined, extension or newer type in a
+  result. Its array type is now reported as `GUESS`.
 
 - **A nested `transaction()` silently committed the OUTER transaction** (breaking
   — it now throws `QueryClientError`). PostgreSQL ignores a nested `BEGIN`, so

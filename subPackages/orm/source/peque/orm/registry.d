@@ -77,12 +77,7 @@ struct Bind(M, alias RepoTpl) if (isModel!M) {}
 // Registry
 // ---------------------------------------------------------------------------
 
-/** Names every model bound more than once, or "" when the bindings are clean.
-  *
-  * One pass with a seen-set rather than a pairwise scan: a merged registry in a
-  * modular application holds one binding per model per module, and O(n^2)
-  * mangleof comparisons would show up in build times.
-  **/
+/// Names every model bound more than once, or "" when the bindings are clean.
 package(peque.orm) string _duplicateBindingError(Bindings...)() {
     bool[string] seen, reported;
     string[] dups;
@@ -102,19 +97,16 @@ package(peque.orm) string _duplicateBindingError(Bindings...)() {
     string list;
     foreach (i, d; dups) { if (i) list ~= ", "; list ~= d; }
     return "Registry binds " ~ (dups.length == 1 ? "model " : "models ") ~ list ~
-        " more than once. schemaSQL would emit CREATE TABLE for it twice, and " ~
-        "RegistryRepoFor cannot choose between the bindings. Bind each model in " ~
-        "exactly one registry — when merging registries from separate modules, " ~
-        "two of them are claiming the same model.";
+        " more than once. Bind each model in exactly one registry; if this one " ~
+        "comes from MergeRegistries, two of its inputs claim the same model.";
 }
 
 /** Compile-time registry of model→repository bindings.
   *
   * Pass Bind!(M, RepoTpl) instances as template arguments.
   *
-  * Binding one model twice is a compile error, whether written directly or
-  * produced by MergeRegistries — the merge is a plain concatenation, so this is
-  * where the collision is caught.
+  * Binding one model twice is a compile error, including through
+  * MergeRegistries, which is a plain concatenation.
   **/
 struct Registry(Bindings...) {
     alias _bindings = Bindings;
