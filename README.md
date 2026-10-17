@@ -53,6 +53,58 @@ these subpackages with the scrutiny you would give any young dependency.
 | `SysTime` | `timestamptz` |
 | `T[]` | one-dimensional arrays |
 | `Nullable!T` | any nullable column |
+| your own type | see [Custom types](#custom-types) |
+
+### Custom types
+
+A type peque does not know — an extension type such as PostGIS `geometry`, or
+an application's own value type — plugs in by declaring two methods. Nothing
+needs to change in peque:
+
+```d
+import peque.converter : PGValue;
+import peque.pg_type   : PGType;
+
+struct Money {
+    private long cents;
+    this(long c) { cents = c; }
+
+    static Money fromPGText(scope const(char)[] text, PGType oid) {
+        return Money(text.to!long);
+    }
+
+    PGValue toPGValue() const {
+        // fromText appends the NUL terminator PGValue requires.
+        // GUESS is oid 0 — "server, infer it from context".
+        return PGValue.fromText(PGType.GUESS, cents.to!string);
+    }
+}
+```
+
+`Money` now works everywhere a built-in does: `execParams` parameters, model
+fields, hydration, `select!DTO`, and QuerySet predicates. `Nullable!Money` and
+`Money[]` come for free, because those conversions recurse into the element
+type — array elements are quoted and escaped like any other non-numeric type.
+
+Use `PGType.GUESS` unless you know the oid. An extension type is assigned its
+oid at `CREATE EXTENSION` time, so it differs per database and is not a
+compile-time constant; letting PostgreSQL infer from context is correct for
+`INSERT INTO t (geom) VALUES ($1)`. Where inference is not enough — say
+`ST_Distance($1, $2)` — either return an oid you resolved at runtime, or cast
+in the SQL (`$1::geometry`).
+
+Two things worth knowing:
+
+- **`oid` is `PGType.GUESS` for array elements.** The array parser has no
+  per-element type, so a reader that tells two types apart by oid (`geometry`
+  vs `geography`) cannot do so inside an array.
+- **Copy the text; do not keep the slice.** It points into libpq's result
+  buffer, which is freed with the `Result`. `scope` on the parameter says so
+  but cannot enforce it, so a reader that stores the slice compiles and then
+  dangles. `text.idup` in the example above is not incidental.
+- **Attributes are inferred, not required.** A `@safe` pair of hooks yields a
+  `@safe` conversion; peque does not force `@safe` on your type, and does not
+  vouch for it either — including through `Nullable!T` and `T[]`.
 
 ### Time zones
 

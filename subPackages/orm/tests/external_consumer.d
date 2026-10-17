@@ -23,6 +23,8 @@ private import std.typecons: Nullable, nullable;
 
 private import peque;
 private import peque.orm;
+private import peque.converter: PGValue;
+private import peque.pg_type: PGType;
 
 
 @model("ext_session")
@@ -184,4 +186,76 @@ unittest {
             static assert(joined == "_project_id_legacy_UserId", joined);
         }
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// A custom type through the whole ORM surface
+// ---------------------------------------------------------------------------
+
+/** The converter hooks are core, but the ORM is where they are actually used —
+  * a column type reaches convertToPG through a predicate and comes back through
+  * hydration. Covering it here rather than in the core suite keeps both halves
+  * of the claim honest: the hooks work for a consumer, and they work through
+  * the layer a consumer builds on.
+  **/
+private struct Cents {
+    long v;
+
+    static Cents fromPGText(scope const(char)[] text, PGType oid) {
+        import std.conv: to;
+        return Cents(text.to!long);
+    }
+
+    PGValue toPGValue() const {
+        import std.conv: to;
+        return PGValue.fromText(PGType.GUESS, v.to!string);
+    }
+}
+
+@model("ext_cents_wallet")
+private struct CentsWallet {
+    @primaryKey int    id;
+    @field      string owner;
+    @field      Cents  balance;
+}
+
+@autoHydrate
+private struct CentsDTO { string owner; Cents balance; }
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS ext_cents_wallet`);
+    c.exec(`CREATE TABLE ext_cents_wallet (
+                id serial PRIMARY KEY, owner text, balance bigint)`);
+    scope(exit) c.exec(`DROP TABLE IF EXISTS ext_cents_wallet`);
+
+    auto repo = Repository!(CentsWallet, Connection)(&c);
+
+    // insert + RETURNING hydration of a custom-typed column
+    auto seed  = CentsWallet(0, "ann", Cents(500));
+    auto saved = repo.insert(seed);
+    assert(saved.id > 0);
+    assert(saved.balance.v == 500);
+
+    auto other = CentsWallet(0, "bob", Cents(-25));
+    repo.insert(other);
+
+    // the custom type as a bound predicate value
+    assert(repo.query().where!"balance"(Cents(500)).count() == 1);
+    assert(repo.query().where!"balance"(Cents(-25)).count() == 1);
+    assert(repo.query().where!"balance"(Cents(999)).count() == 0);
+
+    // findById hydrates it back
+    assert(repo.findById(saved.id).get.balance.v == 500);
+
+    // select!DTO projects it
+    auto dtos = repo.query().orderBy!("owner").select!CentsDTO();
+    assert(dtos.length == 2);
+    assert(dtos[0].owner == "ann" && dtos[0].balance.v == 500);
+    assert(dtos[1].owner == "bob" && dtos[1].balance.v == -25);
+
+    // set!() writes it through a bulk update
+    assert(repo.query().where!"owner"("bob").set!"balance"(Cents(7)).update() == 1);
+    assert(repo.query().where!"owner"("bob").first().get.balance.v == 7);
 }

@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Custom type support** — a type peque does not know plugs in by declaring
+  `static T fromPGText(scope const(char)[] text, PGType oid)` and
+  `PGValue toPGValue() const`. It then works everywhere a built-in does, and
+  `Nullable!T` / `T[]` come for free. `PGValue.fromText` builds the result
+  without exposing the NUL-termination invariant. Attributes are inferred, so
+  `@safe` is neither required of your type nor vouched for by peque. This is
+  what an extension type such as PostGIS `geometry` needs; the same hooks serve
+  `hstore`, `ltree`, `citext` and `pgvector`. See *Custom types* in the README.
+
 - **`pgTypeName(PGType)`** — the type's name without `std.format`. `to!string`
   on an enum falls back to std.format's generic machinery, which instantiates a
   formatter over all 125 members; the two `PGValue` sites that did so cost ~260ms

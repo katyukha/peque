@@ -3,7 +3,7 @@ module peque.converter.pg_to_d;
 
 private import std.traits:
     isSomeString, isScalarType, isIntegral, isBoolean, isFloatingPoint,
-    isArray;
+    isArray, Unqual;
 private import std.range: ElementType;
 private import std.format;
 private import std.conv;
@@ -170,7 +170,9 @@ T convertTextTypeToD(T)(
         scope const char* data,
         in int length,
         in PGType pg_type)
-@trusted if (is(T == Nullable!U, U)) {
+// No @trusted: this only forwards the pointer, and the inner conversion may be
+// a custom reader.
+if (is(T == Nullable!U, U)) {
     // Wrap value in nullable type
     static if (is(T == Nullable!U, U))
         return T(convertTextTypeToD!U(data, length, pg_type));
@@ -409,13 +411,16 @@ T convertTextTypeToD(T)(
         scope const char* data,
         in int length,
         in PGType pg_type)
-@trusted if (isArray!T && !isSomeString!T) {
+if (isArray!T && !isSomeString!T) {
+    // Attributes inferred: a blanket @trusted would let @safe code run a
+    // custom element reader peque has never seen. Only the slice is trusted.
+    scope buf = () @trusted { return data[0 .. length]; }();
     if (length <= 2)
         return T.init;
-    enforce(data[0] == '{', _readError!T(
-        "Value is not array!\n Value: %s".format(data[0 .. length]),
+    enforce(buf[0] == '{', _readError!T(
+        "Value is not array!\n Value: %s".format(buf[0 .. length]),
         pg_type, data, length));
-    enforce(data[1] != '{', _readError!T(
+    enforce(buf[1] != '{', _readError!T(
         "Multidimensional arrays are not supported at the moment",
         pg_type, data, length));
     T result;
@@ -423,7 +428,7 @@ T convertTextTypeToD(T)(
     bool backslash = false;     // opened backslash
     bool quoted_value = false;  // if value is quoted
     for(uint start=1, pos=1; pos < length; pos++) {
-        switch(data[pos]) {
+        switch(buf[pos]) {
             case '\"':
                 if (!quoted && !backslash)
                     // start quote of value
@@ -460,9 +465,9 @@ T convertTextTypeToD(T)(
                          * and add to array escaped symbol
                          */
                         for(uint t=ts; t < pos-1; t++) {
-                            if (data[t] == '\\') {
+                            if (buf[t] == '\\') {
                                 // Add to value data before backslash
-                                tmp_value ~= data[ts .. t];
+                                tmp_value ~= buf[ts .. t];
                                 // skip back slash and move to next element just after backslash
                                 ts = t + 1;
                                 t += 1;
@@ -471,13 +476,20 @@ T convertTextTypeToD(T)(
                         if (ts < (pos -1))
                             // if we have something not added yet to tmp_value,
                             // add it
-                            tmp_value ~= data[ts .. pos - 1];
+                            tmp_value ~= buf[ts .. pos - 1];
 
                         // A quoted value is always a literal — a quoted "NULL"
                         // is the string "NULL", not a SQL NULL.
-                        result ~= convertTextTypeToD!(ElementType!T)(tmp_value.ptr, cast(int)tmp_value.length, PGType.GUESS);
+                        // `.ptr` is @system, and &tmp_value[0] would
+                        // bounds-error on a legitimate empty element. Only the
+                        // pointer is trusted; the conversion stays outside.
+                        scope tvPtr = () @trusted {
+                            return tmp_value.length ? &tmp_value[0] : null;
+                        }();
+                        result ~= convertTextTypeToD!(ElementType!T)(
+                            tvPtr, cast(int)tmp_value.length, PGType.GUESS);
                         quoted_value = false;
-                    } else if (data[start .. pos] == "NULL") {
+                    } else if (buf[start .. pos] == "NULL") {
                         // An unquoted NULL token is a SQL NULL element.
                         static if (is(ElementType!T == Nullable!U, U))
                             result ~= ElementType!T.init;   // null element
@@ -489,7 +501,7 @@ T convertTextTypeToD(T)(
                                 ElementType!T.stringof ~ "[] instead.",
                                 pg_type, data, length);
                     } else {
-                        result ~= convertTextTypeToD!(ElementType!T)(&data[start], pos-start, PGType.GUESS);
+                        result ~= convertTextTypeToD!(ElementType!T)(&buf[start], pos-start, PGType.GUESS);
                     }
 
                     start = pos + 1;  // on next iteration pos will be +1, so pos and start will be equal;
@@ -500,6 +512,75 @@ T convertTextTypeToD(T)(
         }
     }
     return result;
+}
+
+
+// ---------------------------------------------------------------------------
+// Custom types
+// ---------------------------------------------------------------------------
+
+/** True when T reads itself from a PostgreSQL text value:
+  *
+  *     static T fromPGText(scope const(char)[] text, PGType oid);
+  *
+  * The built-in struct types are excluded, or a fromPGText on Date or Nullable
+  * would make two overloads match and the call ambiguous.
+  *
+  * COPY THE TEXT — do not retain the slice. It points into libpq's result
+  * buffer, freed with the Result. `scope` says so but cannot enforce it without
+  * -preview=dip1000, which peque does not use.
+  **/
+template hasPGTextReader(T) {
+    enum hasPGTextReader =
+        is(T == struct) && !_isBuiltinPGStruct!T &&
+        __traits(compiles, {
+            T v = T.fromPGText((const(char)[]).init, PGType.init);
+        });
+}
+
+/// The struct types peque converts itself; a custom reader must not shadow them.
+package(peque) template _isBuiltinPGStruct(T) {
+    private alias U = Unqual!T;
+    enum _isBuiltinPGStruct =
+        is(U == Date) || is(U == DateTime) || is(U == SysTime) ||
+        is(U == UUID) || is(U == JSONValue) || is(U == Nullable!V, V);
+}
+
+/** A type that declares fromPGText with the wrong signature.
+  *
+  * Without this the predicate is silently false and the caller sees "none of
+  * the overloads are callable", which never mentions fromPGText. Disjoint from
+  * hasPGTextReader, which requires the call to compile, so both can never match.
+  **/
+T convertTextTypeToD(T)(
+        scope const char* data,
+        in int length,
+        in PGType pg_type)
+if (is(T == struct) && !_isBuiltinPGStruct!T &&
+    __traits(hasMember, T, "fromPGText") && !hasPGTextReader!T)
+{
+    static assert(false,
+        T.stringof ~ " declares fromPGText, but not with the signature peque " ~
+        "calls. It must be STATIC, return " ~ T.stringof ~ ", and take the text " ~
+        "and the column's type:\n" ~
+        "    static " ~ T.stringof ~ " fromPGText(scope const(char)[] text, PGType oid)\n" ~
+        "Common slips: leaving off `static`, or omitting the PGType parameter.");
+}
+
+T convertTextTypeToD(T)(
+        scope const char* data,
+        in int length,
+        in PGType pg_type)
+if (hasPGTextReader!T) {
+    // Attributes inferred, not asserted: @trusted here would have peque vouch
+    // for a reader it has never seen. Only the pointer slice is trusted.
+    //
+    // `oid` is PGType.GUESS for an ARRAY ELEMENT — the array parser has no
+    // per-element type — so a reader cannot distinguish types by oid there.
+    scope text = () @trusted {
+        return data is null ? null : data[0 .. length];
+    }();
+    return T.fromPGText(text, pg_type);
 }
 
 
