@@ -113,6 +113,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **The pool lent connections the server had already terminated** — after a
+  PostgreSQL restart, `pg_terminate_backend` or `idle_session_timeout`, the
+  borrower's first statement failed with `FATAL: terminating connection due to
+  administrator command`, once per pooled connection. `PQstatus` is cached and
+  changes only when libpq next reads the socket, where the server's farewell
+  sat unread. The pre-use check now polls the socket with a zero timeout and
+  replaces a connection that has unread input: an idle connection has none
+  unless the server spoke unprompted.
+
 - **Binding one model twice in a `Registry` is now a compile error** (breaking).
   `MergeRegistries` is a plain concatenation, so two modules each claiming a
   model compiled silently: `schemaSQL` emitted its `CREATE TABLE` twice and only

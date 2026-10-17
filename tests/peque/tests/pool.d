@@ -123,6 +123,27 @@ unittest {
 }
 
 
+/** Pre-use health check: a connection the SERVER terminated while it sat idle
+  * in the pool — a restart, pg_terminate_backend, idle_session_timeout — is
+  * replaced before it is lent.  libpq's cached status still reads OK until the
+  * socket is read, so without the check the next borrower's first statement
+  * fails on the server's farewell. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+    immutable pid = pool.borrow((ref Connection conn) =>
+        conn.exec("SELECT pg_backend_pid()")[0][0].get!int);
+
+    // With a timeout, pg_terminate_backend returns once the backend has exited,
+    // so its FATAL and the close are on our socket before the next borrow.
+    auto other = makeFactory()();
+    assert(other.execParams("SELECT pg_terminate_backend($1, 5000)", pid)[0][0].get!bool);
+
+    immutable newPid = pool.borrow((ref Connection conn) =>
+        conn.exec("SELECT pg_backend_pid()")[0][0].get!int);
+    assert(newPid != pid);
+}
+
+
 /** Range API works through a pool borrow (multi-row result iteration). **/
 unittest {
     import std.algorithm: map;
