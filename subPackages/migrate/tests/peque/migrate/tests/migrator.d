@@ -476,6 +476,14 @@ static assert( __traits(compiles, (ref Migrator!(MigrationList!NonTxCtxM) m) { m
 static assert(!__traits(compiles,
     (ref Migrator!(MigrationList!NonTxCtxM) m, ref MigCtx c) { m.migrate(c); }));
 
+// A defaulted second parameter is not a context: both still run without one.
+struct DefaultedArgM {
+    void up(ref Transaction tx, bool dryRun = false) {}
+    void down(ref Transaction tx, bool force = false) {}
+}
+static assert(__traits(compiles,
+    (ref Migrator!(MigrationList!DefaultedArgM) m) { m.migrate(); m.rollback(); }));
+
 unittest {
     auto c = makeConn();
     c.exec(`DROP TABLE IF EXISTS mig_ctx`);

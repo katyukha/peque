@@ -2,7 +2,7 @@ module peque.migrate.migrator;
 
 private import std.format: format;
 private import std.meta: anySatisfy;
-private import std.traits: Parameters;
+private import std.traits: Parameters, ParameterDefaults;
 private import peque.connection: Connection, Transaction;
 private import std.exception: basicExceptionCtors;
 private import peque.exception: PequeException;
@@ -309,10 +309,16 @@ private string _migrationName(M)() {
     return __traits(fullyQualifiedName, M);
 }
 
-// An up()/down() with a second parameter takes the context given to migrate(ctx).
-private enum _hasTwoParams(alias f) = Parameters!f.length == 2;
+// An up()/down() whose second parameter is required takes the context given to
+// migrate(ctx). One with a default there is still callable as up(tx).
+private template _requiresSecondArg(alias f) {
+    static if (Parameters!f.length >= 2)
+        enum _requiresSecondArg = is(ParameterDefaults!f[1] == void);
+    else
+        enum _requiresSecondArg = false;
+}
 private enum _acceptsContext(M, string fn) =
-    anySatisfy!(_hasTwoParams, __traits(getOverloads, M, fn));
+    anySatisfy!(_requiresSecondArg, __traits(getOverloads, M, fn));
 
 /** Content checksum for a migration, or "" when it declares none.
   *
