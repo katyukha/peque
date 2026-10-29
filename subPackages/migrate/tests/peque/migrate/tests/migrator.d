@@ -457,6 +457,9 @@ alias CtxMigs = MigrationList!(M1_CreateFoo, CtxM1);
 // pass merely because the type itself fails to compile.
 static assert(!__traits(compiles, (ref Migrator!CtxMigs m) { m.migrate(); }));
 
+// A context built inline needs no named local.
+static assert(__traits(compiles, (ref Migrator!CtxMigs m) { m.migrate(MigCtx("hi")); }));
+
 struct DownCtxM {
     void up(ref Transaction tx) {}
     void down(ref Transaction tx, ref MigCtx ctx) {}

@@ -1324,7 +1324,9 @@ auto env = MigrationEnv(loadKey());
 Migrator!(AppMigrations)(&conn, "myapp").migrate(env);
 ```
 
-The context is whatever you pass, by reference; peque never looks inside it. Such
+The context is whatever you pass, and peque never looks inside it. A variable is
+passed by reference, so a migration taking `ref` sees the caller's own object; a
+temporary such as `migrate(MigrationEnv(loadKey()))` works too. Such
 a migration is ordered, recorded and run once like any other, so a later
 migration can rely on its result. If the list contains one, plain `migrate()` is a
 compile error rather than a skipped migration. It must stay transactional, and its

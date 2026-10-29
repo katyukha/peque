@@ -15,6 +15,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   containing one is a compile error, as are a context-taking `down()` and
   `enum transactional = false` on such a migration.
 
+### Changed
+
+- **`Migrator.migrate` is now a template** (breaking only for code taking its
+  address: `&m.migrate` no longer compiles). Calls are unaffected.
+
 ## [0.3.1] - 2026-10-17
 
 ### Added

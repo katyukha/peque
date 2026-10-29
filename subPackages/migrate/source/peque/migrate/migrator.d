@@ -57,8 +57,9 @@ if (Migrations.length > 0) {
     // Apply all pending migrations. Each migration runs in its own transaction
     // unless it opts out with `enum transactional = false`.
     //
-    // migrate(ctx) passes ctx, by reference, to every migration whose up() takes
-    // a second parameter; peque never looks inside it. A list containing such a
+    // migrate(ctx) passes ctx to every migration whose up() requires a second
+    // argument — the caller's own object when it is an lvalue, by auto ref —
+    // and peque never looks inside it. A list containing such a
     // migration cannot use plain migrate() — that is a compile error, not a
     // skipped migration.
     //
@@ -70,7 +71,7 @@ if (Migrations.length > 0) {
     // read. Creating it under CREATE TABLE IF NOT EXISTS is not safe against a
     // concurrent creator (PostgreSQL can still raise a duplicate-key error on
     // pg_type), so the lock has to cover that too.
-    void migrate(Ctx...)(ref Ctx ctx) if (Ctx.length <= 1) {
+    void migrate(Ctx...)(auto ref Ctx ctx) if (Ctx.length <= 1) {
         _withLock({
             ensureVersionTable(*_conn);
             auto applied = loadApplied(*_conn, _namespace);
