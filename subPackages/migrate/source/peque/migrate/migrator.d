@@ -1,6 +1,8 @@
 module peque.migrate.migrator;
 
 private import std.format: format;
+private import std.meta: anySatisfy;
+private import std.traits: Parameters;
 private import peque.connection: Connection, Transaction;
 private import std.exception: basicExceptionCtors;
 private import peque.exception: PequeException;
@@ -30,6 +32,10 @@ struct MigrationStatus {
   *
   * A migration is a struct with:
   *   void up(ref Transaction tx)      — required (ref Connection also accepted)
+  *   void up(ref Transaction tx, ref C ctx)
+  *                                    — instead of the above, for a migration
+  *                                      that needs application state; runs
+  *                                      only under migrate(ctx)
   *   void down(ref Transaction tx)    — optional; required to rollback
   *   enum description = "..."         — optional; defaults to the struct name
   *   enum checksum    = "..."         — optional; see _migrationChecksum
@@ -51,11 +57,20 @@ if (Migrations.length > 0) {
     // Apply all pending migrations. Each migration runs in its own transaction
     // unless it opts out with `enum transactional = false`.
     //
+    // migrate(ctx) passes ctx, by reference, to every migration whose up() takes
+    // a second parameter; peque never looks inside it. A list containing such a
+    // migration cannot use plain migrate() — that is a compile error, not a
+    // skipped migration.
+    //
+    // A template even with no context: an ordinary member of this struct
+    // template is compiled for every Migrator, so a plain migrate() would make
+    // a list containing a context-taking migration impossible to instantiate.
+    //
     // The advisory lock is taken FIRST — before the version table is created or
     // read. Creating it under CREATE TABLE IF NOT EXISTS is not safe against a
     // concurrent creator (PostgreSQL can still raise a duplicate-key error on
     // pg_type), so the lock has to cover that too.
-    void migrate() {
+    void migrate(Ctx...)(ref Ctx ctx) if (Ctx.length <= 1) {
         _withLock({
             ensureVersionTable(*_conn);
             auto applied = loadApplied(*_conn, _namespace);
@@ -67,7 +82,7 @@ if (Migrations.length > 0) {
             static foreach (i, M; Migrations) {{
                 enum ver = cast(int)(i + 1);
                 if (ver !in appliedSet)
-                    _applyOne!M(ver);
+                    _applyOne!M(ver, ctx);
             }}
         });
     }
@@ -137,13 +152,13 @@ if (Migrations.length > 0) {
         body_();
     }
 
-    private void _applyOne(M)(int ver) {
+    private void _applyOne(M, Ctx...)(int ver, ref Ctx ctx) {
         enum transactional = !__traits(hasMember, M, "transactional") ||
                              M.transactional;
         static if (transactional) {
             _conn.transaction((ref Transaction tx) {
                 M m;
-                _runUp!M(m, tx);
+                _runUp!M(m, tx, ctx);
                 recordMigration(*_conn, _namespace, ver,
                                 _migrationDesc!M(), _migrationChecksum!M());
             });
@@ -152,6 +167,9 @@ if (Migrations.length > 0) {
             // up() and the bookkeeping insert are not atomic together. A crash
             // between them leaves the change applied but unrecorded, which the
             // next run would retry — write such migrations idempotently.
+            static assert(!_acceptsContext!(M, "up"),
+                _migrationName!M() ~ ": a migration taking a context must run " ~
+                "in a transaction — drop `enum transactional = false`.");
             M m;
             m.up(*_conn);
             recordMigration(*_conn, _namespace, ver,
@@ -162,14 +180,28 @@ if (Migrations.length > 0) {
     // Prefer up(ref Transaction): with the bare Connection a migration can call
     // conn.exec("COMMIT") and escape the atomicity guard that wraps it.
     // up(ref Connection) is accepted as a convenience for simple migrations.
-    private void _runUp(M)(ref M m, ref Transaction tx) {
-        static if (__traits(compiles, m.up(tx)))
+    private void _runUp(M, Ctx...)(ref M m, ref Transaction tx, ref Ctx ctx) {
+        static if (_acceptsContext!(M, "up")) {
+            static assert(Ctx.length == 1,
+                _migrationName!M() ~ ".up() takes a context, so this list must " ~
+                "run with migrate(ctx), not migrate().");
+            m.up(tx, ctx);
+        } else static if (__traits(compiles, m.up(tx)))
             m.up(tx);
-        else
+        else static if (__traits(compiles, m.up(*_conn)))
             m.up(*_conn);
+        else
+            static assert(false, _migrationName!M() ~ ".up() is callable as " ~
+                "neither up(ref Transaction) nor up(ref Connection), nor declared " ~
+                "as up(ref Transaction, ref C) taking a context. A context-taking " ~
+                "up() must not be a template; a template up() also lands here " ~
+                "when its body does not compile.");
     }
 
     private void _runDown(M)(ref M m, ref Transaction tx) {
+        static assert(!_acceptsContext!(M, "down"),
+            _migrationName!M() ~ ".down() cannot take a context: rollback() has " ~
+            "none to pass.");
         static if (__traits(compiles, m.down(tx)))
             m.down(tx);
         else
@@ -276,6 +308,11 @@ private string _migrationDesc(M)() {
 private string _migrationName(M)() {
     return __traits(fullyQualifiedName, M);
 }
+
+// An up()/down() with a second parameter takes the context given to migrate(ctx).
+private enum _hasTwoParams(alias f) = Parameters!f.length == 2;
+private enum _acceptsContext(M, string fn) =
+    anySatisfy!(_hasTwoParams, __traits(getOverloads, M, fn));
 
 /** Content checksum for a migration, or "" when it declares none.
   *

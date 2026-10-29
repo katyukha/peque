@@ -432,6 +432,77 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// up(ref Transaction, ref Ctx) — migrations that need application state
+// ---------------------------------------------------------------------------
+
+struct MigCtx {
+    string greeting;
+    bool   fail;
+    int    calls;
+}
+
+struct CtxM1 {
+    enum description = "seed from context";
+    void up(ref Transaction tx, ref MigCtx ctx) {
+        ctx.calls++;
+        tx.exec(`CREATE TABLE mig_ctx (v text NOT NULL)`);
+        tx.execParams(`INSERT INTO mig_ctx (v) VALUES ($1)`, ctx.greeting);
+        if (ctx.fail) throw new Exception("boom");
+    }
+}
+alias CtxMigs = MigrationList!(M1_CreateFoo, CtxM1);
+
+// Plain migrate() must refuse the list, not skip the migration that needs the
+// context. The unittest below instantiates Migrator!CtxMigs, so this cannot
+// pass merely because the type itself fails to compile.
+static assert(!__traits(compiles, (ref Migrator!CtxMigs m) { m.migrate(); }));
+
+struct DownCtxM {
+    void up(ref Transaction tx) {}
+    void down(ref Transaction tx, ref MigCtx ctx) {}
+}
+struct NonTxCtxM {
+    enum transactional = false;
+    void up(ref Transaction tx, ref MigCtx ctx) {}
+}
+
+// rollback() has no context for this down(), so the list is refused outright
+// rather than rolled back without running it.
+static assert(!__traits(compiles, Migrator!(MigrationList!DownCtxM)));
+
+// A context migration cannot leave the transaction its bookkeeping row shares.
+// status() compiling shows the refusal is migrate(ctx)'s, not the whole type's.
+static assert( __traits(compiles, (ref Migrator!(MigrationList!NonTxCtxM) m) { m.status(); }));
+static assert(!__traits(compiles,
+    (ref Migrator!(MigrationList!NonTxCtxM) m, ref MigCtx c) { m.migrate(c); }));
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS mig_ctx`);
+    cleanup(c, "mig_ctx_ns");
+    auto m = Migrator!(CtxMigs)(&c, "mig_ctx_ns");
+
+    // up(tx, ctx) runs in the transaction that records it: both roll back.
+    MigCtx ctx = { greeting: "hello", fail: true };
+    assertThrown!Exception(m.migrate(ctx));
+    assert(!c.exec(`SELECT to_regclass('mig_ctx') IS NOT NULL`).getValue!bool(0, 0));
+    assert( m.status()[0].applied);
+    assert(!m.status()[1].applied);
+
+    ctx.fail = false;
+    m.migrate(ctx);
+    m.migrate(ctx);
+    // Once failing, once applied, then skipped — and seen through the caller's
+    // ctx, so the migration got a reference rather than a copy.
+    assert(ctx.calls == 2, "expected 2 calls, got " ~ ctx.calls.to!string);
+    assert(c.exec(`SELECT v FROM mig_ctx`).getValue!string(0, 0) == "hello");
+    assert(m.status()[1].applied);
+
+    c.exec(`DROP TABLE IF EXISTS mig_ctx`);
+}
+
+
+// ---------------------------------------------------------------------------
 // enum transactional = false — statements PostgreSQL refuses inside a block
 // ---------------------------------------------------------------------------
 

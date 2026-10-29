@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`peque:migrate`: migrations that take an application context** — a
+  migration declaring `up(ref Transaction tx, ref C ctx)` receives the value
+  passed to `Migrator.migrate(ctx)`, inside the transaction that records it, for
+  data migrations that need keys or configuration. Plain `migrate()` on a list
+  containing one is a compile error, as are a context-taking `down()` and
+  `enum transactional = false` on such a migration.
+
+## [0.3.1] - 2026-10-17
+
+### Added
+
 - **Custom types** — a type declaring
   `static T fromPGText(scope const(char)[] text, PGType oid)` and
   `PGValue toPGValue() const` works everywhere a built-in does, including as
@@ -17,6 +28,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`pgTypeName(PGType)`** — a type's name without `std.format`, which
   `to!string` on the enum pulls in at a noticeable compile-time cost. Returns
   `"UNKNOWN"` for an OID that is not a member.
+
+### Fixed
+
+- **The pool lent connections the server had already terminated** — after a
+  server restart, `pg_terminate_backend` or `idle_session_timeout`, the next
+  borrower's first statement failed with `FATAL: terminating connection`. The
+  pre-use check now also replaces a connection with unread input on its socket.
+
+- **Binding one model twice in a `Registry` is now a compile error** (breaking),
+  including through `MergeRegistries`. It compiled silently, and `schemaSQL`
+  emitted the model's `CREATE TABLE` twice.
+
+- **`getPgTypeInfo` crashed on an OID it did not know** — `SwitchError`, or
+  SIGILL under `-release`, for any user-defined, extension or newer type in a
+  result. Its array type is now reported as `GUESS`.
+
+## [0.3.0] - 2026-09-04
+
+### Added
 
 - **`peque:orm`** — compile-time ORM: model registry, schema generation,
   QuerySets and CRUD. `select!DTO` projects into a flat struct whose members are
@@ -105,19 +135,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   identifier.
 
 ### Fixed
-
-- **The pool lent connections the server had already terminated** — after a
-  server restart, `pg_terminate_backend` or `idle_session_timeout`, the next
-  borrower's first statement failed with `FATAL: terminating connection`. The
-  pre-use check now also replaces a connection with unread input on its socket.
-
-- **Binding one model twice in a `Registry` is now a compile error** (breaking),
-  including through `MergeRegistries`. It compiled silently, and `schemaSQL`
-  emitted the model's `CREATE TABLE` twice.
-
-- **`getPgTypeInfo` crashed on an OID it did not know** — `SwitchError`, or
-  SIGILL under `-release`, for any user-defined, extension or newer type in a
-  result. Its array type is now reported as `GUESS`.
 
 - **A nested `transaction()` silently committed the OUTER transaction** (breaking
   — it now throws `QueryClientError`). PostgreSQL ignores a nested `BEGIN`, so

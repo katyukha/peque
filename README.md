@@ -1299,6 +1299,43 @@ Such a migration is not atomic with its own bookkeeping row, so write it
 idempotently (`IF NOT EXISTS`): a crash between the two leaves the change applied
 but unrecorded, and the next run retries it.
 
+### Migrations that need application state
+
+A data migration sometimes needs something only the application holds: an
+encryption key, configuration, a service. Give `up()` a second parameter and run
+the list with `migrate(ctx)`:
+
+```d
+struct MigrationEnv {
+    SecretKey key;
+}
+
+struct V5_EncryptTokens {
+    enum description = "encrypt api_tokens.token";
+    void up(ref Transaction tx, ref MigrationEnv env) {
+        foreach (row; tx.exec(`SELECT id, token FROM api_tokens`))
+            tx.execParams(`UPDATE api_tokens SET token = $1 WHERE id = $2`,
+                          env.key.seal(row["token"].get!string),
+                          row["id"].get!long);
+    }
+}
+
+auto env = MigrationEnv(loadKey());
+Migrator!(AppMigrations)(&conn, "myapp").migrate(env);
+```
+
+The context is whatever you pass, by reference; peque never looks inside it. Such
+a migration is ordered, recorded and run once like any other, so a later
+migration can rely on its result. If the list contains one, plain `migrate()` is a
+compile error rather than a skipped migration. It must stay transactional, and its
+`down()`, if any, takes no context, since `rollback()` has none to pass.
+
+Do all of its database work through `tx`. A query on another connection, such as
+one borrowed from a pool the context holds, is outside the migration's
+transaction. It cannot see the migration's uncommitted writes, its own writes
+commit even if the migration fails, and it can block forever on a lock the
+migration holds while still holding the migration lock.
+
 ---
 
 ## vibe.d (`peque:vibe`)
