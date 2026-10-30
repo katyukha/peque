@@ -89,9 +89,9 @@ assigned at `CREATE EXTENSION` time, so it is not a compile-time constant;
 where inference is not enough, such as `ST_Distance($1, $2)`, return an oid
 resolved at runtime or cast in the SQL (`$1::geometry`).
 
-- **Copy the text.** It points into libpq's result buffer, which is freed with
-  the `Result`; `scope` cannot enforce this, so a reader that keeps the slice
-  compiles and then dangles.
+- **The text is the reader's to keep.** peque hands `fromPGText` its own
+  GC-owned copy, so storing the slice is safe; the price is one allocation per
+  custom-typed value.
 - **`oid` is `PGType.GUESS` for array elements**, so a reader cannot tell types
   apart by oid inside an array.
 - **Attributes are inferred.** `@safe` hooks give a `@safe` conversion, also

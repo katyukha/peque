@@ -524,9 +524,7 @@ if (isArray!T && !isSomeString!T) {
   * The built-in struct types are excluded, or two overloads would match and
   * the call would be ambiguous.
   *
-  * Copy the text, do not retain the slice: it points into libpq's result
-  * buffer, freed with the Result. `scope` cannot enforce that without
-  * -preview=dip1000.
+  * The text is the reader's own GC-owned copy, so keeping the slice is safe.
   **/
 template hasPGTextReader(T) {
     enum hasPGTextReader =
@@ -569,10 +567,27 @@ T convertTextTypeToD(T)(
 if (hasPGTextReader!T) {
     // Only the slice is trusted; the reader's own attributes decide the rest.
     // For an array element pg_type is GUESS: the parser has no per-element type.
-    scope text = () @trusted {
+    scope raw = () @trusted {
         return data is null ? null : data[0 .. length];
     }();
-    return T.fromPGText(text, pg_type);
+    // The reader gets a copy, since `raw` points into libpq's result buffer,
+    // freed with the Result, and `scope` cannot stop a reader keeping it
+    // without -preview=dip1000. One allocation per value buys the absence of
+    // a rule every custom type would otherwise have to know.
+    return T.fromPGText(raw.idup, pg_type);
+}
+
+// A reader that keeps the slice must not see the source buffer change under
+// it — libpq reuses that memory once the Result is gone.
+unittest {
+    static struct Kept {
+        const(char)[] s;
+        static Kept fromPGText(scope const(char)[] t, PGType oid) { return Kept(t); }
+    }
+    char[] buf = "original".dup;
+    auto v = convertTextTypeToD!Kept(buf.ptr, cast(int) buf.length, PGType.TEXT);
+    buf[] = 'x';
+    assert(v.s == "original", "the reader was handed libpq's own buffer");
 }
 
 

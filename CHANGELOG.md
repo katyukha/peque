@@ -12,6 +12,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   now throw `QueryClientError`). A filter applied conditionally that ended up
   absent deleted or rewrote every row of the table. Affecting the whole table is
   now spelled out: `repo.query().where(Predicate.all).delete_()`.
+- **A custom type's `fromPGText` receives its own copy of the text.** It used
+  to get a slice of libpq's result buffer, freed with the `Result`, so a reader
+  that kept it compiled and then dangled. Keeping the slice is now safe, at one
+  allocation per custom-typed value; readers that copy still work unchanged.
 
 ### Fixed
 
