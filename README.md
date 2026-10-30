@@ -222,23 +222,21 @@ all, such as a business date, which belongs in `Date`.
 `dub.json`:
 ```json
 "dependencies": {
-    "peque": "~>0.2.0"
+    "peque": "~>0.3.0"
 }
 ```
 
 `dub.sdl`:
 ```
-dependency "peque" version="~>0.2.0"
+dependency "peque" version="~>0.3.0"
 ```
 
-Sub-packages are opt-in. Note that `peque:orm` and `peque:migrate` are not part
-of any tagged release yet — they land in the next one; until then depend on the
-repository directly if you want them:
+Sub-packages are opt-in:
 
 ```
-dependency "peque:orm"     version="~>0.2.0"   // ORM layer
-dependency "peque:migrate" version="~>0.2.0"   // migration runner
-dependency "peque:vibe"    version="~>0.2.0"   // vibe.d integration
+dependency "peque:orm"     version="~>0.3.0"   // ORM layer
+dependency "peque:migrate" version="~>0.3.0"   // migration runner
+dependency "peque:vibe"    version="~>0.3.0"   // vibe.d integration
 ```
 
 Choose a configuration depending on how you want to link `libpq`:
@@ -801,8 +799,9 @@ auto first = repo.query().where!"name"("Acme Ltd").first();
 // relation-path predicates like F!"partner.name".isNull (LEFT JOIN semantics).
 long deleted = repo.query().where!"active"(false).delete_();
 
-// Without a where() these affect EVERY row — there is no truncation guard.
-// repo.query().delete_() empties the table; make sure that is what you meant.
+// Without a where() both are refused with QueryClientError, so a filter applied
+// conditionally that ends up absent cannot empty the table. Affecting every row
+// is spelled out: repo.query().where(Predicate.all).delete_().
 // Neither accepts limit()/offset(): PostgreSQL has no row bound on DELETE or
 // UPDATE, so peque rejects the combination rather than silently ignoring it.
 
@@ -1350,7 +1349,7 @@ vibe.d applications. Instead of blocking the OS thread while waiting for
 PostgreSQL, control yields to the vibe.d event loop.
 
 ```d
-dependency "peque:vibe" version="~>0.2.0"
+dependency "peque:vibe" version="~>0.3.0"
 ```
 
 ```d
@@ -1418,7 +1417,10 @@ makes it a pure non-blocking check.
 Caveats worth knowing:
 
 - **Delivery happens only between transactions** — keep the listening
-  connection out of transactions and out of pools.
+  connection out of transactions and out of pools. A pool borrow that returns
+  its connection still subscribed through `listen()` is unsubscribed by the
+  pool and reported as `QueryClientError`, the same way as a borrow that leaves
+  a transaction open.
 - **Subscriptions do not survive reconnect.** On a dead connection
   (`conn.status() != CONNECTION_OK`), build a fresh `Connection` and re-issue
   `listen()` for every channel (peque deliberately has no `PQreset` wrapper).

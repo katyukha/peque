@@ -3,6 +3,9 @@ module peque.pool;
 private import core.sync.semaphore: CoreSemaphore = Semaphore;
 private import core.sync.mutex: Mutex;
 
+private import std.algorithm.sorting: sort;
+private import std.format: format;
+
 private import peque.connection: Connection;
 private import peque.lib.libpq: CONNECTION_OK, PQTRANS_IDLE;
 private import peque.exception: QueryClientError;
@@ -93,6 +96,13 @@ struct ConnectionPool(Sem, Mtx) {
       * connection is left in the slot and the next borrower's pre-use check
       * will retry, so the pool never deadlocks.
       *
+      * A borrow must hand the connection back as it found it. An open
+      * transaction is rolled back and channels subscribed with listen() are
+      * unsubscribed; when fun returned normally, either is then reported as
+      * QueryClientError. LISTEN belongs on a dedicated connection: a pooled
+      * one passes to other borrowers and is replaced when a notification
+      * arrives on it while idle.
+      *
       * Params:
       *     fun = callable accepting (ref Connection); may return any type
       * Returns: whatever fun returns (void allowed)
@@ -173,7 +183,8 @@ struct ConnectionPool(Sem, Mtx) {
       * server terminated still reports CONNECTION_OK while its FATAL sits
       * unread. An idle connection has nothing to read unless the server spoke
       * unprompted, which is nearly always its last word; the benign case, a
-      * NOTIFY on a channel an earlier borrow LISTENed on, costs a reconnect.
+      * NOTIFY for a raw exec("LISTEN …") that listen()'s tracking cannot see,
+      * costs a reconnect.
       * Zero-timeout poll: never waits.
       **/
     private bool _hasUnreadInput(size_t idx) nothrow {
@@ -187,25 +198,40 @@ struct ConnectionPool(Sem, Mtx) {
         }
     }
 
-    /** Roll back a transaction the borrow left open, and do not hide the leak.
+    /** Undo the session state a borrow left behind, and do not hide the leak.
       *
-      * The rollback DISCARDS the borrow's writes, so reporting it matters: a
-      * silent one would lose data with no signal. When fun threw, the
-      * transaction was being abandoned anyway — stay quiet so the caller's
-      * exception propagates unchained. Clearing connOk on a failed rollback
+      * The rollback DISCARDS the borrow's writes, and the unsubscribe ends
+      * delivery its listener is waiting for, so reporting either matters:
+      * silence would lose data or notifications with no signal. When fun
+      * threw, both were being abandoned anyway — stay quiet so the caller's
+      * exception propagates unchained. Clearing connOk on a failed cleanup
       * lets the outer guard replace a connection that cannot be cleaned.
       **/
     private void _reclaimSlot(size_t idx, ref bool connOk) {
-        if (!_hasOpenTransaction(idx)) return;
         immutable borrowSucceeded = connOk;
-        if (!_rollbackSafe(idx)) { connOk = false; return; }
-        if (borrowSucceeded)
-            throw new QueryClientError(
-                "A pooled connection was returned with a transaction still " ~
-                "open, so the pool rolled it back — every write it made is " ~
-                "gone. Something in the borrow ran BEGIN without a matching " ~
+        string leaks;
+        if (_hasOpenTransaction(idx)) {
+            if (!_rollbackSafe(idx)) { connOk = false; return; }
+            leaks ~= "A pooled connection was returned with a transaction " ~
+                "still open, so the pool rolled it back — every write it made " ~
+                "is gone. Something in the borrow ran BEGIN without a matching " ~
                 "COMMIT or ROLLBACK; use conn.transaction(), which does both " ~
-                "for you.");
+                "for you.";
+        }
+        // Only after the rollback: inside a transaction block, PostgreSQL
+        // applies UNLISTEN at commit, so the rollback would undo it.
+        auto channels = _listeningChannels(idx);
+        if (channels.length) {
+            if (!_unlistenAllSafe(idx)) { connOk = false; return; }
+            leaks ~= (leaks.length ? " " : "") ~ format!(
+                "A pooled connection was returned still LISTENing on %(%s, %), " ~
+                "so the pool unsubscribed it. A pooled connection passes to " ~
+                "other borrowers and is replaced when a notification arrives " ~
+                "on it while idle, so nothing would deliver reliably; LISTEN " ~
+                "on a dedicated Connection outside the pool.")(channels.sort);
+        }
+        if (borrowSucceeded && leaks.length)
+            throw new QueryClientError(leaks);
     }
 
     private bool _hasOpenTransaction(size_t idx) nothrow {
@@ -217,6 +243,24 @@ struct ConnectionPool(Sem, Mtx) {
     private bool _rollbackSafe(size_t idx) nothrow {
         try { _conns[idx].exec("ROLLBACK"); return true; }
         catch (Exception) { return false; }
+    }
+
+    private string[] _listeningChannels(size_t idx) nothrow {
+        try { return _conns[idx].listeningChannels; }
+        catch (Exception) { return null; }
+    }
+
+    /** False when the connection could not be unsubscribed.
+      *
+      * Also discards notifications that arrived before UNLISTEN took effect,
+      * so the next borrower is not handed any for channels it never chose.
+      **/
+    private bool _unlistenAllSafe(size_t idx) nothrow {
+        try {
+            _conns[idx].unlistenAll();
+            _conns[idx].getNotifications();
+            return true;
+        } catch (Exception) { return false; }
     }
 
     // D forbids catch inside scope(exit), so this nothrow wrapper replaces

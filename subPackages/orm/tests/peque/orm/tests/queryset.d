@@ -209,9 +209,25 @@ unittest {
     auto rows = seed(c);
     auto repo = Repository!(Item, Connection)(&c);
 
-    auto deleted = repo.query().delete_();
+    auto deleted = repo.query().where(Predicate.all).delete_();
     assert(deleted == 4);
     assert(repo.query().count() == 0);
+}
+
+// A missing where() is refused rather than read as "every row", so a filter
+// applied conditionally that ends up absent cannot empty the table.
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: QueryClientError;
+
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(Item, Connection)(&c);
+
+    assertThrown!QueryClientError(repo.query().delete_());
+    assertThrown!QueryClientError(repo.query().set!"active"(false).update());
+    assert(repo.query().where!"active"(false).count() == 2,
+        "a refused statement must not have reached the server");
 }
 
 

@@ -1601,11 +1601,22 @@ if (isModel!M && isQueryContext!Ctx) {
             "the limit) and filter on that instead.");
     }
 
+    // A where() applied conditionally that ends up absent would otherwise reach
+    // every row, on a destructive statement. Every where-family builder appends
+    // to _wheres, so the whole-table form is still one call away, spelled out.
+    private void _requireFilter(string what) {
+        enforce!QueryClientError(_wheres.length > 0,
+            what ~ " without a where() would affect every row of " ~
+            ormTableName!M ~ ". If that is what you mean, say so: " ~
+            ".where(Predicate.all)." ~ what);
+    }
+
     /** Delete all matching rows and return the number of rows deleted.
       *
-      * WITHOUT a where() this deletes EVERY row in the table — there is no
-      * accidental-truncation guard. `repo.query().delete_()` is a valid way to
-      * empty a table; make sure that is what you meant.
+      * Refused without a filter: a missing where() is a QueryClientError, so a
+      * conditionally applied where() that ends up absent cannot empty the
+      * table. Emptying it on purpose is spelled
+      * `repo.query().where(Predicate.all).delete_()`.
       *
       * When the WHERE clause needs joins (F!"rel.field" predicates or a
       * load!/joinOne! alias), matching rows are selected by primary key in a
@@ -1615,6 +1626,7 @@ if (isModel!M && isQueryContext!Ctx) {
       **/
     long delete_() {
         _rejectLimitOffset("delete_()");
+        _requireFilter("delete_()");
         Predicate[] resolved;
         string joinsSQL, orderBySql;
         _resolveQuery(resolved, joinsSQL, orderBySql);
@@ -1637,11 +1649,10 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** Execute a partial / bulk UPDATE using accumulated set!() assignments.
       *
-      * WITHOUT a where() this rewrites EVERY row in the table — there is no
-      * guard, exactly as in delete_(). `repo.query().set!"active"(false).update()`
-      * is a valid way to reset a column across the table; make sure that is what
-      * you meant. A missing set!() is a QueryClientError rather than a silent
-      * no-op, but a missing where() cannot be told apart from an intended one.
+      * Refused without a filter, exactly as delete_() is: resetting a column
+      * across the table is spelled
+      * `repo.query().where(Predicate.all).set!"active"(false).update()`. A
+      * missing set!() is a QueryClientError too, rather than a silent no-op.
       *
       * Builds: UPDATE table SET col1=$1, col2=$2 WHERE (renumbered_where)
       * Set values are bound as $1..$N; WHERE params follow as $(N+1)..$(N+M).
@@ -1661,6 +1672,7 @@ if (isModel!M && isQueryContext!Ctx) {
     long update() {
         enforce!QueryClientError(_sets.length > 0, "update() called with no set!() assignments");
         _rejectLimitOffset("update()");
+        _requireFilter("update()");
 
         Predicate[] resolved;
         string joinsSQL, orderBySql;

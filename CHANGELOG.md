@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **`delete_()` and `update()` without a `where()` are refused** (breaking — they
+  now throw `QueryClientError`). A filter applied conditionally that ended up
+  absent deleted or rewrote every row of the table. Affecting the whole table is
+  now spelled out: `repo.query().where(Predicate.all).delete_()`.
+
+### Fixed
+
+- **A pool borrow could leave its connection subscribed to a channel** (breaking
+  — it now throws `QueryClientError`). The subscription did not deliver: the
+  connection passed to other borrowers, and the pool replaced it as soon as a
+  notification arrived while it sat idle, silently ending the subscription.
+  Channels subscribed with `listen()` are now unsubscribed before the slot is
+  released, with the same contract as a leaked transaction: reported when the
+  borrow returned normally, quiet when it threw. A raw `exec("LISTEN …")` is not
+  tracked.
+
 ## [0.3.2] - 2026-10-29
 
 ### Added

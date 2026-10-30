@@ -85,6 +85,11 @@ struct Connection {
     private struct ConnectionInternalData {
         PGconn* _pg_conn;
 
+        // Channels subscribed through listen() and not since unlisten()ed. In
+        // the shared payload, so every copy of the handle sees one set: the pool
+        // reads it to catch a borrow that returns its connection still LISTENing.
+        bool[string] _channels;
+
         this(in string conn_info) @trusted {
             _pg_conn = PQconnectdb(conn_info.toStringz);
         }
@@ -360,14 +365,32 @@ struct Connection {
       * keep the listening connection autocommit and out of any pool, owned by
       * a single consumer.  Subscriptions do NOT survive reconnect: after
       * constructing a fresh Connection, re-issue listen() for every channel.
+      *
+      * The connection remembers the channel until unlisten(). A pool borrow
+      * that returns its connection still subscribed is unsubscribed and
+      * reported (see ConnectionPool.borrow); a raw exec("LISTEN …") is not
+      * tracked, and a raw exec("UNLISTEN …") does not clear the record.
       **/
     void listen(in string channel) {
         exec("LISTEN " ~ escapeIdentifier(channel));
+        _connection.borrow!((auto ref conn) { conn._channels[channel] = true; });
     }
 
     /// Unsubscribe this connection from a notification channel.
     void unlisten(in string channel) {
         exec("UNLISTEN " ~ escapeIdentifier(channel));
+        _connection.borrow!((auto ref conn) { conn._channels.remove(channel); });
+    }
+
+    /// Unsubscribe from every channel, tracked or not.
+    package(peque) void unlistenAll() {
+        exec("UNLISTEN *");
+        _connection.borrow!((auto ref conn) { conn._channels = null; });
+    }
+
+    /// Channels subscribed through listen() and not since unlisten()ed.
+    package(peque) string[] listeningChannels() {
+        return _connection.borrow!((auto ref conn) => conn._channels.keys);
     }
 
     /** Return all notifications buffered for this connection — non-blocking.

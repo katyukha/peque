@@ -334,3 +334,84 @@ unittest {
     pool.borrow((ref Connection c) { assert(c.transactionStatus == PQTRANS_IDLE); });
     pool.close();
 }
+
+
+// ---------------------------------------------------------------------------
+// A leaked LISTEN never rides into the next borrower
+// ---------------------------------------------------------------------------
+
+private long serverChannels(ref Connection c) {
+    return c.exec(`SELECT count(*) FROM pg_listening_channels()`).getValue!long(0, 0);
+}
+
+/** A borrow that returns still subscribed is unsubscribed and reported, naming
+  * only the channels it left behind. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+
+    auto ex = collectException!QueryClientError(
+        pool.borrow((ref Connection c) {
+            c.listen("peque_pool_kept");
+            c.listen("peque_pool_dropped");
+            c.unlisten("peque_pool_dropped");
+        }));
+    assert(ex !is null, "a leaked subscription must be reported, not swallowed");
+    assert( ex.msg.canFind(`"peque_pool_kept"`), ex.msg);
+    assert(!ex.msg.canFind("peque_pool_dropped"), ex.msg);
+
+    // Returns normally: the pool also cleared what listen() recorded.
+    pool.borrow((ref Connection c) {
+        assert(serverChannels(c) == 0, "the next borrower must not inherit a subscription");
+    });
+    pool.close();
+}
+
+/// When the borrow itself threw, unsubscribe quietly.
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+
+    auto ex = collectException!Exception(
+        pool.borrow((ref Connection c) {
+            c.listen("peque_pool_throw");
+            throw new Exception("the caller's own failure");
+        }));
+    assert(ex !is null);
+    assert(ex.msg == "the caller's own failure", ex.msg);
+    assert(ex.next is null,
+        "the pool must stay quiet when the borrow itself threw; got chained: " ~
+        (ex.next is null ? "" : ex.next.msg));
+
+    pool.borrow((ref Connection c) { assert(serverChannels(c) == 0); });
+    pool.close();
+}
+
+/// A borrow that unsubscribes before returning is not a leak.
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+    pool.borrow((ref Connection c) {
+        c.listen("peque_pool_tidy");
+        c.unlisten("peque_pool_tidy");
+    });
+    pool.close();
+}
+
+/** Both leaks at once: the rollback must come first, since PostgreSQL applies an
+  * UNLISTEN sent inside a transaction block only at commit. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+
+    auto ex = collectException!QueryClientError(
+        pool.borrow((ref Connection c) {
+            c.listen("peque_pool_both");
+            c.exec(`BEGIN`);
+        }));
+    assert(ex !is null);
+    assert(ex.msg.canFind("rolled it back"), ex.msg);
+    assert(ex.msg.canFind(`"peque_pool_both"`), ex.msg);
+
+    pool.borrow((ref Connection c) {
+        assert(c.transactionStatus == PQTRANS_IDLE);
+        assert(serverChannels(c) == 0, "an UNLISTEN sent inside the open transaction was rolled back");
+    });
+    pool.close();
+}
