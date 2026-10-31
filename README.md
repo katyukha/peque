@@ -89,9 +89,12 @@ assigned at `CREATE EXTENSION` time, so it is not a compile-time constant;
 where inference is not enough, such as `ST_Distance($1, $2)`, return an oid
 resolved at runtime or cast in the SQL (`$1::geometry`).
 
-- **The text is the reader's to keep.** peque hands `fromPGText` its own
-  GC-owned copy, so storing the slice is safe; the price is one allocation per
-  custom-typed value.
+- **The parameter says who owns the text.** With `scope const(char)[]`, as
+  above, the reader borrows libpq's result buffer for the call: it parses the
+  text, and nothing is allocated. A reader that keeps the text declares
+  `fromPGText(string text, PGType oid)` instead and is handed an immutable copy
+  it can store as is. A `const(char)[]` without `scope` makes no promise, so it
+  gets the copy too.
 - **`oid` is `PGType.GUESS` for array elements**, so a reader cannot tell types
   apart by oid inside an array.
 - **Attributes are inferred.** `@safe` hooks give a `@safe` conversion, also

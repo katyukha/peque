@@ -517,22 +517,45 @@ if (isArray!T && !isSomeString!T) {
 // Custom types
 // ---------------------------------------------------------------------------
 
-/** True when T reads itself from a PostgreSQL text value:
+/** True when T reads itself from a PostgreSQL text value, in either form:
   *
-  *     static T fromPGText(scope const(char)[] text, PGType oid);
+  *     static T fromPGText(scope const(char)[] text, PGType oid);  // reads it
+  *     static T fromPGText(string text, PGType oid);              // keeps it
+  *
+  * The parameter decides who owns the text. A `scope` one promises not to keep
+  * it and is lent libpq's result buffer, valid only during the call, with no
+  * allocation. Any other gets an immutable copy the reader may keep.
   *
   * The built-in struct types are excluded, or two overloads would match and
   * the call would be ambiguous.
-  *
-  * The text is the reader's own GC-owned copy, so keeping the slice is safe.
   **/
 template hasPGTextReader(T) {
     enum hasPGTextReader =
         is(T == struct) && !_isBuiltinPGStruct!T &&
         __traits(compiles, {
-            T v = T.fromPGText((const(char)[]).init, PGType.init);
+            T v = T.fromPGText(_probeString(), PGType.init);
         });
 }
+
+// Whether T's reader declares its text `scope`, promising not to keep it. `in`
+// does not count: without -preview=in it means only const.
+private template _readerBorrowsText(T) {
+    static if (__traits(compiles, T.fromPGText(_probeSlice(), PGType.init)))
+        enum _readerBorrowsText = () {
+            foreach (stc; __traits(getParameterStorageClasses,
+                                   T.fromPGText(_probeSlice(), PGType.init), 0))
+                if (stc == "scope") return true;
+            return false;
+        }();
+    else
+        enum _readerBorrowsText = false;
+}
+
+// Typed arguments for the reader probes, never called. `.init` will not do: it
+// is the null literal, which converts to every array type, so a `string` reader
+// would seem to accept a borrowed slice and a `char[]` one a `string`.
+private const(char)[] _probeSlice();
+private string _probeString();
 
 /// The struct types peque converts itself; a custom reader must not shadow them.
 package(peque) template _isBuiltinPGStruct(T) {
@@ -556,7 +579,8 @@ if (is(T == struct) && !_isBuiltinPGStruct!T &&
         T.stringof ~ " declares fromPGText, but not with the signature peque " ~
         "calls. It must be STATIC, return " ~ T.stringof ~ ", and take the text " ~
         "and the column's type:\n" ~
-        "    static " ~ T.stringof ~ " fromPGText(scope const(char)[] text, PGType oid)\n" ~
+        "    static " ~ T.stringof ~ " fromPGText(scope const(char)[] text, PGType oid)  // reads it\n" ~
+        "    static " ~ T.stringof ~ " fromPGText(string text, PGType oid)              // keeps it\n" ~
         "Common slips: leaving off `static`, or omitting the PGType parameter.");
 }
 
@@ -570,24 +594,40 @@ if (hasPGTextReader!T) {
     scope raw = () @trusted {
         return data is null ? null : data[0 .. length];
     }();
-    // The reader gets a copy, since `raw` points into libpq's result buffer,
-    // freed with the Result, and `scope` cannot stop a reader keeping it
-    // without -preview=dip1000. One allocation per value buys the absence of
-    // a rule every custom type would otherwise have to know.
-    return T.fromPGText(raw.idup, pg_type);
+    // `raw` points into libpq's result buffer, freed with the Result. Lend it
+    // only to a reader that promised not to keep it; any other gets a copy,
+    // since without -preview=dip1000 nothing stops it keeping the slice.
+    static if (_readerBorrowsText!T)
+        return T.fromPGText(raw, pg_type);
+    else
+        return T.fromPGText(raw.idup, pg_type);
 }
 
-// A reader that keeps the slice must not see the source buffer change under
-// it — libpq reuses that memory once the Result is gone.
+// Ownership follows the parameter: a `scope` reader is lent the source buffer
+// itself, and any other gets a copy that outlives it — libpq reuses that memory
+// once the Result is gone.
 unittest {
-    static struct Kept {
+    static struct Lent {
+        size_t at;
+        static Lent fromPGText(scope const(char)[] t, PGType oid) { return Lent(cast(size_t) t.ptr); }
+    }
+    static struct Owned {
+        string s;
+        static Owned fromPGText(string t, PGType oid) { return Owned(t); }
+    }
+    static struct Unpromised {
         const(char)[] s;
-        static Kept fromPGText(scope const(char)[] t, PGType oid) { return Kept(t); }
+        static Unpromised fromPGText(const(char)[] t, PGType oid) { return Unpromised(t); }
     }
     char[] buf = "original".dup;
-    auto v = convertTextTypeToD!Kept(buf.ptr, cast(int) buf.length, PGType.TEXT);
+    immutable len = cast(int) buf.length;
+    auto lent       = convertTextTypeToD!Lent(buf.ptr, len, PGType.TEXT);
+    auto owned      = convertTextTypeToD!Owned(buf.ptr, len, PGType.TEXT);
+    auto unpromised = convertTextTypeToD!Unpromised(buf.ptr, len, PGType.TEXT);
     buf[] = 'x';
-    assert(v.s == "original", "the reader was handed libpq's own buffer");
+    assert(lent.at == cast(size_t) buf.ptr, "a scope reader must not pay for a copy");
+    assert(owned.s == "original");
+    assert(unpromised.s == "original", "a reader that made no promise was lent the buffer");
 }
 
 

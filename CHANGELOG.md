@@ -12,12 +12,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   now throw `QueryClientError`). A filter applied conditionally that ended up
   absent deleted or rewrote every row of the table. Affecting the whole table is
   now spelled out: `repo.query().where(Predicate.all).delete_()`.
-- **A custom type's `fromPGText` receives its own copy of the text.** It used
-  to get a slice of libpq's result buffer, freed with the `Result`, so a reader
-  that kept it compiled and then dangled. Keeping the slice is now safe, at one
-  allocation per custom-typed value; readers that copy still work unchanged.
+- **`fromPGText`'s parameter now decides who owns the text.** A reader taking
+  `scope const(char)[]` is lent libpq's result buffer for the call, as before,
+  with no allocation. A reader that keeps the text can declare
+  `fromPGText(string text, PGType oid)` and is handed an immutable copy to store
+  without copying again. A `const(char)[]` parameter without `scope` also gets
+  the copy, where it used to be lent memory freed with the `Result`, so keeping
+  the slice compiled and then dangled. Existing readers keep working.
 
 ### Fixed
+
+- **A custom reader taking mutable `char[]` was accepted as a reader** and then
+  failed inside peque with "not callable"; it now gets the error naming the
+  expected signatures.
 
 - **A pool borrow could leave its connection subscribed to a channel** (breaking
   — it now throws `QueryClientError`). The subscription did not deliver: the

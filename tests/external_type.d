@@ -44,12 +44,13 @@ struct Money {
 }
 
 /// A text-shaped custom type, for array elements with comma, quote, backslash
-/// and braces.
+/// and braces. It keeps its text, so it takes the `string` form and stores the
+/// copy peque hands it as is.
 struct Label {
     string text;
 
-    static Label fromPGText(scope const(char)[] t, PGType oid) {
-        return Label(t.idup);
+    static Label fromPGText(string t, PGType oid) {
+        return Label(t);
     }
 
     PGValue toPGValue() const {
@@ -89,10 +90,12 @@ unittest {
     // the expected signature instead of failing inside peque.
     static struct NoOid    { int v; static NoOid    fromPGText(scope const(char)[] t) { return NoOid(0); } }
     static struct NotStatic{ int v;        NotStatic fromPGText(scope const(char)[] t, PGType o) { return NotStatic(0); } }
+    static struct MutText  { int v; static MutText  fromPGText(char[] t, PGType o) { return MutText(0); } }
     static struct BadRet   { int v; string toPGValue() const { return "0"; } }
     static struct NonConst { int v; PGValue toPGValue() { return PGValue.fromText(PGType.GUESS, "0"); } }
     static assert(!hasPGTextReader!NoOid,     "a reader missing the oid parameter must not qualify");
     static assert(!hasPGTextReader!NotStatic, "a non-static reader must not qualify");
+    static assert(!hasPGTextReader!MutText,   "a reader of mutable char[] must not qualify");
     static assert(!hasPGValueWriter!BadRet,   "a writer not returning PGValue must not qualify");
     static assert(!hasPGValueWriter!NonConst, "a non-const writer must not qualify");
 
