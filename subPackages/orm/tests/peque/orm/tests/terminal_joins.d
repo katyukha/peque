@@ -9,13 +9,15 @@
   *  - delete_() / update() keep LEFT JOIN semantics for path predicates
   *    (F!"rel.field".isNull must match rows with NULL FK, exactly as in all())
   *  - delete_() / update() on a QuerySet with load! + path predicate
+  *  - raw order terms naming the model's own column survive a join that
+  *    brings in a table with the same column
   **/
 module peque.orm.tests.terminal_joins;
 
 private import std.process: environment;
 private import std.typecons: Nullable, nullable;
 private import peque.connection: Connection;
-private import peque.model: model, field, primaryKey, many2one, related;
+private import peque.model: model, field, primaryKey, many2one, related, autoHydrate, defaultOrder;
 private import peque.orm;
 private import peque.orm.field: F;
 
@@ -244,4 +246,89 @@ unittest {
         .delete_();
     assert(deleted == 1);
     assert(repo.query().count() == 3);
+}
+
+
+// ---------------------------------------------------------------------------
+// A raw order term naming the model's own column survives a join
+// ---------------------------------------------------------------------------
+
+// Both tables have `id` and `name`, so emitted bare a raw term on either is
+// "column reference is ambiguous" once the partner join is present — except
+// where it happens to match a SELECT output column, which is why all() alone
+// never showed it.
+
+@autoHydrate
+struct TjNameDTO { string name; }
+
+@defaultOrder!("id DESC")
+@model("tj_invoices")
+struct TjInvoiceById {
+    @primaryKey             int                id;
+    @field                  string             name;
+    @field                  double             amount;
+    @many2one!(TjPartner)   Nullable!int       partnerId;
+    @related                Nullable!TjPartner partner;
+}
+
+unittest {
+    import std.algorithm.iteration: map;
+    import std.array: array;
+
+    auto c = makeConn();
+    setup(c);
+    auto repo = Repository!(TjInvoice, Connection)(&c);
+
+    // select!DTO: the output column is only `name`, so `id` must reach _m.
+    auto dtos = repo.query().load!"partner".orderBy("id DESC").select!TjNameDTO();
+    assert(dtos.map!(d => d.name).array == ["INV-NULL", "INV-003", "INV-002", "INV-001"]);
+
+    // asSubquery: the output column is only `id`, so `name` must reach _m.
+    auto sub = repo.query().load!"partner".orderBy("name DESC").limit(2).asSubquery!"id"();
+    auto top = repo.query().where(F!(TjInvoice, "id").inSubquery(sub)).orderBy("id").all();
+    assert(top.map!(i => i.name).array == ["INV-003", "INV-NULL"]);
+
+    // A quoted identifier, NULLS placement and a comma list are qualified too.
+    auto quoted = repo.query().load!"partner"
+        .orderBy(`"id" DESC NULLS LAST, name`).select!TjNameDTO();
+    assert(quoted[0].name == "INV-NULL");
+
+    // @defaultOrder takes the same path.
+    auto byId = Repository!(TjInvoiceById, Connection)(&c);
+    assert(byId.query().load!"partner".select!TjNameDTO()[0].name == "INV-NULL");
+}
+
+// An output name wins over the input column in SQL, so a raw term matching one
+// is left alone: here `amount` is the annotation and `name` is the partner's.
+
+@autoHydrate
+struct TjPartnerTotal {
+    Nullable!int partnerId;
+    double       amount;
+}
+
+struct TjPartnerName {
+    @field(related: "partner.name") Nullable!string name;
+}
+
+unittest {
+    import std.algorithm.iteration: map;
+    import std.array: array;
+
+    auto c = makeConn();
+    setup(c);
+    auto repo = Repository!(TjInvoice, Connection)(&c);
+
+    // Qualified as _m.amount this would be "must appear in the GROUP BY clause".
+    auto totals = repo.query()
+        .groupBy!"partnerId"
+        .annotate!("amount", F!(TjInvoice, "amount").sum)
+        .orderBy("amount DESC")
+        .select!TjPartnerTotal();
+    assert(totals.length == 3 && totals[0].amount == 40.0 && totals[0].partnerId.isNull);
+
+    // Qualified as _m.name this would sort by the invoice's name: INV-NULL first.
+    auto names = repo.query().orderBy("name DESC NULLS LAST").select!TjPartnerName();
+    assert(names.map!(n => n.name.isNull ? "" : n.name.get).array ==
+           ["Globex", "Acme Corp", "Acme Corp", ""]);
 }

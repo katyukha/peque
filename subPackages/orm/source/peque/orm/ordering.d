@@ -5,8 +5,10 @@
   * resolve ordering through one code path.
   *
   * Three kinds (see `OrderKind`):
-  *  - `raw`    — a verbatim SQL fragment (e.g. `"created_at DESC"`); emitted
-  *               as-is, direction/NULLS ignored.  This is the escape hatch.
+  *  - `raw`    — an SQL fragment (e.g. `"created_at DESC"`), direction/NULLS
+  *               ignored.  This is the escape hatch.  Emitted as written,
+  *               except that a term naming only a column of the model is
+  *               qualified as `_m.col` (see `_qualifyRawOrder` in queryset.d).
   *  - `column` — a resolved column expression (e.g. `"_m.created_at"`);
   *               direction and NULLS placement are appended.
   *  - `path`   — an unresolved model field path (e.g. `"partner.name"`);

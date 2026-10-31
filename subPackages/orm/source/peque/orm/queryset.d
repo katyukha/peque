@@ -531,13 +531,121 @@ private string _orderSuffix(in Ordering ord) {
     return s;
 }
 
+// The output names a select!DTO emits — one `AS` alias per member, from the
+// same resolver both select!DTO paths use for the SELECT list.
+private template _dtoOutputNames(DTO) {
+    private static string[] _collect() {
+        string[] names;
+        static foreach (m; FieldNameTuple!DTO)
+            names ~= _resolveColName!(__traits(getMember, DTO, m), m);
+        return names;
+    }
+    enum string[] _dtoOutputNames = _collect();
+}
+
+/* Qualify a raw ORDER BY term that names one of M's own columns as _m.<name>.
+ *
+ * Emitted bare, "name" or "date DESC" becomes "column reference is ambiguous"
+ * as soon as a join brings in a table with the same column — unless it
+ * happens to match a SELECT output column, which is why all() never showed it
+ * while select!DTO and asSubquery failed. Only the simple shape is touched:
+ * one identifier, optionally followed by ASC/DESC and NULLS FIRST/LAST, or a
+ * comma list of those. Anything else stays verbatim, and so does a bare name M
+ * has no column for, which may legitimately belong to a joined table.
+ *
+ * `outputs` are the statement's SELECT output names. SQL resolves a bare
+ * ORDER BY name to an output column before any input column, so one of those
+ * is left alone too: in a grouped query or a select!DTO, "amount" may mean an
+ * annotation, or a member projected from a relation, rather than _m.amount.
+ */
+private string _qualifyRawOrder(M)(string expr, in string[] outputs = null) {
+    import std.algorithm.searching: canFind, all;
+    import std.algorithm.iteration: map;
+    import std.array: array, join, split;
+    import std.string: strip;
+
+    // Split on commas outside double quotes. A parenthesis or string literal
+    // can put a comma inside one term, so either leaves the whole thing alone.
+    string[] terms;
+    bool inQuotes;
+    size_t start;
+    foreach (k, ch; expr) {
+        if (ch == '"') inQuotes = !inQuotes;
+        else if (inQuotes) continue;
+        else if (ch == '(' || ch == '\'') return expr;
+        else if (ch == ',') { terms ~= expr[start .. k]; start = k + 1; }
+    }
+    if (terms.length) {
+        terms ~= expr[start .. $];
+        return terms.map!(t => _qualifyRawOrder!M(t.strip, outputs)).join(", ");
+    }
+
+    auto words = expr.split;
+    if (!words.length) return expr;
+
+    size_t i = 1;
+    bool word(string w) {
+        import std.uni: icmp;
+        if (i < words.length && icmp(words[i], w) == 0) { ++i; return true; }
+        return false;
+    }
+    if (!word("ASC")) word("DESC");
+    if (word("NULLS") && !word("FIRST") && !word("LAST")) return expr;
+    if (i != words.length) return expr;
+
+    // The column as PostgreSQL resolves it: a quoted name exactly, an unquoted
+    // one folded to lower case.
+    immutable ident = words[0];
+    string col;
+    if (ident.length >= 2 && ident[0] == '"' && ident[$ - 1] == '"') {
+        col = ident[1 .. $ - 1];
+        if (col.canFind('"')) return expr;
+    } else {
+        import std.ascii: isAlpha, isAlphaNum, toLower;
+        if (!(isAlpha(ident[0]) || ident[0] == '_') ||
+            !ident.all!(ch => isAlphaNum(ch) || ch == '_' || ch == '$'))
+            return expr;
+        col = ident.map!(ch => cast(immutable char) toLower(ch)).array;
+    }
+    if (outputs.canFind(col) || !_fieldForColumnName!M(col).length) return expr;
+    return "_m." ~ ident ~ (words.length > 1 ? " " ~ words[1 .. $].join(" ") : "");
+}
+
+unittest {
+    @model("qro") static struct Qro {
+        @primaryKey int id;
+        @field string name;
+        @field("Mixed") string mixed;
+    }
+    alias q = _qualifyRawOrder!Qro;
+    assert(q("name")                 == "_m.name");
+    assert(q("name DESC")            == "_m.name DESC");
+    assert(q("NAME desc nulls last") == "_m.NAME desc nulls last");
+    assert(q(`"Mixed" NULLS FIRST`)  == `_m."Mixed" NULLS FIRST`);
+    assert(q("name, id DESC")        == "_m.name, _m.id DESC");
+    assert(q(`"id" DESC NULLS LAST, name`) == `_m."id" DESC NULLS LAST, _m.name`);
+    assert(q(`"a,b", name`)          == `"a,b", _m.name`, "a comma inside quotes is not a separator");
+    // Left verbatim: not M's column, not the simple shape, or unsafe to split.
+    assert(q("mixed")                == "mixed",  "unquoted folds to lower case");
+    assert(q("partner_name")         == "partner_name");
+    assert(q("lower(name)")          == "lower(name)");
+    assert(q("_m.name")              == "_m.name");
+    assert(q("name DESC garbage")    == "name DESC garbage");
+    assert(q("name NULLS")           == "name NULLS");
+    assert(q("coalesce(name, id)")   == "coalesce(name, id)");
+    assert(q("")                     == "");
+    // An output name wins over the input column, as it does in SQL.
+    assert(_qualifyRawOrder!Qro("name DESC", ["name"]) == "name DESC");
+    assert(_qualifyRawOrder!Qro("name, id", ["name"]) == "name, _m.id");
+}
+
 // Resolve a single Ordering term to a SQL fragment, registering join(s) for
 // `path` terms via the same fjoins/idx used by where-predicate resolution.
 private string _resolveOrdering(M, JoinFields...)(
-    in Ordering ord, ref _FilterJoin[] fjoins, ref int idx)
+    in Ordering ord, ref _FilterJoin[] fjoins, ref int idx, in string[] outputs = null)
 {
     final switch (ord.kind) {
-        case OrderKind.raw:    return ord.expr;
+        case OrderKind.raw:    return _qualifyRawOrder!M(ord.expr, outputs);
         case OrderKind.column: return ord.expr ~ _orderSuffix(ord);
         case OrderKind.path:
             return _resolvePathToCol!(M, JoinFields)(ord.expr, fjoins, idx) ~ _orderSuffix(ord);
@@ -547,11 +655,11 @@ private string _resolveOrdering(M, JoinFields...)(
 // Resolve a list of Ordering terms into a comma-separated ORDER BY body.
 // Empty/blank fragments are dropped so a single raw "" term suppresses ordering.
 private string _resolveOrderTerms(M, JoinFields...)(
-    in Ordering[] terms, ref _FilterJoin[] fjoins, ref int idx)
+    in Ordering[] terms, ref _FilterJoin[] fjoins, ref int idx, in string[] outputs = null)
 {
     string result;
     foreach (ref ord; terms) {
-        auto frag = _resolveOrdering!(M, JoinFields)(ord, fjoins, idx);
+        auto frag = _resolveOrdering!(M, JoinFields)(ord, fjoins, idx, outputs);
         if (!frag.length) continue;
         if (result.length) result ~= ", ";
         result ~= frag;
@@ -880,6 +988,10 @@ if (isModel!M && isQueryContext!Ctx) {
       * sqlFrag uses local $1/$2/… numbering — placeholders are renumbered
       * relative to prior filters at SQL build time.
       *
+      * Columns in sqlFrag are not qualified for you. Once the query joins
+      * another table (load!, F!"rel.field"), write the model's own columns as
+      * `_m.col`, or a name both tables have is "ambiguous".
+      *
       * Security: sqlFrag is embedded in the query verbatim — never pass
       * user-controlled input as sqlFrag.  All runtime values must go through
       * the variadic args, which are bound as PostgreSQL parameters ($N).
@@ -917,8 +1029,12 @@ if (isModel!M && isQueryContext!Ctx) {
       *  - an `Ordering` value.
       *
       * Field references via `F` are resolved against the model (camelCase →
-      * column, implicit LEFT JOINs for join paths). Raw strings are NOT parsed
-      * or resolved — they are emitted as-is.
+      * column, implicit LEFT JOINs for join paths). Raw strings are emitted as
+      * written, with one exception: a term that is only a column of this model
+      * — optionally with ASC/DESC and NULLS FIRST/LAST, alone or in a comma
+      * list — is qualified as `_m.col`, so a join cannot make it ambiguous. A
+      * name the statement also outputs (a select!DTO member, an annotation)
+      * is left alone, since SQL already resolves it to that output.
       *
       * Pass a single `""` to suppress all ordering (overrides @defaultOrder).
       *
@@ -1260,10 +1376,11 @@ if (isModel!M && isQueryContext!Ctx) {
     // model's @defaultOrder — registering any LEFT JOIN a join-path term needs
     // into fjoins/idx. Returns "" when there is nothing to order by. Shared by
     // all() and select!DTO so the two paths cannot diverge.
-    private string _resolveOrderBySql(ref _FilterJoin[] fjoins, ref int idx) {
+    private string _resolveOrderBySql(
+            ref _FilterJoin[] fjoins, ref int idx, in string[] outputs = null) {
         enum Ordering[] _defTerms = _modelDefaultOrder!M;
         Ordering[] terms = _orderByTerms.length ? _orderByTerms : _defTerms;
-        return _resolveOrderTerms!(M, JoinFields)(terms, fjoins, idx);
+        return _resolveOrderTerms!(M, JoinFields)(terms, fjoins, idx, outputs);
     }
 
     /** One LEFT JOIN onto the table behind a @related field.
@@ -1766,7 +1883,7 @@ if (isModel!M && isQueryContext!Ctx) {
 
         // Resolve orderBy terms now — before filter joins are emitted below —
         // so any join a `path` term needs is included in the FROM clause.
-        string orderBySql = _resolveOrderBySql(fjoins, fjIdx);
+        string orderBySql = _resolveOrderBySql(fjoins, fjIdx, _dtoOutputNames!DTO);
 
         // Build SELECT list. Both the column and the AS alias are quoted:
         // hydration looks the DTO member up case-exactly, and a bare alias
@@ -2105,7 +2222,8 @@ if (is(QS == QuerySet!Args, Args...)) {
 
         // Only explicit orderBy terms — no @defaultOrder fallback here.
         string orderBySql =
-            _resolveOrderTerms!(M, JoinFields)(_base._orderByTerms, fjoins, fjIdx);
+            _resolveOrderTerms!(M, JoinFields)(_base._orderByTerms, fjoins, fjIdx,
+                                               _dtoOutputNames!DTO);
 
         Predicate[] resolvedHavings;
         foreach (ref p; _havings)

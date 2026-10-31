@@ -266,6 +266,13 @@ unittest {
     // return zero rows without hitting the DB with invalid "IN ()" SQL.
     string[] empty;
     assert(repo.query().whereIn!"name"(empty).all().length == 0);
+
+    // The literal `[]` is a void[], so the element type deduces to void; each
+    // builder must still accept it and match nothing.
+    assert(repo.query().whereIn!"name"([]).count() == 0);
+    assert(repo.query().where(F!(Item, "name").contains([])).count() == 0);
+    assert(repo.query().where(F!"name".contains([])).count() == 0);
+    assert(repo.query().where(~F!(Item, "name").contains([])).count() == 4);
 }
 
 

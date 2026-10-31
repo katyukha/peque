@@ -1101,7 +1101,11 @@ repo.query().where(F!"id".gte(10)).all();
 ### Raw SQL escape hatch
 
 `whereRaw` embeds a SQL fragment verbatim — placeholders use local `$1`/`$2`
-numbering and are renumbered automatically relative to prior filters.
+numbering and are renumbered automatically relative to prior filters. Its
+columns are not qualified for you: once the query joins another table (`load!`,
+`F!"rel.field"`), write the model's own columns as `_m.col`, or a name both
+tables have is ambiguous. A raw `orderBy("name DESC")` or `@defaultOrder` term
+that is just one of the model's columns *is* qualified automatically.
 
 ```d
 repo.query().whereRaw("tsv @@ to_tsquery($1)", "acme & corp").all();

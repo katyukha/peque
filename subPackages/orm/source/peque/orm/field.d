@@ -54,6 +54,17 @@ private import peque.orm.ordering: Ordering, OrderKind;
 private import peque.hydration: camelToSnake;
 private import peque.orm.sql: _sqlIdent;
 
+// contains([]): the literal `[]` is a void[], so V deduces to void and its
+// elements could not be converted. Empty matches nothing, as any empty set
+// does; a non-empty void[] can only come from a cast and carries no values.
+private Predicate _containsNothing(size_t length) {
+    import std.exception: enforce;
+    import peque.exception: QueryClientError;
+    enforce!QueryClientError(length == 0,
+        "contains()/whereIn() was given a non-empty void[], which has no values to compare");
+    return Predicate.none;
+}
+
 
 /// true if T is a FieldBuilder instantiation — used to keep the generic
 /// value overloads (opCall/ne) from competing with the column-to-column ones.
@@ -126,10 +137,13 @@ struct JsonFieldBuilder {
 
     /// IN (set membership): .get("key").contains(["a", "b"])
     Predicate contains(V)(V[] vals) const {
-        if (vals.length == 0) return Predicate.none;
-        PGValue[] pgVals;
-        foreach (v; vals) pgVals ~= convertToPG(v);
-        return Predicate(InNode(_expr, pgVals));
+        static if (is(V == void)) return _containsNothing(vals.length);
+        else {
+            if (vals.length == 0) return Predicate.none;
+            PGValue[] pgVals;
+            foreach (v; vals) pgVals ~= convertToPG(v);
+            return Predicate(InNode(_expr, pgVals));
+        }
     }
 
     /// IS NULL
@@ -315,11 +329,14 @@ struct FieldBuilder(string colExpr, FieldT = void) {
       **/
     Predicate contains(V)(V[] vals) const {
         import peque.converter: convertToPG;
-        if (vals.length == 0)
-            return Predicate.none;
-        PGValue[] pgVals;
-        foreach (v; vals) pgVals ~= convertToPG(v);
-        return Predicate(InNode(colExpr, pgVals));
+        static if (is(V == void)) return _containsNothing(vals.length);
+        else {
+            if (vals.length == 0)
+                return Predicate.none;
+            PGValue[] pgVals;
+            foreach (v; vals) pgVals ~= convertToPG(v);
+            return Predicate(InNode(colExpr, pgVals));
+        }
     }
 
     /// IS NULL: F!(M, "field").isNull
@@ -774,11 +791,14 @@ struct PathBuilder(string path) {
 
     /// IN (set membership)
     Predicate contains(V)(V[] vals) const {
-        if (vals.length == 0)
-            return Predicate.none;
-        PGValue[] pgVals;
-        foreach (v; vals) pgVals ~= convertToPG(v);
-        return Predicate(PathNode(path, "IN", pgVals, ""));
+        static if (is(V == void)) return _containsNothing(vals.length);
+        else {
+            if (vals.length == 0)
+                return Predicate.none;
+            PGValue[] pgVals;
+            foreach (v; vals) pgVals ~= convertToPG(v);
+            return Predicate(PathNode(path, "IN", pgVals, ""));
+        }
     }
 
     /// IS NULL

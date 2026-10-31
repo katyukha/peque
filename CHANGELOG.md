@@ -22,6 +22,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A raw `orderBy` / `@defaultOrder` term failed once the query joined** — with
+  `load!` or a relation path, `orderBy("name DESC")` on a model whose related
+  table also has `name` was "column reference is ambiguous" in `select!DTO` and
+  `asSubquery`. A term that is just one of the model's columns, optionally with
+  ASC/DESC and NULLS placement, alone or in a comma list, is now qualified with
+  the model's table alias. A name the statement also outputs (an annotation, a
+  `select!DTO` member) keeps meaning that output, as SQL defines; anything else
+  is still emitted as written.
+
+- **`whereIn!"f"([])` and `.contains([])` did not compile.** The literal `[]` is
+  a `void[]`; it now matches no rows, as an empty typed slice already did.
+
 - **A custom reader taking mutable `char[]` was accepted as a reader** and then
   failed inside peque with "not callable"; it now gets the error naming the
   expected signatures.

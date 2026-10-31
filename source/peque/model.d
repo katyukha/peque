@@ -251,7 +251,10 @@ struct pgType {
   * ordering overrides it.
   *
   * Each argument is normalized to an order term:
-  *  - a raw SQL `string` — emitted verbatim (you write the real column/SQL);
+  *  - a raw SQL `string` — you write the real column/SQL; a term that is just
+  *    one of the model's columns (with optional direction and NULLS placement)
+  *    is qualified with the model's table alias, so a join cannot make it
+  *    ambiguous, and anything else is emitted verbatim;
   *  - an `F` builder (from `peque.orm`) — a field reference resolved against
   *    the model (camelCase → column, implicit LEFT JOIN for join paths), with
   *    optional `.desc` / `.nullsLast`.

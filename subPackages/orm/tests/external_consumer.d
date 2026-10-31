@@ -132,6 +132,7 @@ unittest {
     assert(repo.query().where((F!(ExtSession, "userId") + 1).gt(0)).count() >= 1);
     assert(repo.query().select!ExtDTO().length >= 1);
     assert(!repo.query().first().isNull);
+    assert(repo.query().whereIn!"slug"([]).count() == 0);
 
     // DDL generation from outside the package.
     static assert(modelDDL!ExtSession().length > 0);
