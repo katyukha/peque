@@ -22,6 +22,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`~F!(M, "f").inSubquery(sub)` returned no rows when the subquery yielded a
+  NULL** (breaking — NULL rows now land in the complement). peque emitted SQL's
+  `NOT IN`, which is never true once the set contains a NULL, so "owners with no
+  items" came back empty as soon as one item had no owner. Membership is now
+  `EXISTS` / `NOT EXISTS`, so `p` and `~p` split the rows exactly: a NULL is
+  simply not in the set. A row whose own column is NULL used to fall out of both
+  sides; it is now in the complement, as Django's `exclude()` and EF Core also
+  return it. Rows that matched or were excluded before are otherwise unchanged.
+
 - **A raw `orderBy` / `@defaultOrder` term failed once the query joined** — with
   `load!` or a relation path, `orderBy("name DESC")` on a model whose related
   table also has `name` was "column reference is ambiguous" in `select!DTO` and

@@ -2,19 +2,21 @@
   *
   * Covers:
   *  - asSubquery!"field"() — produces SubQuery!T without hitting the DB
-  *  - F!(M,"f").inSubquery(sub) — col IN (SELECT ...)
-  *  - ~F!(M,"f").inSubquery(sub) — NOT IN
+  *  - F!(M,"f").inSubquery(sub) — membership in the subquery's set
+  *  - ~F!(M,"f").inSubquery(sub) — its exact complement, NULLs included
   *  - asSubquery with WHERE filter on the inner query
   *  - asSubquery with LIMIT on the inner query
   *  - empty inner result → zero outer rows (not a SQL error)
   *  - param renumbering when the outer query also has bound params
   *  - type-free F!"field".inSubquery(sub) (FieldBuilder path)
+  *  - NULL on either side: p and ~p still split the rows exactly
   **/
 module peque.orm.tests.assubquery;
 
 private import std.process: environment;
 private import std.algorithm: sort;
 private import std.array: array;
+private import std.typecons: Nullable;
 
 private import peque.connection: Connection;
 private import peque.model: model, field, primaryKey;
@@ -298,4 +300,69 @@ unittest {
         .all();
 
     assert(products.length == 4);
+}
+
+
+
+// ---------------------------------------------------------------------------
+// NULL on either side: p and ~p split the rows exactly
+// ---------------------------------------------------------------------------
+
+// SQL's `col IN (sub)` is UNKNOWN for a non-member once the subquery yields a
+// NULL, so `NOT IN` matched nothing at all; and a NULL col fell out of both
+// p and ~p. Membership must stay two-valued: a NULL is simply not in the set.
+
+@model("sq_nl_owners")
+struct SqNlOwner {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("sq_nl_items")
+struct SqNlItem {
+    @primaryKey int          id;
+    @field      string       name;
+    @field      Nullable!int ownerId;
+}
+
+alias SqNlReg = Registry!(
+    Bind!(SqNlOwner, ModelRepo!SqNlOwner),
+    Bind!(SqNlItem,  ModelRepo!SqNlItem),
+);
+
+unittest {
+    import std.algorithm.iteration: map;
+
+    auto c = makeConn();
+    c.exec("DROP TABLE IF EXISTS sq_nl_items;");
+    c.exec("DROP TABLE IF EXISTS sq_nl_owners;");
+    c.exec(schemaSQL!SqNlReg());
+    // Owners a, b, c; items: two owned by a, one orphan with a NULL owner.
+    c.exec(`INSERT INTO sq_nl_owners (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')`);
+    c.exec(`INSERT INTO sq_nl_items (id, name, owner_id)
+            VALUES (1, 'i1', 1), (2, 'i2', 1), (3, 'orphan', NULL)`);
+
+    auto owners = Repository!(SqNlOwner, Connection)(&c);
+    auto items  = Repository!(SqNlItem,  Connection)(&c);
+    string[] names(R)(R rows) { return rows.map!(r => r.name).array.sort.array; }
+
+    // A NULL in the set: "owners with no items" must not come back empty.
+    auto ownedIds = items.query().asSubquery!"ownerId"();
+    auto owned    = F!(SqNlOwner, "id").inSubquery(ownedIds);
+    assert(names(owners.query().where(owned).all())  == ["a"]);
+    assert(names(owners.query().where(~owned).all()) == ["b", "c"]);
+    // ... nor inside a compound predicate, where UNKNOWN would spread.
+    assert(names(owners.query().where(~(F!(SqNlOwner, "name").ne("z") & owned)).all())
+           == ["b", "c"]);
+
+    // A NULL in the row's own column: the orphan is not in a's set.
+    auto aIds = owners.query().where!"name"("a").asSubquery!"id"();
+    auto ofA  = F!(SqNlItem, "ownerId").inSubquery(aIds);
+    assert(names(items.query().where(ofA).all())  == ["i1", "i2"]);
+    assert(names(items.query().where(~ofA).all()) == ["orphan"]);
+
+    // An empty set: nothing is in it, everything is outside it.
+    auto noIds = owners.query().none().asSubquery!"id"();
+    assert(items.query().where(F!(SqNlItem, "ownerId").inSubquery(noIds)).count() == 0);
+    assert(items.query().where(~F!(SqNlItem, "ownerId").inSubquery(noIds)).count() == 3);
 }

@@ -1151,8 +1151,13 @@ Note: single-level `exists!()` only. Nested `exists!()` calls conflict on the
 ### IN subqueries
 
 `asSubquery!"field"()` captures a QuerySet as a single-column subquery atom
-without hitting the database. Pass it to `F!(M,"field").inSubquery()` for
-`IN (SELECT …)`, or negate with `~` for `NOT IN`. The subquery keeps the
+without hitting the database. Pass it to `F!(M,"field").inSubquery()` to
+match rows in that set, or negate with `~` for the rows outside it. The two
+split the table exactly, which SQL's `IN` / `NOT IN` do not: a single NULL in
+the subquery makes `NOT IN` match nothing, and a row whose own column is NULL
+falls out of both. peque emits `EXISTS` / `NOT EXISTS` instead, so a NULL is
+simply not in the set — "owners with no items" stays correct when some item has
+no owner, and that orphan item counts as outside every set. The subquery keeps the
 QuerySet's ORDER BY (explicit or `@defaultOrder`), so
 `orderBy(F!"amount".desc).limit(5).asSubquery!"id"()` really is "ids of the
 top 5 by amount", not 5 arbitrary rows.

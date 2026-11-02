@@ -397,10 +397,13 @@ struct FieldBuilder(string colExpr, FieldT = void) {
     /// ditto
     Predicate ne(V : SetExpr)(V rhs)     const { return rhs._cmp("!=", this); }
 
-    /** IN (SELECT ...): F!(M,"field").inSubquery(qs.asSubquery!"field"())
+    /** Membership in a subquery: F!(M,"field").inSubquery(qs.asSubquery!"field"())
       *
       * sub is produced by QuerySet.asSubquery!"field"() — a SQL subquery atom
-      * with no DB call.  NOT IN: ~F!(M, "field").inSubquery(sub).
+      * with no DB call.  The complement is ~F!(M, "field").inSubquery(sub).
+      * Unlike SQL's IN / NOT IN, the two split the rows exactly: a NULL on
+      * either side is simply "not in the set", so it never empties the
+      * complement or drops a row from both.
       **/
     Predicate inSubquery(T)(SubQuery!T sub) const {
         return Predicate(InSubqueryNode(colExpr, sub.sql, sub.params));
@@ -806,10 +809,11 @@ struct PathBuilder(string path) {
         return Predicate(PathNode(path, "IS NULL", [], ""));
     }
 
-    /** IN (SELECT ...): F!"rel.field".inSubquery(qs.asSubquery!"field"())
+    /** Membership in a subquery: F!"rel.field".inSubquery(qs.asSubquery!"field"())
       *
-      * The join path is resolved by the QuerySet at SQL-build time.
-      * NOT IN: ~F!"rel.field".inSubquery(sub).
+      * The join path is resolved by the QuerySet at SQL-build time.  The
+      * complement is ~F!"rel.field".inSubquery(sub); NULLs behave as in the
+      * typed builder's inSubquery.
       **/
     Predicate inSubquery(T)(SubQuery!T sub) const {
         // op="IN_SUB", params=subquery params, otherPath=subquery SQL.

@@ -66,13 +66,16 @@ struct LiteralNode { bool value; }
   **/
 struct ExistsNode { string tableName; Predicate* inner; }
 
-/** col IN (SELECT ...) — produced by F!(M,"f").inSubquery(qs.asSubquery!"f"()).
+/** Membership in a subquery's set — produced by
+  * F!(M,"f").inSubquery(qs.asSubquery!"f"()). Serialised as EXISTS rather than
+  * IN so that NULLs on either side cannot make it UNKNOWN (see the serialiser).
   *
   * subquerySql holds the full SELECT statement; subqueryParams are its bound
   * values.  $N tokens in subquerySql are shifted by the outer offset at
   * serialisation time so they don't collide with outer query parameters.
   *
-  * NOT IN: ~Predicate(InSubqueryNode(...)) via the existing NotNode/~ operator.
+  * The complement: ~Predicate(InSubqueryNode(...)) via the NotNode/~ operator,
+  * which becomes NOT EXISTS.
   **/
 struct InSubqueryNode {
     string    colExpr;
@@ -213,8 +216,14 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
                 i.params,
             );
         },
+        // EXISTS, not `col IN (sub)`. IN is UNKNOWN for a non-member as soon
+        // as the subquery yields one NULL, so its negation matched no rows at
+        // all, and a NULL col fell out of both p and ~p. EXISTS is two-valued:
+        // p and ~p split the rows exactly, and a NULL is simply not in the set.
+        // `_in(v)` names the subquery's single column, whatever it is called.
         (ref InSubqueryNode n) => SerializedPred(
-            n.colExpr ~ " IN (" ~ _shiftParams(n.subquerySql, offset) ~ ")",
+            "EXISTS (SELECT 1 FROM (" ~ _shiftParams(n.subquerySql, offset) ~
+            ") _in(v) WHERE _in.v = " ~ n.colExpr ~ ")",
             n.subqueryParams,
         ),
         (ref PathNode n) {
