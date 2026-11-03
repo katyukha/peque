@@ -249,6 +249,11 @@ Choose a configuration depending on how you want to link `libpq`:
 | `libraryStatic` | Static library — links `libpq` directly |
 | `libraryDynamic` | Dynamic library — loads `libpq` at runtime via `bindbc-loader` |
 
+Compilers: DMD 2.113 or newer, or LDC 1.41 or newer. DMD 2.111 and 2.112
+return a dangling pointer from functions shaped like `Repository.insert`, so
+`repo.insert(r).id` can read freed stack memory; DUB refuses to build peque with
+them.
+
 ## Quick start
 
 ```d

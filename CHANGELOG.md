@@ -29,6 +29,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **DMD 2.113 or newer is required** (breaking for DMD 2.111 and 2.112; LDC is
+  unaffected). Those versions miscompile a function returning a struct through
+  the hidden return slot when its return expression leaves a temporary with a
+  destructor: the pointer handed back addresses a dead local instead of the
+  caller's slot. `repo.insert(r).id` could read freed stack memory, and passing
+  a returned `Result` straight to another function crashed. `dub.sdl` now
+  declares `toolchainRequirements dmd=">=2.113.0"`, so DUB refuses those
+  compilers instead of building wrong code.
+
 - **`prefetch!` orders each parent's children by the target's `@defaultOrder`**,
   as the target's own `all()` would; a target without one keeps arriving in
   server order. Previously no ORDER BY was emitted at all.
