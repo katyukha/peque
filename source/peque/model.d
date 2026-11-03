@@ -169,15 +169,47 @@ struct many2one(T, OnDelete onDelete = OnDelete.noAction) {}
 struct one2many(T, string inverseField) {}
 
 
+/** Whether `schemaSQL` creates the junction table of a string-form @many2many.
+  *
+  * `managed` (the default) emits the table, its two foreign keys with
+  * ON DELETE CASCADE, a composite primary key on the pair and an index in the
+  * reverse order. `external` emits nothing: the table — or an updatable view —
+  * is created some other way, and keeping it unique on the pair is the user's
+  * job.
+  **/
+enum Junction {
+    managed,    /// schemaSQL emits CREATE TABLE IF NOT EXISTS for the junction
+    external,   /// the junction exists already; schemaSQL leaves it alone
+}
+
+
 /** Mark a field as a many-to-many relation via a junction table.
   *
-  * No DB column exists on this side. The array field is always empty at
-  * hydration time; it is populated only when QuerySet.prefetch! is used.
+  * No DB column exists on this side. The field is filled only by
+  * QuerySet.prefetch! — declared as `T[]` it is empty until then, declared as
+  * `Nullable!(T[])` it is null until then and non-null (possibly empty)
+  * after, so code can tell "never loaded" from "no rows". Written through the
+  * repository's `links!"field"(parentId)` handle.
   *
-  * T             = the target model struct.
-  * junctionTable = SQL name of the junction table.
-  * selfKey       = column name in junction table pointing to this model's PK.
-  * targetKey     = column name in junction table pointing to T's PK.
+  * Two forms. The string form names the junction table and its key columns in
+  * SQL, since no D struct describes them:
+  *
+  *   T             = the target model struct.
+  *   junctionTable = SQL name of the junction table.
+  *   selfKey       = column of the junction holding this model's PK.
+  *   targetKey     = column of the junction holding T's PK.
+  *   junction      = whether schemaSQL creates the table (see Junction).
+  *
+  * The model form names a junction model instead, so the keys are D field
+  * names on it and its DDL, indexes and constraints come from that model like
+  * any other. Both keys are inferred from the model's @many2one fields when
+  * each target has exactly one; a self-referential relation has two FKs to the
+  * same model, so there they are named:
+  *
+  *   T             = the target model struct.
+  *   JM            = the junction model (a @model struct).
+  *   selfField     = D field of JM holding this model's PK (inferred if "").
+  *   targetField   = D field of JM holding T's PK (inferred if "").
   *
   * Example:
   * ---
@@ -186,10 +218,29 @@ struct one2many(T, string inverseField) {}
   *     @primaryKey                                              int    id;
   *     @many2many!(Tag, "partner_tag_rel", "partner_id", "tag_id")
   *     Tag[] tags;
+  *     @many2many!(Group, PartnerGroup)
+  *     Nullable!(Group[]) groups;
   * }
   * ---
   **/
-struct many2many(T, string junctionTable, string selfKey = "", string targetKey = "") {}
+struct many2many(T, string junctionTable, string selfKey = "", string targetKey = "",
+                 Junction junction = Junction.managed) {
+    // Defaults exist only so this message, and not "no matching template",
+    // reports the missing key: with "" the emitted SQL would be `j.""`.
+    static assert(selfKey.length > 0 && targetKey.length > 0,
+        "@many2many!(" ~ T.stringof ~ ", \"" ~ junctionTable ~ "\", …) needs " ~
+        "both key columns: @many2many!(" ~ T.stringof ~ ", \"" ~ junctionTable ~
+        "\", \"self_id\", \"target_id\").");
+    // One column cannot hold both ends: the DDL would declare it twice and a
+    // writer against an existing table would link every row to itself.
+    static assert(selfKey != targetKey,
+        "@many2many!(" ~ T.stringof ~ ", \"" ~ junctionTable ~ "\", \"" ~ selfKey ~
+        "\", \"" ~ targetKey ~ "\") names one column for both keys.");
+}
+
+/// ditto
+struct many2many(T, JM, string selfField = "", string targetField = "")
+if (is(JM == struct)) {}
 
 
 /** Mark a field as a populated relation object (not a DB column).

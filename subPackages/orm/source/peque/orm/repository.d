@@ -70,6 +70,7 @@ template isModel(M) {
   *  - deleteById(id)       → void
   *  - deleteByRec(M)       → void        (record-based; extracts PK internally)
   *  - deleteByRec(M[])     → long        (single IN-clause round-trip)
+  *  - links!"rel"(id)      → Links       (write a @many2many: add/remove/set/clear)
   **/
 mixin template CRUDMixin(M, Ctx)
 if (isModel!M && isQueryContext!Ctx) {
@@ -520,6 +521,23 @@ if (isModel!M && isQueryContext!Ctx) {
     auto query() {
         import peque.orm.queryset: QuerySet;
         return QuerySet!(M, Ctx)(_ctx);
+    }
+
+    /** The links of one parent row on a @many2many relation, for writing.
+      *
+      * Returns a `Links` handle bound to this context: `add`, `remove`,
+      * `clear`, `set`, and `within` to bound all four to a subquery.
+      *
+      * Example:
+      * ---
+      * auto l = groups.links!"permissions"(group.id);
+      * l.add([3, 5]);
+      * auto change = l.set([3, 8]);    // change.added, change.removed
+      * ---
+      **/
+    auto links(string relField)(typeof(__traits(getMember, M.init, ormPkFieldName!M())) id) {
+        import peque.orm.relation: Links;
+        return Links!(M, relField, Ctx)(_ctx, id);
     }
 }
 

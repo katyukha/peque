@@ -6,7 +6,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`links!"field"(parentId)` writes a `@many2many` relation** (`peque:orm`).
+  The handle has `add`, `remove` and `clear`, one statement each, and `set`,
+  two statements (unlink what `ids` lacks, then link what it adds — atomic
+  only inside a transaction), all touching only that parent's junction rows,
+  with target ids or a `SubQuery` as input and `within(subquery)` bounding
+  all four to a universe — a link outside it is neither added nor removed,
+  not even by `set` or `clear`. `set` returns a `RelationChange` naming only
+  the keys really linked and unlinked; an unknown id, or an unknown parent,
+  is ignored rather than an error.
+- **`@many2many!(T, JunctionModel)`** names a junction model instead of a
+  table and two columns. Its keys are D field names, inferred from the model's
+  two `@many2one` fields unless both point at one model, and its DDL comes from
+  the model. `links!` refuses a junction model with no `@uniqueTogether` on the
+  pair at compile time.
+- **`Nullable!(T[])` as the type of a `@one2many` or `@many2many` field.** Null
+  until `prefetch!` fills it, empty afterwards when there are no rows.
+- **`Links.add`, `remove` and `set` take `const(TargetKey)[]`**, so a const
+  slice no longer needs a `.dup`.
+
 ### Changed
+
+- **`prefetch!` orders each parent's children by the target's `@defaultOrder`**,
+  as the target's own `all()` would; a target without one keeps arriving in
+  server order. Previously no ORDER BY was emitted at all.
+
+- **`schemaSQL` creates the junction table of every string-form `@many2many`**
+  (breaking for a registry whose junction exists under a different shape — pass
+  `Junction.external` as the fifth UDA argument to keep it yours). The table is
+  emitted after all model tables with both foreign keys `ON DELETE CASCADE`, a
+  primary key on the pair and a reverse-order index; a relation declared from
+  both sides is emitted once, and two declarations disagreeing on the columns
+  are a compile error.
+- **`@many2many`'s key columns are required** (breaking). The empty defaults
+  emitted `j.""` and failed at the first `prefetch!`; leaving one out is now a
+  compile error naming both.
 
 - **`delete_()` and `update()` without a `where()` are refused** (breaking — they
   now throw `QueryClientError`). A filter applied conditionally that ended up

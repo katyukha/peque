@@ -91,3 +91,4 @@ public import peque.orm.field: FieldBuilder, PathBuilder, AggBuilder, isAggBuild
     SetExpr, F, SF, exists;
 public import peque.orm.ordering: Ordering, OrderDir, OrderNulls;
 public import peque.orm.subquery: SubQuery;
+public import peque.orm.relation: Links, RelationChange;

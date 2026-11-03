@@ -280,6 +280,13 @@ struct RelPartner {
     @many2many!(Tag, "doc_partner_tag_rel", "partner_id", "tag_id") Tag[] tags;
 }
 
+// The README's Nullable!(T[]) declaration: null until prefetched.
+@model("doc_res_partner")
+struct RelPartnerNullable {
+    @primaryKey int id;
+    @many2many!(Tag, "doc_partner_tag_rel", "partner_id", "tag_id") Nullable!(Tag[]) tags;
+}
+
 @model("doc_account_invoice")
 struct RelInvoice {
     @primaryKey           int                 id;
@@ -313,10 +320,7 @@ unittest {
     c.exec(`DROP TABLE IF EXISTS doc_account_invoice`);
     c.exec(`DROP TABLE IF EXISTS doc_res_partner`);
     c.exec(`DROP TABLE IF EXISTS doc_tag`);
-    c.exec(schemaSQL!RelReg());
-    c.exec(`CREATE TABLE doc_partner_tag_rel (
-                partner_id int REFERENCES doc_res_partner(id),
-                tag_id     int REFERENCES doc_tag(id))`);
+    c.exec(schemaSQL!RelReg());   // creates doc_partner_tag_rel too
 
     auto partnerRepo = Repository!(RelPartner, Connection)(&c);
     auto invoiceRepo = Repository!(RelInvoice, Connection)(&c);
@@ -360,6 +364,25 @@ unittest {
     assert(partners[0].invoices.length == 1);
     assert(partners[0].tags.length == 1);
     assert(partners[0].tags[0].name == "vip");
+
+    // links! — writing a many-to-many
+    auto l = partnerRepo.links!"tags"(saved.id);
+    auto goldSeed = Tag(0, "gold");
+    auto gold = tagRepo.insert(goldSeed);
+    assert(l.add([gold.id]) == 1);
+    assert(l.add([gold.id]) == 0, "a repeat inserts nothing");
+    auto change = l.set([tag.id]);
+    assert(change.removed == [gold.id] && change.added.length == 0 && change.changed);
+    assert(!l.set([tag.id]).changed);
+
+    auto golds = tagRepo.query().where!"name"("gold").asSubquery!"id"();
+    assert(l.within(golds).set([]).removed.length == 0, "vip is outside the universe");
+    assert(l.add(golds) == 1);
+    assert(l.remove(golds) == 1);
+    assert(l.clear() == 1);
+
+    auto nullable_ = Repository!(RelPartnerNullable, Connection)(&c).query().all();
+    assert(nullable_.length == 1 && nullable_[0].tags.isNull, "not prefetched: null");
 
     // Two FKs to one table, disambiguated by @related("field").
     auto shipRepo = Repository!(Shipment, Connection)(&c);

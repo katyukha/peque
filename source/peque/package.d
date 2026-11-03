@@ -13,7 +13,7 @@ public import peque.pool:          ConnectionPool, ThreadConnectionPool;
 public import peque.hydration:     camelToSnake;
 public import peque.model:         model, field, primaryKey, autoHydrate,
                                    many2one, related, one2many, many2many,
-                                   OnDelete, hasMany2OneUDA;
+                                   OnDelete, Junction, hasMany2OneUDA;
 
 // The whole exception tree — callers cannot avoid naming these.
 public import peque.exception;

@@ -161,11 +161,37 @@ private template _pathFkCol(M, string relName) {
 // in _prefetches.  Separate from QuerySet to avoid circular template issues.
 // ---------------------------------------------------------------------------
 
+// A to-many relation field is `T[]` or `Nullable!(T[])`; the latter tells
+// "never prefetched" (null) from "prefetched, no rows" (empty).
+private template _relElemType(FieldType) {
+    static if (is(FieldType == Nullable!U, U))
+        alias _relElemType = typeof(U.init[0]);
+    else
+        alias _relElemType = typeof(FieldType.init[0]);
+}
+
+private void _assignRel(FieldType, E)(ref FieldType field, E[] rows) {
+    static if (is(FieldType == Nullable!U, U))
+        field = nullable(rows);
+    else
+        field = rows;
+}
+
+// The target model's @defaultOrder as all() would emit it — the target table
+// is aliased `_m` for that — plus the LEFT JOINs a relation-path term needs.
+private string _prefetchOrderSQL(TargetM)(out string joins) {
+    _FilterJoin[] fjoins;
+    int idx = 0;
+    auto terms = _resolveOrderTerms!TargetM(_modelDefaultOrder!TargetM, fjoins, idx);
+    joins = _filterJoinSQL(fjoins);
+    return terms.length ? " ORDER BY " ~ terms : "";
+}
+
 private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
     import std.conv: to;
     import std.array: join;
-    import peque.orm.sql: buildSelectList, ormTableName, ormPkColName,
-        ormPkFieldName, _findM2OFKColFor, _prefixedSelectList;
+    import peque.orm.sql: ormTableName, ormPkColName,
+        ormPkFieldName, _findM2OFKColFor, _prefixedSelectList, _M2M, _hasM2MUDA;
     import peque.hydration: _hydrateAnnotated;
 
     static foreach (memberName; FieldNameTuple!M) {{
@@ -193,9 +219,12 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                     alias InvFieldDecl = __traits(getMember, TargetM, invField);
                     enum fkCol = _sqlIdent(_colName!(InvFieldDecl, invField));
 
-                    string sql = "SELECT " ~ buildSelectList!TargetM() ~
-                                 " FROM "  ~ ormTableName!TargetM ~
-                                 " WHERE " ~ fkCol ~ " IN (" ~ placeholders ~ ")";
+                    string joins;
+                    auto orderBy = _prefetchOrderSQL!TargetM(joins);
+                    string sql = "SELECT " ~ _prefixedSelectList!(TargetM, "_m")() ~
+                                 " FROM "  ~ ormTableName!TargetM ~ " _m" ~ joins ~
+                                 " WHERE _m." ~ fkCol ~ " IN (" ~ placeholders ~ ")" ~
+                                 orderBy;
 
                     // Build PGValue[] array
                     PGValue[] pgParams;
@@ -204,9 +233,10 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                     auto result = ctx.execParams(sql, pgParams);
 
                     // Bucket by FK, then assign: O(parents + children).
-                    // Children keep the child query's result order.
+                    // Children keep the child query's order: @defaultOrder,
+                    // else whatever PostgreSQL returned.
                     enum invFkField = invField;             // D field name on TargetM
-                    alias ElemType = typeof(FieldType.init[0]);
+                    alias ElemType = _relElemType!FieldType;
                     alias FkT      = typeof(__traits(getMember, TargetM, invFkField));
 
                     ElemType[][PkType] byFk;
@@ -226,71 +256,77 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
 
                     foreach (ref m; rows) {
                         auto p = __traits(getMember, m, ormPkFieldName!M()) in byFk;
-                        __traits(getMember, m, memberName) = p ? *p : ElemType[].init;
+                        _assignRel(__traits(getMember, m, memberName), p ? *p : ElemType[].init);
                     }
                 }
             }}
 
             // ---- @many2many ---------------------------------------------
-            static foreach (uda; __traits(getAttributes, __traits(getMember, M, memberName))) {{
-                static if (is(uda) && is(uda == many2many!(TargetM, jt, sk, tk), TargetM, string jt, string sk, string tk)) {
-                    alias PkType = typeof(__traits(getMember, M, ormPkFieldName!M()));
-                    PkType[] pks;
-                    bool[PkType] pkSeen;
-                    foreach (ref r; rows) {
-                        auto pk = __traits(getMember, r, ormPkFieldName!M());
-                        if (pk !in pkSeen) { pkSeen[pk] = true; pks ~= pk; }
-                    }
-                    if (pks.length == 0) return;
+            static if (_hasM2MUDA!(__traits(getMember, M, memberName))) {{
+                alias Rel     = _M2M!(M, memberName);
+                alias TargetM = Rel.Target;
+                alias PkType = typeof(__traits(getMember, M, ormPkFieldName!M()));
+                PkType[] pks;
+                bool[PkType] pkSeen;
+                foreach (ref r; rows) {
+                    auto pk = __traits(getMember, r, ormPkFieldName!M());
+                    if (pk !in pkSeen) { pkSeen[pk] = true; pks ~= pk; }
+                }
+                if (pks.length == 0) return;
 
-                    immutable placeholders = buildPlaceholderList(pks.length);
+                immutable placeholders = buildPlaceholderList(pks.length);
 
-                    enum targetPkCol = ormPkColName!TargetM();
-                    // Qualify target columns with alias `t`: the junction table
-                    // `j` commonly shares column names (e.g. `id`) with the
-                    // target, so an unqualified SELECT list would be ambiguous.
-                    // Alias the self-key to a fixed name distinct from any target
-                    // column so a self-referential m2m (junction key column name
-                    // colliding with a target column) still reads correctly.
-                    enum selfKeyAlias = "__peque_self_key";
-                    // Junction table and key columns come from the UDA verbatim,
-                    // so they need the same reserved-word quoting as model columns.
-                    enum jtSql = _sqlIdent(jt);
-                    enum skSql = _sqlIdent(sk);
-                    enum tkSql = _sqlIdent(tk);
-                    string sql =
-                        "SELECT " ~ _prefixedSelectList!(TargetM, "t")() ~
-                        ", j." ~ skSql ~ " AS " ~ selfKeyAlias ~
-                        " FROM " ~ ormTableName!TargetM ~ " t" ~
-                        " JOIN " ~ jtSql ~ " j ON j." ~ tkSql ~ " = t." ~ targetPkCol ~
-                        " WHERE j." ~ skSql ~ " IN (" ~ placeholders ~ ")";
+                enum targetPkCol = ormPkColName!TargetM();
+                // Qualify target columns with alias `_m`: the junction table
+                // `j` commonly shares column names (e.g. `id`) with the
+                // target, so an unqualified SELECT list would be ambiguous —
+                // and `_m` is the alias the @defaultOrder resolver qualifies a
+                // bare column term with. Alias the self-key to a fixed name
+                // distinct from any target column so a self-referential m2m
+                // (junction key column name colliding with a target column)
+                // still reads correctly.
+                enum selfKeyAlias = "__peque_self_key";
+                // Junction table and key columns are raw names, so they need
+                // the same reserved-word quoting as model columns.
+                enum jtSql = _sqlIdent(Rel.table);
+                enum skSql = _sqlIdent(Rel.selfCol);
+                enum tkSql = _sqlIdent(Rel.targetCol);
+                string joins;
+                auto orderBy = _prefetchOrderSQL!TargetM(joins);
+                string sql =
+                    "SELECT " ~ _prefixedSelectList!(TargetM, "_m")() ~
+                    ", j." ~ skSql ~ " AS " ~ selfKeyAlias ~
+                    " FROM " ~ ormTableName!TargetM ~ " _m" ~
+                    " JOIN " ~ jtSql ~ " j ON j." ~ tkSql ~ " = _m." ~ targetPkCol ~
+                    joins ~
+                    " WHERE j." ~ skSql ~ " IN (" ~ placeholders ~ ")" ~
+                    orderBy;
 
-                    PGValue[] pgParams;
-                    foreach (pk; pks) pgParams ~= convertToPG(pk);
+                PGValue[] pgParams;
+                foreach (pk; pks) pgParams ~= convertToPG(pk);
 
-                    auto result = ctx.execParams(sql, pgParams);
+                auto result = ctx.execParams(sql, pgParams);
 
-                    // Bucket by the junction's self key, then assign. Each row is
-                    // hydrated once, even when several parents share a target.
-                    alias ElemType = typeof(FieldType.init[0]);
-                    // Resolve the self-key column once — a name lookup scans the
-                    // field list.
-                    auto selfKeyNum = result.fieldNumber(selfKeyAlias);
-                    enforce!QueryClientError(!selfKeyNum.isNull,
-                        "prefetch: junction self-key column '" ~ selfKeyAlias ~
-                        "' missing from the result");
-                    immutable selfKeyIdx = selfKeyNum.get;
+                // Bucket by the junction's self key, then assign. Each row is
+                // hydrated once, even when several parents share a target.
+                alias ElemType = _relElemType!FieldType;
+                // Resolve the self-key column once — a name lookup scans the
+                // field list.
+                auto selfKeyNum = result.fieldNumber(selfKeyAlias);
+                enforce!QueryClientError(!selfKeyNum.isNull,
+                    "prefetch: junction self-key column '" ~ selfKeyAlias ~
+                    "' missing from the result");
+                immutable selfKeyIdx = selfKeyNum.get;
 
-                    ElemType[][PkType] bySelfKey;
-                    foreach (i; 0 .. result.ntuples) {
-                        auto row = result.getRow(i);
-                        bySelfKey[row[selfKeyIdx].as!PkType] ~= row.as!TargetM;
-                    }
+                ElemType[][PkType] bySelfKey;
+                foreach (i; 0 .. result.ntuples) {
+                    auto row = result.getRow(i);
+                    bySelfKey[row[selfKeyIdx].as!PkType] ~= row.as!TargetM;
+                }
 
-                    foreach (ref m; rows) {
-                        auto p = __traits(getMember, m, ormPkFieldName!M()) in bySelfKey;
-                        __traits(getMember, m, memberName) = p ? *p : ElemType[].init;
-                    }
+                foreach (ref m; rows) {
+                    auto p = __traits(getMember, m, ormPkFieldName!M()) in bySelfKey;
+                    _assignRel(__traits(getMember, m, memberName), p ? *p : ElemType[].init);
                 }
             }}
         }
@@ -1252,10 +1288,10 @@ if (isModel!M && isQueryContext!Ctx) {
       *
       * Returns the same QuerySet type (JoinFields unchanged).
       *
-      * ORDER: the fetched children arrive in whatever order PostgreSQL returns
-      * them. No ORDER BY is emitted and the target model's @defaultOrder is NOT
-      * applied, so the order is undefined and may change between runs. Sort the
-      * array yourself if it matters.
+      * ORDER: the children of each parent follow the target model's
+      * @defaultOrder, as its own all() would. A target without one arrives in
+      * whatever order PostgreSQL returns, which may change between runs; sort
+      * the array yourself if it matters.
       *
       * Example:
       * ---
@@ -1275,14 +1311,7 @@ if (isModel!M && isQueryContext!Ctx) {
             }}
             return found;
         }();
-        enum bool _hasM2M = () {
-            bool found = false;
-            static foreach (uda; __traits(getAttributes, RelFieldDecl)) {{
-                static if (is(uda) && is(uda == many2many!(T, jt, sk, tk), T, string jt, string sk, string tk))
-                    found = true;
-            }}
-            return found;
-        }();
+        enum bool _hasM2M = _hasM2MUDA!RelFieldDecl;
         static assert(_hasO2M || _hasM2M,
             "'" ~ relField ~ "' on " ~ M.stringof ~
             " does not have @one2many or @many2many UDA");

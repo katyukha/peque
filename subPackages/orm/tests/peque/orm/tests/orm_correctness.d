@@ -16,7 +16,7 @@ private import peque.query_context: isQueryContext;
 private import peque.connection: Connection;
 private import peque.exception: QueryError;
 private import peque.model: model, field, primaryKey, many2one, related,
-    many2many, autoHydrate, OnDelete;
+    many2many, Junction, autoHydrate, OnDelete;
 private import peque.orm;
 private import peque.orm.sql: ormPkColName;
 
@@ -170,8 +170,9 @@ struct OccDoc {
     @primaryKey int    id;
     @field      string title;
     // Junction table occ_doc_tag intentionally has its OWN `id` column, so an
-    // unqualified target SELECT list would be ambiguous.
-    @many2many!(OccTag, "occ_doc_tag", "doc_id", "tag_id") OccTag[] tags;
+    // unqualified target SELECT list would be ambiguous. Created by hand below,
+    // hence Junction.external.
+    @many2many!(OccTag, "occ_doc_tag", "doc_id", "tag_id", Junction.external) OccTag[] tags;
 }
 alias OccDocReg = Registry!(
     Bind!(OccTag, ModelRepo!OccTag),
@@ -216,6 +217,7 @@ unittest {
 struct OccPerson {
     @primaryKey int    id;
     @field      string name;
+    // Managed: schemaSQL creates occ_friend, both keys referencing occ_person.
     @many2many!(OccPerson, "occ_friend", "person_id", "friend_id") OccPerson[] friends;
 }
 alias OccPersonReg = Registry!(Bind!(OccPerson, ModelRepo!OccPerson));
@@ -226,10 +228,6 @@ unittest {
     c.exec("DROP TABLE IF EXISTS occ_person;");
     c.exec(schemaSQL!OccPersonReg());
     c.exec("
-        CREATE TABLE occ_friend (
-            person_id int REFERENCES occ_person(id),
-            friend_id int REFERENCES occ_person(id)
-        );
         INSERT INTO occ_person (name) VALUES ('Ann'), ('Bob'), ('Cara');
         -- Ann is friends with Bob and Cara; Bob with Cara.
         INSERT INTO occ_friend (person_id, friend_id)

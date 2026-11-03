@@ -12,7 +12,7 @@ module peque.orm.tests.join;
 private import std.process: environment;
 private import std.typecons: Nullable, nullable;
 private import peque.connection: Connection;
-private import peque.model: model, field, primaryKey, many2one, related,
+private import peque.model: model, field, primaryKey, many2one, related, Junction, defaultOrder,
     one2many, many2many;
 private import peque.orm;
 
@@ -378,6 +378,107 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
+// prefetch! order: the target's @defaultOrder, each kind of term; and a
+// Nullable one2many telling "never prefetched" from "no rows"
+// ---------------------------------------------------------------------------
+
+@model("po_partner")
+struct PoPartner {
+    @primaryKey int    id;
+    @field      string name;
+    @one2many!(PoInvoice, "partnerId") Nullable!(PoInvoice[]) invoices;
+    // The junction has its own `id`, so a bare `id` term is ambiguous unless
+    // the resolver qualifies it.
+    @many2many!(PoTag, "po_partner_tag", "partner_id", "tag_id", Junction.external) PoTag[] tags;
+}
+
+@model("po_category")
+struct PoCategory {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+// A raw term and a relation-path term, so both the qualification and the
+// LEFT JOIN a path needs are exercised.
+@model("po_invoice")
+@defaultOrder!("code DESC", F!"category.name")
+struct PoInvoice {
+    @primaryKey              int          id;
+    @field                   string       code;
+    @many2one!(PoPartner)    Nullable!int partnerId;
+    @many2one!(PoCategory)   int          categoryId;
+    @related("categoryId")   Nullable!PoCategory category;
+}
+
+@model("po_tag")
+@defaultOrder!("id DESC")
+struct PoTag {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+alias PoReg = Registry!(
+    Bind!(PoCategory, ModelRepo!PoCategory),
+    Bind!(PoPartner,  ModelRepo!PoPartner),
+    Bind!(PoInvoice,  ModelRepo!PoInvoice),
+    Bind!(PoTag,      ModelRepo!PoTag),
+);
+
+unittest {
+    auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS po_partner_tag`);
+    c.exec(`DROP TABLE IF EXISTS po_invoice`);
+    c.exec(`DROP TABLE IF EXISTS po_tag`);
+    c.exec(`DROP TABLE IF EXISTS po_partner`);
+    c.exec(`DROP TABLE IF EXISTS po_category`);
+    c.exec(schemaSQL!PoReg());
+    c.exec(`CREATE TABLE po_partner_tag (id serial PRIMARY KEY, partner_id int, tag_id int)`);
+
+    auto pRepo = Repository!(PoPartner, Connection)(&c);
+    auto iRepo = Repository!(PoInvoice, Connection)(&c);
+    auto tRepo = Repository!(PoTag, Connection)(&c);
+    auto cRepo = Repository!(PoCategory, Connection)(&c);
+
+    PoPartner a; a.name = "A"; auto pa = pRepo.insert(a);
+    PoPartner b; b.name = "B"; auto pb = pRepo.insert(b);
+    PoCategory cat; cat.name = "c"; auto pc = cRepo.insert(cat);
+
+    // Inserted ascending, expected back descending.
+    foreach (code; ["i1", "i2", "i3"]) {
+        PoInvoice inv; inv.code = code; inv.partnerId = pa.id.nullable; inv.categoryId = pc.id;
+        iRepo.insert(inv);
+    }
+    int[] tagIds;
+    foreach (name; ["t1", "t2", "t3"]) {
+        PoTag t; t.name = name;
+        tagIds ~= tRepo.insert(t).id;
+    }
+    foreach (tid; tagIds)
+        c.execParams(`INSERT INTO po_partner_tag (partner_id, tag_id) VALUES ($1, $2)`, pa.id, tid);
+
+    auto plain = pRepo.query().orderBy!"name".all();
+    assert(plain[0].invoices.isNull && plain[1].invoices.isNull, "nobody prefetched");
+
+    auto got = pRepo.query().orderBy!"name".prefetch!"invoices".prefetch!"tags".all();
+    assert(!got[0].invoices.isNull && got[0].invoices.get.length == 3);
+    assert(got[0].invoices.get[0].code == "i3");
+    assert(got[0].invoices.get[1].code == "i2");
+    assert(got[0].invoices.get[2].code == "i1");
+    assert(!got[1].invoices.isNull && got[1].invoices.get.length == 0,
+        "prefetched with no rows is empty, not null");
+
+    assert(got[0].tags.length == 3);
+    assert(got[0].tags[0].id == tagIds[2] && got[0].tags[2].id == tagIds[0],
+        "junction rows were inserted ascending; the target's order wins");
+
+    c.exec(`DROP TABLE IF EXISTS po_partner_tag`);
+    c.exec(`DROP TABLE IF EXISTS po_invoice`);
+    c.exec(`DROP TABLE IF EXISTS po_tag`);
+    c.exec(`DROP TABLE IF EXISTS po_partner`);
+    c.exec(`DROP TABLE IF EXISTS po_category`);
+}
+
+// ---------------------------------------------------------------------------
 // prefetch! stitching: order, empty parents, NULL FKs, shared targets
 // ---------------------------------------------------------------------------
 
@@ -415,8 +516,7 @@ unittest {
     c.exec(`DROP TABLE IF EXISTS pf_invoice`);
     c.exec(`DROP TABLE IF EXISTS pf_tag`);
     c.exec(`DROP TABLE IF EXISTS pf_partner`);
-    c.exec(schemaSQL!PfReg());
-    c.exec(`CREATE TABLE pf_partner_tag (partner_id int, tag_id int)`);
+    c.exec(schemaSQL!PfReg());   // creates pf_partner_tag too
 
     auto pRepo = Repository!(PfPartner, Connection)(&c);
     auto iRepo = Repository!(PfInvoice, Connection)(&c);

@@ -600,7 +600,9 @@ database-side default are different features.)
 ### Registry and schema
 
 A `Registry` maps models to repository templates. `schemaSQL` generates
-`CREATE TABLE` statements for every model in the registry.
+`CREATE TABLE` statements for every model in the registry, followed by the
+junction tables its string-form `@many2many` fields name (see
+[The junction table](#the-junction-table)).
 
 ```d
 alias AppReg = Registry!(Bind!(Partner, ModelRepo!Partner));
@@ -903,7 +905,7 @@ struct Partner {
     // prefetch!, empty otherwise.
     @one2many!(Invoice, "partnerId") Invoice[] invoices;
 
-    // Many-to-many through a junction table.
+    // Many-to-many through a junction table, which schemaSQL creates.
     @many2many!(Tag, "partner_tag_rel", "partner_id", "tag_id") Tag[] tags;
 }
 
@@ -925,7 +927,17 @@ struct Invoice {
 | `@many2one!(T)` | many | yes — the FK | always (it is a column) |
 | `@related` | many | no | `load!` / `joinOne!` |
 | `@one2many!(T, "fk")` | one | no | `prefetch!` |
-| `@many2many!(T, junction, selfKey, targetKey)` | — | no | `prefetch!` |
+| `@many2many!(T, "junction", "self_key", "target_key")` | — | no | `prefetch!`; written by `links!` |
+| `@many2many!(T, JunctionModel)` | — | no | same, through a junction model |
+
+A to-many field declared `Nullable!(T[])` instead of `T[]` is null until a
+`prefetch!` fills it, and empty afterwards when there are no rows — so code
+can refuse to act on a record nobody loaded instead of mistaking "not loaded"
+for "none":
+
+```d
+@many2many!(Tag, "partner_tag_rel", "partner_id", "tag_id") Nullable!(Tag[]) tags;
+```
 
 #### `load!` — one query, LEFT JOIN
 
@@ -978,9 +990,108 @@ auto partners = partnerRepo.query()
 // partners[0].invoices and .tags are filled
 ```
 
-The order of prefetched children is **undefined** — no `ORDER BY` is emitted and
-the child model's `@defaultOrder` is not applied. Sort the array yourself if it
-matters.
+Each parent's children follow the child model's `@defaultOrder`, as the child's
+own `all()` would. A child model without one arrives in whatever order
+PostgreSQL returns, which may change between runs; sort the array yourself if
+it matters.
+
+#### `links!` — writing a many-to-many
+
+A repository hands out a handle for one parent's links on one `@many2many`
+field. It takes target ids rather than records, which is what a form holds:
+
+```d
+auto l = partnerRepo.links!"tags"(partner.id);
+
+l.add([vip.id, gold.id]);          // rows really inserted: 2, then 0 on a repeat
+l.remove([gold.id]);               // rows really deleted
+auto change = l.set([vip.id, new_.id]);
+change.added;                      // [new_.id] — only what was really linked
+change.removed;                    // []        — vip was already there
+change.changed;                    // true
+l.clear();
+
+// Server-side inputs: the ids never leave the database.
+auto active = tagRepo.query().where!"active"(true).asSubquery!"id"();
+l.add(active);
+l.remove(active);
+
+// Bounded: only rows the universe contains can be linked or unlinked — not
+// even set or clear touch a link outside it.
+l.within(active).set(ids);
+```
+
+The rules, each pinned by a test:
+
+- An id that names no target row, or a row outside `within`, is ignored, not an
+  error: an option deleted between rendering a form and submitting it must not
+  fail the save. An unknown parent id is a no-op with an empty change.
+- A link outside `within` is never removed, not even by `set([])` or `clear()`.
+  A form cannot show a link its user may not see, so an id missing from its
+  submission is one that could never be ticked, not one that was unticked.
+- Duplicates in `ids` count once. `set([])` unlinks everything in the universe.
+- Another parent's links are never touched.
+
+`add`, `remove` and `clear` are one statement each, idempotent, and safe under
+concurrency: two callers racing on one parent converge to the union of what
+they asked. `set` is two statements — unlink what `ids` lacks, then link what it
+adds — so it is atomic only inside a transaction, and two concurrent `set`s on
+one parent can leave a mix of both lists (never a duplicate or a dangling
+link). A caller who needs more runs it under `IsolationLevel.serializable` and
+retries on `isRetriable()`.
+
+#### The junction table
+
+A string-form `@many2many` names a table no model describes, so `schemaSQL`
+creates it — after every model table, since its foreign keys point at two of
+them:
+
+```sql
+CREATE TABLE IF NOT EXISTS "partner_tag_rel" (
+    "partner_id" INTEGER NOT NULL REFERENCES "res_partner"("id") ON DELETE CASCADE,
+    "tag_id"     INTEGER NOT NULL REFERENCES "tag"("id")         ON DELETE CASCADE,
+    PRIMARY KEY ("partner_id", "tag_id")
+);
+CREATE INDEX IF NOT EXISTS idx_partner_tag_rel_tag_id_partner_id
+    ON "partner_tag_rel" ("tag_id", "partner_id");
+```
+
+The composite primary key is the unique constraint `links!` relies on and the
+index a `prefetch!` from this side uses; the reverse index serves a `prefetch!`
+from the other side. A relation declared from both sides over one junction is
+emitted once; two declarations that disagree on its columns are a compile
+error. Pass `Junction.external` as a fifth argument when the table exists
+already — created elsewhere, or an updatable view — and keeping it unique on
+the pair is then your job:
+
+```d
+@many2many!(Tag, "partner_tag_view", "partner_id", "tag_id", Junction.external) Tag[] tags;
+```
+
+When the junction carries columns of its own, make it a model and name that
+model instead. Its DDL, indexes and constraints then come from the model like
+any other, the keys are D field names resolved like every other column, and
+`links!` refuses at compile time a junction model with no
+`@uniqueTogether` (or `@uniqueIndexTogether`) on the pair. `links!` inserts
+only the two keys, so every other column needs a default — a membership
+table with a required `role` is not a many-to-many case:
+
+```d
+@model("partner_group_rel")
+@uniqueTogether!("partnerId", "groupId")
+@indexTogether!("groupId", "partnerId")
+struct PartnerGroup {
+    @primaryKey                            int id;
+    @many2one!(Partner, OnDelete.cascade)  int partnerId;
+    @many2one!(Group,   OnDelete.cascade)  int groupId;
+}
+
+// Keys inferred from the two @many2one fields …
+@many2many!(Group, PartnerGroup) Group[] groups;
+
+// … unless both point at the same model, as in a self-referential relation.
+@many2many!(Person, Friendship, "personId", "friendId") Person[] friends;
+```
 
 ### Aggregation
 
