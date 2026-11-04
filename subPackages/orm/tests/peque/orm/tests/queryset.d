@@ -415,9 +415,8 @@ unittest {
     assert(multi[$-1].name == "a");
 }
 
-// orderBy(string) is column names only, so a sort column taken from a
-// request cannot carry SQL; an expression needs orderByRaw, which says it is
-// trusted.
+// orderBy(string) is column names only; an expression needs orderByRaw, which
+// says it is trusted. The hostile inputs are in security.d.
 unittest {
     import std.exception: collectException;
     auto c = makeConn(); seedOrdered(c);
@@ -434,13 +433,8 @@ unittest {
     auto byExpr = repo.query().orderByRaw("lower(name) ASC").all();
     assert(byExpr[0].name == "a");
 
-    foreach (hostile; ["lower(name) ASC", "sort_key; DROP TABLE qs_ordered", "sort_key -- x",
-                       "(SELECT 1)", "sort_key DESC, random()"]) {
-        auto ex = collectException!QueryClientError(repo.query().orderBy(hostile));
-        assert(ex !is null, hostile ~ " was accepted");
-        assert(ex.msg.canFind("orderByRaw"), ex.msg);
-    }
-    assert(c.exec(`SELECT count(*) FROM qs_ordered`).getValue!long(0, 0) == 3);
+    auto ex = collectException!QueryClientError(repo.query().orderBy("lower(name) ASC"));
+    assert(ex !is null && ex.msg.canFind("orderByRaw"), ex is null ? "accepted" : ex.msg);
 
     // A single "" suppresses ordering (overrides @defaultOrder).
     assert(repo.query().orderBy("").all().length == 3);
