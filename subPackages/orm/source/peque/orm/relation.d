@@ -230,12 +230,11 @@ if (isQueryContext!Ctx) {
         return convertToPG(_parent) ~ params;
     }
 
-    // INSERT … SELECT from the two model tables: an unknown target id, or an
-    // unknown parent, selects nothing and is ignored rather than failing a
-    // foreign key. NOT EXISTS makes the affected rows an honest diff whether
-    // or not the junction is unique; ON CONFLICT covers a concurrent insert of
-    // the same pair when it is. The keys come back only when asked for — a
-    // caller that wants a count should not have them shipped.
+    // INSERT … SELECT from both model tables: an unknown target or parent
+    // selects nothing instead of failing a foreign key. NOT EXISTS keeps the
+    // affected rows an honest diff even on a junction with no unique
+    // constraint; ON CONFLICT covers a concurrent insert of the same pair when
+    // there is one. Keys come back only when asked for.
     private Result _insert(string cond, PGValue[] params, bool returning) {
         auto within = _withinPred("t." ~ _tpk, params);
         string sql =

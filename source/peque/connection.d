@@ -85,10 +85,8 @@ struct Connection {
     private struct ConnectionInternalData {
         PGconn* _pg_conn;
 
-        // Set by a pool on every connection it holds. A pooled connection
-        // passes to other borrowers and is replaced when a notification
-        // arrives on it while idle, so listen() refuses it. In the shared
-        // payload, so every copy of the handle sees it.
+        // Set by a pool; listen() refuses a pooled connection (see listen).
+        // In the shared payload, so every copy of the handle sees it.
         bool _pooled;
 
         this(in string conn_info) @trusted {

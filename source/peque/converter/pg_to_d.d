@@ -542,17 +542,12 @@ template hasPGTextReader(T) {
 // `return scope`, which says the slice may be returned — kept — and so would
 // dangle once the Result frees the buffer.
 private template _readerBorrowsText(T) {
-    static if (__traits(compiles, T.fromPGText(_probeSlice(), PGType.init)))
-        enum _readerBorrowsText = () {
-            bool scoped, returned;
-            foreach (stc; __traits(getParameterStorageClasses,
-                                   T.fromPGText(_probeSlice(), PGType.init), 0)) {
-                if (stc == "scope")  scoped   = true;
-                if (stc == "return") returned = true;
-            }
-            return scoped && !returned;
-        }();
-    else
+    static if (__traits(compiles, T.fromPGText(_probeSlice(), PGType.init))) {
+        import std.algorithm.searching: canFind;
+        enum string[] _stc =
+            [__traits(getParameterStorageClasses, T.fromPGText(_probeSlice(), PGType.init), 0)];
+        enum _readerBorrowsText = _stc.canFind("scope") && !_stc.canFind("return");
+    } else
         enum _readerBorrowsText = false;
 }
 

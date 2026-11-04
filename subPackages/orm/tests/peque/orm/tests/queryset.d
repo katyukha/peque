@@ -10,7 +10,7 @@
   *  - first() — found and not found
   *  - count()
   *  - exists()
-  *  - delete_() — with and without filter
+  *  - delete_() / update() — with a filter; refused without one
   *  - Branching from a base QuerySet
   **/
 module peque.orm.tests.queryset;

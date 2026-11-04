@@ -322,14 +322,11 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                 immutable placeholders = buildPlaceholderList(pks.length);
 
                 enum targetPkCol = ormPkColName!TargetM();
-                // Qualify target columns with alias `_m`: the junction table
-                // `j` commonly shares column names (e.g. `id`) with the
-                // target, so an unqualified SELECT list would be ambiguous —
-                // and `_m` is the alias the @defaultOrder resolver qualifies a
-                // bare column term with. Alias the self-key to a fixed name
-                // distinct from any target column so a self-referential m2m
-                // (junction key column name colliding with a target column)
-                // still reads correctly.
+                // The target is `_m`: the junction `j` commonly shares column
+                // names with it (`id`), and `_m` is what the @defaultOrder
+                // resolver qualifies a bare column with. The self key gets a
+                // fixed alias no target column can collide with, which a
+                // self-referential junction otherwise would.
                 enum selfKeyAlias = "__peque_self_key";
                 // Junction table and key columns are raw names, so they need
                 // the same reserved-word quoting as model columns.
@@ -613,7 +610,8 @@ private string _orderSuffix(in Ordering ord) {
 }
 
 // The output names a select!DTO emits — one `AS` alias per member, from the
-// same resolver both select!DTO paths use for the SELECT list.
+// same resolver both select!DTO paths use for the SELECT list. A static
+// immutable, not an enum: an enum array is re-allocated at every use.
 private template _dtoOutputNames(DTO) {
     private static string[] _collect() {
         string[] names;
@@ -621,34 +619,25 @@ private template _dtoOutputNames(DTO) {
             names ~= _resolveColName!(__traits(getMember, DTO, m), m);
         return names;
     }
-    enum string[] _dtoOutputNames = _collect();
+    static immutable string[] _dtoOutputNames = _collect();
 }
 
-/* Resolve a parsed ORDER BY name (OrderKind.name) to the column PostgreSQL
- * is to see.
+/* Resolve a parsed ORDER BY name (OrderKind.name) to what PostgreSQL sees.
  *
- * Emitted bare, "name" becomes "column reference is ambiguous" as soon as a
- * join brings in a table with the same column — unless it happens to match a
- * SELECT output column, so a query whose SELECT list is the model's own
- * columns never shows it while select!DTO and asSubquery do. A bare name that
- * is one of M's columns is therefore qualified as _m.<name>. A qualified name
- * is emitted as written, and so is a bare name M has no column for, which may
- * legitimately belong to a joined table.
+ * A bare name that is one of M's columns becomes _m.<name>: emitted bare it is
+ * "ambiguous" as soon as a join brings in a table with the same column. Left
+ * as written: a qualified name, a name M has no column for (it may belong to
+ * a joined table), and one of `outputs`, the statement's SELECT output names,
+ * which SQL resolves before any input column — in a grouped query or a
+ * select!DTO, "amount" may mean an annotation rather than _m.amount.
  *
- * `outputs` are the statement's SELECT output names. SQL resolves a bare
- * ORDER BY name to an output column before any input column, so one of those
- * is left alone too: in a grouped query or a select!DTO, "amount" may mean an
- * annotation, or a member projected from a relation, rather than _m.amount.
+ * Byte loops only: a quoted name may hold any byte but a quote.
  */
 private string _resolveOrderName(M)(string name, in string[] outputs = null) {
     import std.algorithm.searching: canFind;
     import std.ascii: toLower;
 
-    // Byte loops throughout: a quoted name may hold any byte but a quote, so
-    // nothing here may decode it.
-
-    // Qualified: `t.col` or `"T".col`. The parser guarantees the shape, so a
-    // '.' after the first identifier is the qualifier's.
+    // Qualified: a '.' after the first identifier, which the parser shaped.
     size_t closing = 0;
     if (name[0] == '"') {
         closing = 1;
@@ -708,8 +697,7 @@ private string _resolveOrdering(M, JoinFields...)(
 }
 
 // Resolve a list of Ordering terms into a comma-separated ORDER BY body.
-// Empty fragments are dropped, so the raw "" term orderBy("") stores suppresses
-// ordering.
+// Empty fragments are dropped: the raw "" term from orderBy("") orders nothing.
 private string _resolveOrderTerms(M, JoinFields...)(
     in Ordering[] terms, ref _FilterJoin[] fjoins, ref int idx, in string[] outputs = null)
 {
@@ -1081,27 +1069,24 @@ if (isModel!M && isQueryContext!Ctx) {
     /** Override the ORDER BY clause with one or more terms.
       *
       * Each argument is one of:
-      *  - a `string` of column names — a comma-separated list, each name bare
-      *    or double-quoted, optionally qualified (`_m.col`), optionally
-      *    followed by ASC/DESC and NULLS FIRST/LAST. That is the whole
-      *    grammar: an expression, a function call, a comment or anything
-      *    else is refused with QueryClientError, so a sort column taken from
-      *    a request cannot carry SQL. An expression goes through orderByRaw.
+      *  - a `string` of column names: a comma-separated list, each bare or
+      *    double-quoted, optionally qualified, with optional ASC/DESC and
+      *    NULLS FIRST/LAST. Anything else — an expression, a comment — is
+      *    refused with QueryClientError, so a sort column taken from a request
+      *    cannot carry SQL; an expression goes through orderByRaw.
       *  - an `F` builder — `F!"field"` / `F!"partner.name"` (ascending), or
       *    `.desc`, optionally chained `.nullsFirst`/`.nullsLast`;
       *  - an `Ordering` value.
       *
-      * Field references via `F` are resolved against the model (camelCase →
-      * column, implicit LEFT JOINs for join paths). A bare column name that is
-      * one of this model's columns is qualified as `_m.col`, so a join cannot
-      * make it ambiguous; a name the statement also outputs (a select!DTO
-      * member, an annotation) is left alone, since SQL already resolves it to
-      * that output, and so is any other name, which may belong to a joined
-      * table.
+      * `F` terms resolve against the model (camelCase → column, LEFT JOINs for
+      * join paths). A bare column name of this model is qualified as `_m.col`
+      * so a join cannot make it ambiguous; a name the statement outputs (a
+      * select!DTO member, an annotation) is left to SQL, and so is any other,
+      * which may belong to a joined table.
       *
       * Pass a single `""` to suppress all ordering (overrides @defaultOrder).
-      * For compile-time-validated field ordering see the
-      * `orderBy!("field", "-other")` form below.
+      * For compile-time-validated field ordering see
+      * `orderBy!("field", "-other")` below.
       *
       * ---
       * repo.query().orderBy(F!"createdAt".desc, F!"name")

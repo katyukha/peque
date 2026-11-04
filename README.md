@@ -250,9 +250,8 @@ Choose a configuration depending on how you want to link `libpq`:
 | `libraryDynamic` | Dynamic library — loads `libpq` at runtime via `bindbc-loader` |
 
 Compilers: DMD 2.113 or newer, or LDC 1.41 or newer. DMD 2.111 and 2.112
-return a dangling pointer from functions shaped like `Repository.insert`, so
-`repo.insert(r).id` can read freed stack memory; DUB refuses to build peque with
-them.
+miscompile struct returns such as `repo.insert(r)`, so `.id` on the result can
+read freed memory; DUB refuses to build peque with them.
 
 ## Quick start
 
@@ -1030,7 +1029,7 @@ l.remove(active);
 l.within(active).set(ids);
 ```
 
-The rules, each pinned by a test:
+The rules:
 
 - An id that names no target row, or a row outside `within`, is ignored, not an
   error: an option deleted between rendering a form and submitting it must not
@@ -1042,8 +1041,8 @@ The rules, each pinned by a test:
 - Another parent's links are never touched.
 
 `add`, `remove` and `clear` are one statement each, idempotent, and safe under
-concurrency: two callers racing on one parent converge to the union of what
-they asked. `set` is two statements — unlink what `ids` lacks, then link what it
+concurrency: two callers racing on one parent end with every link both asked
+for, none twice. `set` is two statements — unlink what `ids` lacks, then link what it
 adds — so it is atomic only inside a transaction, and two concurrent `set`s on
 one parent can leave a mix of both lists (never a duplicate or a dangling
 link). A caller who needs more runs it under `IsolationLevel.serializable` and
@@ -1231,18 +1230,15 @@ repo.query().whereRaw("tsv @@ to_tsquery($1)", "acme & corp").all();
 repo.query().orderByRaw("lower(name), id DESC").all();
 ```
 
-**Security:** both fragments are embedded in the query verbatim — never pass
-user-controlled input to them. All runtime values must go through `whereRaw`'s
-variadic args, and a sort column chosen at run time goes through
-`orderBy(string)`, which admits only column names: a comma-separated list, each
-name bare or double-quoted, optionally qualified, with optional `ASC`/`DESC`
-and `NULLS FIRST`/`LAST`. A bare name follows PostgreSQL's lexer, so a
-Cyrillic column needs no quotes and keeps its case. Anything else — an expression, a function call, a
-comment — is refused with `QueryClientError` rather than guessed at. A bare
+**Security:** both fragments are embedded verbatim — never pass user-controlled
+input to them. Runtime values go through `whereRaw`'s variadic args; a sort
+column chosen at run time goes through `orderBy(string)`, which admits column
+names only (bare or double-quoted, optionally qualified, with `ASC`/`DESC` and
+`NULLS FIRST`/`LAST`) and refuses anything else with `QueryClientError`. A bare
 name that is one of the model's columns is qualified as `_m.col`, so a join
 cannot make it ambiguous; a name the statement outputs (an annotation, a
-`select!DTO` member) is left to SQL, which resolves it first. `@defaultOrder`
-strings follow the same grammar, checked at compile time.
+`select!DTO` member) is left to SQL. `@defaultOrder` strings follow the same
+grammar at compile time.
 
 ### EXISTS subqueries
 

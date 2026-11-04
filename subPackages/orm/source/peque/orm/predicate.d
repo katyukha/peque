@@ -216,11 +216,11 @@ package(peque) SerializedPred serializePredicate(ref Predicate pred, int offset 
                 i.params,
             );
         },
-        // EXISTS, not `col IN (sub)`. IN is UNKNOWN for a non-member as soon
-        // as the subquery yields one NULL, so its negation matched no rows at
-        // all, and a NULL col fell out of both p and ~p. EXISTS is two-valued:
-        // p and ~p split the rows exactly, and a NULL is simply not in the set.
-        // `_in(v)` names the subquery's single column, whatever it is called.
+        // EXISTS, not `col IN (sub)`: IN is UNKNOWN for a non-member as soon
+        // as the subquery yields one NULL, so its negation matches no rows and
+        // a NULL col falls out of both p and ~p. EXISTS is two-valued, so p
+        // and ~p split the rows exactly. `_in(v)` names the subquery's single
+        // column, whatever it is called.
         (ref InSubqueryNode n) => SerializedPred(
             "EXISTS (SELECT 1 FROM (" ~ _shiftParams(n.subquerySql, offset) ~
             ") _in(v) WHERE _in.v = " ~ n.colExpr ~ ")",

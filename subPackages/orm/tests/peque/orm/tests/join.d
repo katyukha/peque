@@ -5,6 +5,8 @@
   *  - joinOne! with no matching FK → Nullable.init
   *  - prefetch! for @one2many fills the array field after main query
   *  - prefetch! for @many2many fills the array field via junction table
+  *  - prefetch! orders children by the target's @defaultOrder
+  *  - Nullable!(T[]) is null until prefetched, empty after
   *  - select!DTO projects main + joined columns into a lightweight DTO
   **/
 module peque.orm.tests.join;

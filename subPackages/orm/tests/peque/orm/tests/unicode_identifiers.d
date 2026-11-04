@@ -75,8 +75,8 @@ unittest {
     auto all = міста.query().all();
     assert(all.length == 3 && all[0].name == "Одеса" && all[2].name == "Київ");
 
-    // load!: the joined model's two Cyrillic columns must land in their own
-    // fields, not in whichever alias happened to win.
+    // load!: the joined model's two Cyrillic columns get two distinct aliases,
+    // so each lands in its own field.
     auto loaded = міста.query().load!"країна".orderBy!"name".all();
     assert(loaded[0].країна.get.назва == "Україна" && loaded[0].країна.get.код == "UA");
 

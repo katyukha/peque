@@ -1,8 +1,7 @@
 /** The write side of @many2many: `links!"rel"(id)` and the junction DDL.
   *
-  * Pins, against a real database: every row of the semantics table (add,
-  * remove, clear, set, and `within` bounding all four); the honest diff set
-  * returns; `Nullable!(T[])` telling "never prefetched" from "no rows"; both
+  * Pins, against a real database: add, remove, clear and set, and `within`
+  * bounding all four; the honest diff set returns; `Nullable!(T[])` telling "never prefetched" from "no rows"; both
   * UDA forms, including a self-referential junction model; reserved-word
   * junction names; rollback inside a transaction; a wrong junction column
   * failing as QueryServerError; and what schemaSQL emits for managed, external
@@ -519,11 +518,26 @@ struct MwLooseNode {
     @many2many!(MwNode, MwLooseEdge, "fromId", "toId") MwNode[] next;
 }
 
-// A self-referential junction model with the keys left to inference.
-@model("mw_node")
-struct MwAmbiguousNode {
+// A self-referential junction model with the keys left to inference: both
+// FKs point at the parent, so neither key can be chosen.
+@model("mw_amb_edge")
+@uniqueTogether!("fromId", "toId")
+struct MwAmbEdge {
+    @primaryKey              int id;
+    @many2one!(MwAmbNode)    int fromId;
+    @many2one!(MwAmbNode)    int toId;
+}
+@model("mw_amb_node")
+struct MwAmbNode {
     @primaryKey int id;
-    @many2many!(MwNode, MwEdge) MwNode[] next;
+    @many2many!(MwAmbNode, MwAmbEdge) MwAmbNode[] next;
+}
+
+// Both keys named, but the same field.
+@model("mw_node")
+struct MwSameKeyNode {
+    @primaryKey int id;
+    @many2many!(MwNode, MwEdge, "fromId", "fromId") MwNode[] next;
 }
 
 unittest {
@@ -542,8 +556,10 @@ unittest {
         "two declarations of one junction must agree on its columns");
     static assert(!__traits(compiles, Links!(MwLooseNode, "next", Connection)),
         "a junction model must be unique on the pair");
-    static assert(!__traits(compiles, Links!(MwAmbiguousNode, "next", Connection)),
+    static assert(!__traits(compiles, Links!(MwAmbNode, "next", Connection)),
         "a self-referential junction model cannot infer its keys");
-    static assert(!__traits(compiles, (ref Repository!(MwAmbiguousNode, Connection) r) => r.query().prefetch!"next"),
+    static assert(!__traits(compiles, (ref Repository!(MwAmbNode, Connection) r) => r.query().prefetch!"next"),
         "prefetch resolves the keys the same way");
+    static assert(!__traits(compiles, Links!(MwSameKeyNode, "next", Connection)),
+        "one junction field cannot hold both keys");
 }

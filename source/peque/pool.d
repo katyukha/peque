@@ -3,7 +3,6 @@ module peque.pool;
 private import core.sync.semaphore: CoreSemaphore = Semaphore;
 private import core.sync.mutex: Mutex;
 
-
 private import peque.connection: Connection;
 private import peque.lib.libpq: CONNECTION_OK, PQTRANS_IDLE;
 private import peque.exception: QueryClientError;
@@ -97,15 +96,13 @@ struct ConnectionPool(Sem, Mtx) {
       * A release undoes exactly one thing: a transaction left open is rolled
       * back and, when fun returned normally, reported as QueryClientError.
       * Everything else a borrow does to the session stays on the connection
-      * and reaches the next borrower — SET ROLE and any other SET
-      * (search_path, statement_timeout), advisory locks, temp tables,
-      * PREPAREd statements, cursors. Undo those before returning, or scope
-      * them to a transaction with SET LOCAL inside transaction(), which the
-      * commit or rollback undoes. There is no DISCARD ALL on release: it
-      * would cost a round trip per borrow and reset the session TimeZone the
-      * constructor pinned. LISTEN belongs on a dedicated connection: listen()
-      * refuses a pooled one, which passes to other borrowers and is replaced
-      * when a notification arrives on it while idle.
+      * and reaches the next borrower — SET ROLE and other session settings,
+      * advisory locks, temp tables, PREPAREd statements. Undo those before
+      * returning, or scope them to a transaction with SET LOCAL inside
+      * transaction(), which the commit or rollback undoes. There is no
+      * DISCARD ALL on release: it would cost a round trip per borrow and
+      * reset the session TimeZone the constructor pinned. listen() refuses a
+      * pooled connection; LISTEN on a dedicated one.
       *
       * Params:
       *     fun = callable accepting (ref Connection); may return any type

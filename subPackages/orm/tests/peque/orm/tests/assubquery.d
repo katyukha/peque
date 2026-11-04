@@ -309,8 +309,9 @@ unittest {
 // ---------------------------------------------------------------------------
 
 // SQL's `col IN (sub)` is UNKNOWN for a non-member once the subquery yields a
-// NULL, so `NOT IN` matched nothing at all; and a NULL col fell out of both
-// p and ~p. Membership must stay two-valued: a NULL is simply not in the set.
+// NULL, so `NOT IN` matches nothing, and a NULL col is in neither. peque's
+// membership is two-valued: a NULL is simply not in the set, so p and ~p
+// partition the rows.
 
 @model("sq_nl_owners")
 struct SqNlOwner {

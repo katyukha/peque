@@ -9,8 +9,8 @@
   *  - delete_() / update() keep LEFT JOIN semantics for path predicates
   *    (F!"rel.field".isNull must match rows with NULL FK, exactly as in all())
   *  - delete_() / update() on a QuerySet with load! + path predicate
-  *  - raw order terms naming the model's own column survive a join that
-  *    brings in a table with the same column
+  *  - a bare orderBy(string) / @defaultOrder column of the model is qualified,
+  *    so a join bringing in a table with the same column is not ambiguous
   **/
 module peque.orm.tests.terminal_joins;
 
@@ -250,13 +250,13 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// A raw order term naming the model's own column survives a join
+// A bare orderBy(string) column of the model survives a join
 // ---------------------------------------------------------------------------
 
-// Both tables have `id` and `name`, so emitted bare a raw term on either is
-// "column reference is ambiguous" once the partner join is present — except
-// where it happens to match a SELECT output column, which is why all() alone
-// never showed it.
+// Both tables have `id` and `name`. A bare term is ambiguous once the partner
+// join is present unless it is qualified — except when it matches a SELECT
+// output column, which SQL resolves first; all() outputs every column of the
+// model, so only select!DTO and asSubquery can show the difference.
 
 @autoHydrate
 struct TjNameDTO { string name; }

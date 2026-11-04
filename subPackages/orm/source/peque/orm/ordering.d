@@ -70,20 +70,16 @@ package(peque.orm) struct ParsedOrder {
   * column names, each optionally followed by ASC or DESC and by NULLS FIRST
   * or NULLS LAST.
   *
-  * A name is a bare identifier — PostgreSQL's own lexer class: a letter,
-  * '_' or any byte above 0x7F to start, those or a digit to continue, so a
-  * Cyrillic column needs no quotes — a double-quoted one with no quote
-  * inside, or either qualified by one such prefix (`_m.col`, `"Mixed"`).
-  * Nothing else is understood, and nothing else is passed through: the text
-  * may be a runtime value, so a construct the grammar does not name — a
-  * function call, an operator, a comment, a dollar quote, a semicolon — is
-  * refused rather than guessed at. An expression goes through `orderByRaw`,
-  * which says it is trusted.
+  * A name is a bare identifier in PostgreSQL's own lexer class (a letter, '_'
+  * or any byte above 0x7F to start, those or a digit to continue), a
+  * double-quoted one with no quote inside, or either qualified by one such
+  * prefix. The text may be a request parameter, so anything else — a function
+  * call, an operator, a comment, a dollar quote, a semicolon — is refused
+  * rather than guessed at; an expression goes through `orderByRaw`.
   *
-  * Byte-based on purpose: nothing is decoded, so a malformed byte cannot
-  * throw here. It is emitted as part of a name, and the server rejects the
-  * statement as a whole for its encoding; every SQL metacharacter is ASCII,
-  * so no high byte can end a name early in any encoding.
+  * Byte-based: nothing is decoded, so a malformed byte cannot throw here. It
+  * is emitted inside a name and the server rejects the statement for its
+  * encoding; every SQL metacharacter is ASCII, so no high byte can end a name.
   **/
 package(peque.orm) ParsedOrder _parseOrderSpec(string spec) pure @safe {
     ParsedOrder r;

@@ -65,11 +65,9 @@ string _sqlIdent(string name) pure @safe {
   * stay bare — generated index names and joined-column aliases. Quoting is
   * wrong there (`idx_t_"order"` is not a valid identifier), so quotes and any
   * other stray characters are dropped. Kept: ASCII letters, digits, '_', and
-  * every byte above 0x7F, which PostgreSQL's lexer treats as an identifier
-  * character whatever the encoding — so a Cyrillic column keeps its name in
-  * the index and the alias instead of collapsing to nothing. Case is
-  * preserved so that generated aliases keep matching what the hydration layer
-  * looks up.
+  * every byte above 0x7F, an identifier character to PostgreSQL's lexer in
+  * any encoding, so a Cyrillic column does not collapse to nothing. Case is
+  * preserved so aliases keep matching what hydration looks up.
   **/
 package(peque.orm) string _identSlug(string name) pure @safe {
     string result;

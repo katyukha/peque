@@ -40,6 +40,7 @@ unittest {
     static assert(__traits(compiles, primaryKey.init));
     static assert(__traits(compiles, autoHydrate.init));
     static assert(__traits(compiles, OnDelete.cascade));
+    static assert(__traits(compiles, Junction.external));
     static assert(hasMany2OneUDA!(__traits(getMember, DocOrder, "partnerId")),
         "core must recognise a @many2one field as a column");
     static assert(!hasMany2OneUDA!(__traits(getMember, DocOrder, "title")));

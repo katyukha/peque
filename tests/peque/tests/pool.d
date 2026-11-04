@@ -2,7 +2,9 @@
   *
   * Covers: basic borrow, return value propagation, sequential borrows,
   * exception safety (connection returned even when fun throws), capacity
-  * reporting, and health check (dead connection is replaced).
+  * reporting, health check (dead connection is replaced), contention under OS
+  * threads, the release contract for a transaction left open, and listen()
+  * refusing a pooled connection.
   **/
 module peque.tests.pool;
 
@@ -340,10 +342,9 @@ unittest {
 // LISTEN belongs on a dedicated connection
 // ---------------------------------------------------------------------------
 
-/** A pooled connection passes to other borrowers and is replaced when a
-  * notification arrives on it while idle, so nothing would deliver reliably:
-  * listen() refuses it before anything reaches the server, and the borrow
-  * goes on. A connection the pool replaced is refused the same way. **/
+/** listen() refuses a pooled connection before anything reaches the server,
+  * and the borrow goes on; a connection the pool replaced is refused the same
+  * way. **/
 unittest {
     auto pool = ThreadConnectionPool(1, makeFactory());
     auto other = makeFactory()();
@@ -367,15 +368,13 @@ unittest {
     });
 
     // The factory's own connection, outside the pool, is not.
-    auto dedicated = makeFactory()();
-    dedicated.listen("peque_pool_dedicated");
-    dedicated.unlisten("peque_pool_dedicated");
+    other.listen("peque_pool_dedicated");
+    other.unlisten("peque_pool_dedicated");
     pool.close();
 }
 
 /** A rollback that cannot be sent is still a leak: the borrow returned
-  * normally, its writes are gone, and silence would hide that. The connection
-  * is replaced. **/
+  * normally, its writes are gone, and silence would hide that. **/
 unittest {
     auto pool = ThreadConnectionPool(1, makeFactory());
     auto other = makeFactory()();

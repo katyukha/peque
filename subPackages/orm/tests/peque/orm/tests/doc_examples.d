@@ -278,13 +278,32 @@ struct RelPartner {
 
     @one2many!(RelInvoice, "partnerId") RelInvoice[] invoices;
     @many2many!(Tag, "doc_partner_tag_rel", "partner_id", "tag_id") Tag[] tags;
+    @many2many!(DocGroup, DocPartnerGroup) DocGroup[] groups;
 }
 
-// The README's Nullable!(T[]) declaration: null until prefetched.
+// The README's Nullable!(T[]) declaration, and Junction.external: this side
+// reads a junction another declaration creates.
 @model("doc_res_partner")
 struct RelPartnerNullable {
     @primaryKey int id;
-    @many2many!(Tag, "doc_partner_tag_rel", "partner_id", "tag_id") Nullable!(Tag[]) tags;
+    @many2many!(Tag, "doc_partner_tag_rel", "partner_id", "tag_id", Junction.external)
+    Nullable!(Tag[]) tags;
+}
+
+// The README's junction-model form: keys inferred from the two @many2one fields.
+@model("doc_group")
+struct DocGroup {
+    @primaryKey int    id;
+    @field      string name;
+}
+
+@model("doc_partner_group_rel")
+@uniqueTogether!("partnerId", "groupId")
+@indexTogether!("groupId", "partnerId")
+struct DocPartnerGroup {
+    @primaryKey                               int id;
+    @many2one!(RelPartner, OnDelete.cascade)  int partnerId;
+    @many2one!(DocGroup,   OnDelete.cascade)  int groupId;
 }
 
 @model("doc_account_invoice")
@@ -307,14 +326,18 @@ struct Shipment {
 }
 
 alias RelReg = Registry!(
-    Bind!(Tag,        ModelRepo!Tag),
-    Bind!(RelPartner, ModelRepo!RelPartner),
-    Bind!(RelInvoice, ModelRepo!RelInvoice),
-    Bind!(Shipment,   ModelRepo!Shipment),
+    Bind!(Tag,             ModelRepo!Tag),
+    Bind!(DocGroup,        ModelRepo!DocGroup),
+    Bind!(RelPartner,      ModelRepo!RelPartner),
+    Bind!(DocPartnerGroup, ModelRepo!DocPartnerGroup),
+    Bind!(RelInvoice,      ModelRepo!RelInvoice),
+    Bind!(Shipment,        ModelRepo!Shipment),
 );
 
 unittest {
     auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS doc_partner_group_rel`);
+    c.exec(`DROP TABLE IF EXISTS doc_group`);
     c.exec(`DROP TABLE IF EXISTS doc_partner_tag_rel`);
     c.exec(`DROP TABLE IF EXISTS doc_shipment`);
     c.exec(`DROP TABLE IF EXISTS doc_account_invoice`);
@@ -381,8 +404,22 @@ unittest {
     assert(l.remove(golds) == 1);
     assert(l.clear() == 1);
 
+    // Raw SQL ORDER BY: the escape hatch for an expression.
+    assert(tagRepo.query().orderByRaw("lower(name), id DESC").all()[0].name == "gold");
+
     auto nullable_ = Repository!(RelPartnerNullable, Connection)(&c).query().all();
     assert(nullable_.length == 1 && nullable_[0].tags.isNull, "not prefetched: null");
+
+    // The junction-model form: written and read through the model's own columns.
+    auto groupRepo = Repository!(DocGroup, Connection)(&c);
+    DocGroup staff; staff.name = "staff";
+    auto g = groupRepo.insert(staff);
+    assert(partnerRepo.links!"groups"(saved.id).add([g.id]) == 1);
+    assert(partnerRepo.query().prefetch!"groups".all()[0].groups[0].name == "staff");
+
+    // Affecting the whole table is spelled out.
+    immutable nTags = tagRepo.query().count();
+    assert(tagRepo.query().where(Predicate.all).delete_() == nTags);
 
     // Two FKs to one table, disambiguated by @related("field").
     auto shipRepo = Repository!(Shipment, Connection)(&c);
@@ -393,6 +430,8 @@ unittest {
     auto ships = shipRepo.query().load!"invoiceAddress"().all();
     assert(ships.length == 1 && !ships[0].invoiceAddress.isNull);
 
+    c.exec(`DROP TABLE IF EXISTS doc_partner_group_rel`);
+    c.exec(`DROP TABLE IF EXISTS doc_group`);
     c.exec(`DROP TABLE IF EXISTS doc_partner_tag_rel`);
     c.exec(`DROP TABLE IF EXISTS doc_shipment`);
     c.exec(`DROP TABLE IF EXISTS doc_account_invoice`);

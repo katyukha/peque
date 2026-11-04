@@ -227,10 +227,10 @@ struct many2many(T, string junctionTable, string selfKey = "", string targetKey 
                  Junction junction = Junction.managed) {
     // Defaults exist only so this message, and not "no matching template",
     // reports the missing key: with "" the emitted SQL would be `j.""`.
-    static assert(selfKey.length > 0 && targetKey.length > 0,
+    static assert(junctionTable.length > 0 && selfKey.length > 0 && targetKey.length > 0,
         "@many2many!(" ~ T.stringof ~ ", \"" ~ junctionTable ~ "\", …) needs " ~
-        "both key columns: @many2many!(" ~ T.stringof ~ ", \"" ~ junctionTable ~
-        "\", \"self_id\", \"target_id\").");
+        "the junction table and both key columns: @many2many!(" ~ T.stringof ~
+        ", \"junction\", \"self_id\", \"target_id\").");
     // One column cannot hold both ends: the DDL would declare it twice and a
     // writer against an existing table would link every row to itself.
     static assert(selfKey != targetKey,
@@ -297,15 +297,15 @@ struct pgType {
 
 /** Specify default sort order for findAll() and the base QuerySet.
   *
-  * Applied on a model struct. CRUDMixin.findAll() appends ORDER BY when this
-  * UDA is present and neither the host repository nor an explicit QuerySet
-  * ordering overrides it.
+  * Applied on a model struct. Every query on the model orders by it unless
+  * an explicit orderBy overrides it; prefetch! applies it to the children too.
   *
   * Each argument is normalized to an order term:
-  *  - a raw SQL `string` — you write the real column/SQL; a term that is just
-  *    one of the model's columns (with optional direction and NULLS placement)
-  *    is qualified with the model's table alias, so a join cannot make it
-  *    ambiguous, and anything else is emitted verbatim;
+  *  - a `string` — a comma-separated list of column names, bare or
+  *    double-quoted, optionally qualified, with optional ASC/DESC and NULLS
+  *    FIRST/LAST, checked at compile time. A bare column of this model is
+  *    qualified with its table alias; an expression is refused (order such a
+  *    query with orderByRaw);
   *  - an `F` builder (from `peque.orm`) — a field reference resolved against
   *    the model (camelCase → column, implicit LEFT JOIN for join paths), with
   *    optional `.desc` / `.nullsLast`.
@@ -317,10 +317,7 @@ struct pgType {
   * struct Partner { ... }
   * ---
   *
-  * Several columns with directions. A string is column names only — bare or
-  * double-quoted, optionally qualified, with optional ASC/DESC and NULLS
-  * FIRST/LAST, comma-separated — checked at compile time; an expression is
-  * refused, since the same grammar guards a runtime orderBy(string):
+  * Several columns with directions:
   * ---
   * @defaultOrder!("date DESC", "id DESC")
   * @model("sale_order")
