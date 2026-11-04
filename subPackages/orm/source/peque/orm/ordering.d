@@ -28,7 +28,7 @@
   **/
 module peque.orm.ordering;
 
-private import std.ascii: isAlpha, isAlphaNum, toUpper;
+private import std.ascii: isAlpha, isDigit, toUpper;
 private import std.conv: to;
 
 /// Sort direction for an ORDER BY term.
@@ -70,17 +70,20 @@ package(peque.orm) struct ParsedOrder {
   * column names, each optionally followed by ASC or DESC and by NULLS FIRST
   * or NULLS LAST.
   *
-  * A name is a bare identifier (`[A-Za-z_][A-Za-z0-9_]*`), a double-quoted one
-  * with no quote inside, or either qualified by one such prefix (`_m.col`,
-  * `"Mixed"`). Nothing else is understood, and nothing else is passed
-  * through: the text may be a runtime value, so a construct the grammar does
-  * not name — a function call, an operator, a comment, a dollar quote, a
-  * semicolon — is refused rather than guessed at. An expression goes through
-  * `orderByRaw`, which says it is trusted.
+  * A name is a bare identifier — PostgreSQL's own lexer class: a letter,
+  * '_' or any byte above 0x7F to start, those or a digit to continue, so a
+  * Cyrillic column needs no quotes — a double-quoted one with no quote
+  * inside, or either qualified by one such prefix (`_m.col`, `"Mixed"`).
+  * Nothing else is understood, and nothing else is passed through: the text
+  * may be a runtime value, so a construct the grammar does not name — a
+  * function call, an operator, a comment, a dollar quote, a semicolon — is
+  * refused rather than guessed at. An expression goes through `orderByRaw`,
+  * which says it is trusted.
   *
-  * Byte-based on purpose: a bare identifier is ASCII by the grammar, and a
-  * quoted one is emitted between its quotes untouched, so no byte is ever
-  * decoded and a malformed one cannot throw.
+  * Byte-based on purpose: nothing is decoded, so a malformed byte cannot
+  * throw here. It is emitted as part of a name, and the server rejects the
+  * statement as a whole for its encoding; every SQL metacharacter is ASCII,
+  * so no high byte can end a name early in any encoding.
   **/
 package(peque.orm) ParsedOrder _parseOrderSpec(string spec) pure @safe {
     ParsedOrder r;
@@ -95,9 +98,14 @@ package(peque.orm) ParsedOrder _parseOrderSpec(string spec) pure @safe {
     }
     string here() {
         if (i >= spec.length) return "the end";
-        if (spec[i] < 0x80) return "'" ~ spec[i] ~ "' at position " ~ i.to!string;
-        return "a non-ASCII byte at position " ~ i.to!string;
+        // A high byte is part of a multibyte character: name it as a byte
+        // rather than print a fragment of one.
+        if (spec[i] >= 0x80)
+            return "byte 0x" ~ to!string(cast(ubyte) spec[i], 16) ~ " at position " ~ i.to!string;
+        return "'" ~ spec[i] ~ "' at position " ~ i.to!string;
     }
+    static bool identStart(char c) pure @safe { return isAlpha(c) || c == '_' || c >= 0x80; }
+    static bool identChar(char c)  pure @safe { return identStart(c) || isDigit(c); }
     // One identifier, bare or quoted; `s` is the text as written. The cursor
     // moves only on success, so a failure is reported where it started.
     bool ident(out string s) {
@@ -109,8 +117,8 @@ package(peque.orm) ParsedOrder _parseOrderSpec(string spec) pure @safe {
             if (j >= spec.length || spec[j] != '"' || j == i + 1) return false;
             ++j;
         } else {
-            if (!(isAlpha(spec[j]) || spec[j] == '_')) return false;
-            while (j < spec.length && (isAlphaNum(spec[j]) || spec[j] == '_')) ++j;
+            if (!identStart(spec[j])) return false;
+            while (j < spec.length && identChar(spec[j])) ++j;
         }
         s = spec[i .. j];
         i = j;
@@ -122,7 +130,7 @@ package(peque.orm) ParsedOrder _parseOrderSpec(string spec) pure @safe {
         foreach (k; 0 .. w.length)
             if (toUpper(spec[i + k]) != w[k]) return false;
         immutable end = i + w.length;
-        if (end < spec.length && (isAlphaNum(spec[end]) || spec[end] == '_')) return false;
+        if (end < spec.length && identChar(spec[end])) return false;
         i = end;
         return true;
     }
@@ -191,6 +199,7 @@ unittest {
     assert(refused("$$a$$")                == "expected a column name, found '$' at position 0");
     assert(refused("name DESC garbage")    == "expected ',' or the end, found 'g' at position 10");
     assert(refused("name NULLS")           == "expected FIRST or LAST after NULLS, found the end");
+    assert(refused("name DESC назва")      == "expected ',' or the end, found byte 0xD0 at position 10");
     assert(refused("name,")                == "expected a column name, found the end");
     assert(refused("")                     == "expected a column name, found the end");
     assert(refused(`"a""b"`)               == "expected ',' or the end, found '\"' at position 3",
@@ -199,9 +208,11 @@ unittest {
     assert(refused(`""`)                   == "expected a column name, found '\"' at position 0");
     assert(terms("DESCname") == [Ordering(OrderKind.name, "DESCname")],
         "a keyword glued to a name is just a name");
-    assert(refused("n\xc3\xa4me")          == "expected ',' or the end, found a non-ASCII byte at position 1");
-    assert(refused("name, \xff")           == "expected a column name, found a non-ASCII byte at position 6",
-        "a malformed byte is reported, not decoded");
+    assert(terms("назва DESC, näme") == [
+        Ordering(OrderKind.name, "назва", OrderDir.desc), Ordering(OrderKind.name, "näme")],
+        "a bare non-ASCII name needs no quotes, as in PostgreSQL");
+    assert(terms("name, \xff") == [Ordering(OrderKind.name, "name"), Ordering(OrderKind.name, "\xff")],
+        "a malformed byte is a name byte here, not decoded; the server rejects the encoding");
     assert(refused("\"na\0me\"")          == "expected a column name, found '\"' at position 0",
         "a NUL inside a quoted name cannot be emitted");
     assert(terms(`"näme"`) == [Ordering(OrderKind.name, `"näme"`)],

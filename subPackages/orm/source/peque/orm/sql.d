@@ -64,14 +64,18 @@ string _sqlIdent(string name) pure @safe {
   * Used where a name is concatenated into a larger identifier that must itself
   * stay bare — generated index names and joined-column aliases. Quoting is
   * wrong there (`idx_t_"order"` is not a valid identifier), so quotes and any
-  * other stray characters are dropped. Case is preserved so that generated
-  * aliases keep matching what the hydration layer looks up.
+  * other stray characters are dropped. Kept: ASCII letters, digits, '_', and
+  * every byte above 0x7F, which PostgreSQL's lexer treats as an identifier
+  * character whatever the encoding — so a Cyrillic column keeps its name in
+  * the index and the alias instead of collapsing to nothing. Case is
+  * preserved so that generated aliases keep matching what the hydration layer
+  * looks up.
   **/
 package(peque.orm) string _identSlug(string name) pure @safe {
     string result;
     foreach (char c; name) {
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9') || c == '_')
+            (c >= '0' && c <= '9') || c == '_' || c >= 0x80)
             result ~= c;
     }
     return result;
@@ -98,6 +102,7 @@ unittest {
     assert(_identSlug("order")     == "order");
     assert(_identSlug(`"order"`)   == "order");
     assert(_identSlug("MyCol")     == "MyCol");
+    assert(_identSlug(`"назва"`)   == "назва", "a high byte is an identifier byte to PostgreSQL");
     assert(_identSlug("weird col") == "weirdcol");
 }
 

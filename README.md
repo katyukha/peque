@@ -409,8 +409,11 @@ struct Partner {
 
 A bare `@field` maps the member to its `snake_case` column: `createdAt` is the
 column `created_at`. Runs of capitals stay whole, so `myURL` is `my_url`, not
-`my_u_r_l`. Name the column explicitly whenever the conversion is not what you
-want — that is also how you address a legacy or mixed-case schema:
+`my_u_r_l`. Only ASCII letters take part: a non-ASCII member such as `назва`
+maps to the column `назва` as written, which is also how PostgreSQL treats an
+unquoted non-ASCII name — an identifier character, case kept. Name the column
+explicitly whenever the conversion is not what you want — that is also how you
+address a legacy or mixed-case schema:
 
 ```d
 @model("res_partner")
@@ -1233,7 +1236,8 @@ user-controlled input to them. All runtime values must go through `whereRaw`'s
 variadic args, and a sort column chosen at run time goes through
 `orderBy(string)`, which admits only column names: a comma-separated list, each
 name bare or double-quoted, optionally qualified, with optional `ASC`/`DESC`
-and `NULLS FIRST`/`LAST`. Anything else — an expression, a function call, a
+and `NULLS FIRST`/`LAST`. A bare name follows PostgreSQL's lexer, so a
+Cyrillic column needs no quotes and keeps its case. Anything else — an expression, a function call, a
 comment — is refused with `QueryClientError` rather than guessed at. A bare
 name that is one of the model's columns is qualified as `_m.col`, so a join
 cannot make it ambiguous; a name the statement outputs (an annotation, a

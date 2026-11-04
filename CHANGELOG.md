@@ -92,6 +92,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `Result` was freed. Only a reader whose text parameter is `scope` without
   `return` is lent the buffer; every other reader gets a copy.
 
+- **Non-ASCII column names collapsed in derived identifiers.** The slug behind
+  generated index names and the aliases `load!` reads joined columns through
+  kept ASCII only, so two Cyrillic columns produced one index name (a compile
+  error, by the existing guard) and one alias. Bytes above 0x7F are now kept,
+  as PostgreSQL's lexer treats them: identifier characters in every encoding.
+  `orderBy(string)` and `@defaultOrder` accept a bare non-ASCII name for the
+  same reason, and fold only ASCII letters, as the server does.
+
 - **A failed rollback at pool release was silent.** When the rollback of a
   leaked transaction could not be sent, the release returned early and a
   borrow that returned normally never heard that its writes were gone. It now
