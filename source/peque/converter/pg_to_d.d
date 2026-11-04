@@ -538,14 +538,19 @@ template hasPGTextReader(T) {
 }
 
 // Whether T's reader declares its text `scope`, promising not to keep it. `in`
-// does not count: without -preview=in it means only const.
+// does not count: without -preview=in it means only const. Neither does
+// `return scope`, which says the slice may be returned — kept — and so would
+// dangle once the Result frees the buffer.
 private template _readerBorrowsText(T) {
     static if (__traits(compiles, T.fromPGText(_probeSlice(), PGType.init)))
         enum _readerBorrowsText = () {
+            bool scoped, returned;
             foreach (stc; __traits(getParameterStorageClasses,
-                                   T.fromPGText(_probeSlice(), PGType.init), 0))
-                if (stc == "scope") return true;
-            return false;
+                                   T.fromPGText(_probeSlice(), PGType.init), 0)) {
+                if (stc == "scope")  scoped   = true;
+                if (stc == "return") returned = true;
+            }
+            return scoped && !returned;
         }();
     else
         enum _readerBorrowsText = false;
@@ -619,15 +624,21 @@ unittest {
         const(char)[] s;
         static Unpromised fromPGText(const(char)[] t, PGType oid) { return Unpromised(t); }
     }
+    static struct Kept {
+        const(char)[] s;
+        static Kept fromPGText(return scope const(char)[] t, PGType oid) { return Kept(t); }
+    }
     char[] buf = "original".dup;
     immutable len = cast(int) buf.length;
     auto lent       = convertTextTypeToD!Lent(buf.ptr, len, PGType.TEXT);
     auto owned      = convertTextTypeToD!Owned(buf.ptr, len, PGType.TEXT);
     auto unpromised = convertTextTypeToD!Unpromised(buf.ptr, len, PGType.TEXT);
+    auto kept       = convertTextTypeToD!Kept(buf.ptr, len, PGType.TEXT);
     buf[] = 'x';
     assert(lent.at == cast(size_t) buf.ptr, "a scope reader must not pay for a copy");
     assert(owned.s == "original");
     assert(unpromised.s == "original", "a reader that made no promise was lent the buffer");
+    assert(kept.s == "original", "`return scope` says the slice may be kept, so it must be a copy");
 }
 
 

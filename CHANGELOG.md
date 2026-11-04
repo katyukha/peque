@@ -67,6 +67,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A `return scope` custom reader was lent libpq's result buffer.** `return
+  scope` says the slice may be returned, that is kept, so it dangled once the
+  `Result` was freed. Only a reader whose text parameter is `scope` without
+  `return` is lent the buffer; every other reader gets a copy.
+
+- **A failed rollback at pool release was silent.** When the rollback of a
+  leaked transaction could not be sent, the release returned early and a
+  borrow that returned normally never heard that its writes were gone. It now
+  replaces the connection and is reported like the leak itself.
+
 - **`~F!(M, "f").inSubquery(sub)` returned no rows when the subquery yielded a
   NULL** (breaking — NULL rows now land in the complement). peque emitted SQL's
   `NOT IN`, which is never true once the set contains a NULL, so "owners with no
@@ -92,14 +102,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   failed inside peque with "not callable"; it now gets the error naming the
   expected signatures.
 
-- **A pool borrow could leave its connection subscribed to a channel** (breaking
-  — it now throws `QueryClientError`). The subscription did not deliver: the
-  connection passed to other borrowers, and the pool replaced it as soon as a
-  notification arrived while it sat idle, silently ending the subscription.
-  Channels subscribed with `listen()` are now unsubscribed before the slot is
-  released, with the same contract as a leaked transaction: reported when the
-  borrow returned normally, quiet when it threw. A raw `exec("LISTEN …")` is not
-  tracked.
+- **`listen()` refuses a pooled connection** (breaking — it now throws
+  `QueryClientError` before anything reaches the server). The subscription
+  never delivered reliably: the connection passed to other borrowers, and the
+  pool replaced it as soon as a notification arrived while it sat idle,
+  silently ending the subscription. LISTEN on a dedicated `Connection` outside
+  the pool, as every other driver asks. A raw `exec("LISTEN …")` is not caught;
+  the pool's pre-use check replaces such a connection at the next notification.
 
 ## [0.3.2] - 2026-10-29
 

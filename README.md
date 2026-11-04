@@ -1545,10 +1545,10 @@ makes it a pure non-blocking check.
 Caveats worth knowing:
 
 - **Delivery happens only between transactions** — keep the listening
-  connection out of transactions and out of pools. A pool borrow that returns
-  its connection still subscribed through `listen()` is unsubscribed by the
-  pool and reported as `QueryClientError`, the same way as a borrow that leaves
-  a transaction open.
+  connection out of transactions and out of pools. `listen()` on a pooled
+  connection throws `QueryClientError`: the connection would pass to other
+  borrowers, and the pool replaces it when a notification arrives on it while
+  idle, so nothing would deliver reliably.
 - **Subscriptions do not survive reconnect.** On a dead connection
   (`conn.status() != CONNECTION_OK`), build a fresh `Connection` and re-issue
   `listen()` for every channel (peque deliberately has no `PQreset` wrapper).

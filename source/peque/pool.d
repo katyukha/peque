@@ -3,8 +3,6 @@ module peque.pool;
 private import core.sync.semaphore: CoreSemaphore = Semaphore;
 private import core.sync.mutex: Mutex;
 
-private import std.algorithm.sorting: sort;
-private import std.format: format;
 
 private import peque.connection: Connection;
 private import peque.lib.libpq: CONNECTION_OK, PQTRANS_IDLE;
@@ -75,7 +73,7 @@ struct ConnectionPool(Sem, Mtx) {
         _conns.length = capacity;
         _free.length  = capacity;
         foreach (i; 0 .. capacity) {
-            _conns[i] = factory();
+            _conns[i] = _make();
             _free[i]  = true;
         }
     }
@@ -97,11 +95,10 @@ struct ConnectionPool(Sem, Mtx) {
       * will retry, so the pool never deadlocks.
       *
       * A borrow must hand the connection back as it found it. An open
-      * transaction is rolled back and channels subscribed with listen() are
-      * unsubscribed; when fun returned normally, either is then reported as
-      * QueryClientError. LISTEN belongs on a dedicated connection: a pooled
-      * one passes to other borrowers and is replaced when a notification
-      * arrives on it while idle.
+      * transaction is rolled back and, when fun returned normally, reported as
+      * QueryClientError. LISTEN belongs on a dedicated connection: listen()
+      * refuses a pooled one, which passes to other borrowers and is replaced
+      * when a notification arrives on it while idle.
       *
       * Params:
       *     fun = callable accepting (ref Connection); may return any type
@@ -167,14 +164,21 @@ struct ConnectionPool(Sem, Mtx) {
 
     private void _healthCheck(size_t idx) {
         if (_conns[idx].status != CONNECTION_OK || _hasUnreadInput(idx)) {
-            _conns[idx] = _factory();
+            _conns[idx] = _make();
             return;
         }
         // A slot should never arrive dirty — _reclaimSlot cleans it before
         // release — but reset quietly rather than hand on someone else's
         // transaction. No caller to blame at this point.
         if (_hasOpenTransaction(idx) && !_rollbackSafe(idx))
-            _conns[idx] = _factory();
+            _conns[idx] = _make();
+    }
+
+    /// A fresh connection from the factory, marked as the pool's own.
+    private Connection _make() {
+        auto c = _factory();
+        c.markPooled();
+        return c;
     }
 
     /** Whether the server sent anything while the connection sat idle.
@@ -183,7 +187,7 @@ struct ConnectionPool(Sem, Mtx) {
       * server terminated still reports CONNECTION_OK while its FATAL sits
       * unread. An idle connection has nothing to read unless the server spoke
       * unprompted, which is nearly always its last word; the benign case, a
-      * NOTIFY for a raw exec("LISTEN …") that listen()'s tracking cannot see,
+      * NOTIFY for a raw exec("LISTEN …") that listen()'s refusal cannot see,
       * costs a reconnect.
       * Zero-timeout poll: never waits.
       **/
@@ -198,40 +202,31 @@ struct ConnectionPool(Sem, Mtx) {
         }
     }
 
-    /** Undo the session state a borrow left behind, and do not hide the leak.
+    /** Roll back a transaction the borrow left open, and do not hide it.
       *
-      * The rollback DISCARDS the borrow's writes, and the unsubscribe ends
-      * delivery its listener is waiting for, so reporting either matters:
-      * silence would lose data or notifications with no signal. When fun
-      * threw, both were being abandoned anyway — stay quiet so the caller's
-      * exception propagates unchained. Clearing connOk on a failed cleanup
-      * lets the outer guard replace a connection that cannot be cleaned.
+      * The rollback DISCARDS the borrow's writes, so silence would lose data
+      * with no signal — and a rollback that could not even be sent is the same
+      * loss, so it is reported too, with connOk cleared so the outer guard
+      * replaces the connection. When fun threw, the transaction was being
+      * abandoned anyway — stay quiet so the caller's exception propagates
+      * unchained.
       **/
     private void _reclaimSlot(size_t idx, ref bool connOk) {
         immutable borrowSucceeded = connOk;
-        string leaks;
-        if (_hasOpenTransaction(idx)) {
-            if (!_rollbackSafe(idx)) { connOk = false; return; }
-            leaks ~= "A pooled connection was returned with a transaction " ~
-                "still open, so the pool rolled it back — every write it made " ~
-                "is gone. Something in the borrow ran BEGIN without a matching " ~
-                "COMMIT or ROLLBACK; use conn.transaction(), which does both " ~
-                "for you.";
-        }
-        // Only after the rollback: inside a transaction block, PostgreSQL
-        // applies UNLISTEN at commit, so the rollback would undo it.
-        auto channels = _listeningChannels(idx);
-        if (channels.length) {
-            if (!_unlistenAllSafe(idx)) { connOk = false; return; }
-            leaks ~= (leaks.length ? " " : "") ~ format!(
-                "A pooled connection was returned still LISTENing on %(%s, %), " ~
-                "so the pool unsubscribed it. A pooled connection passes to " ~
-                "other borrowers and is replaced when a notification arrives " ~
-                "on it while idle, so nothing would deliver reliably; LISTEN " ~
-                "on a dedicated Connection outside the pool.")(channels.sort);
-        }
-        if (borrowSucceeded && leaks.length)
-            throw new QueryClientError(leaks);
+        if (!_hasOpenTransaction(idx)) return;
+
+        immutable rolledBack = _rollbackSafe(idx);
+        if (!rolledBack) connOk = false;
+        if (borrowSucceeded)
+            throw new QueryClientError(
+                "A pooled connection was returned with a transaction still " ~
+                (rolledBack
+                    ? "open, so the pool rolled it back"
+                    : "open, and the pool could not roll it back, so the " ~
+                      "connection is being replaced") ~
+                " — every write it made is gone. Something in the borrow ran " ~
+                "BEGIN without a matching COMMIT or ROLLBACK; use " ~
+                "conn.transaction(), which does both for you.");
     }
 
     private bool _hasOpenTransaction(size_t idx) nothrow {
@@ -245,30 +240,12 @@ struct ConnectionPool(Sem, Mtx) {
         catch (Exception) { return false; }
     }
 
-    private string[] _listeningChannels(size_t idx) nothrow {
-        try { return _conns[idx].listeningChannels; }
-        catch (Exception) { return null; }
-    }
-
-    /** False when the connection could not be unsubscribed.
-      *
-      * Also discards notifications that arrived before UNLISTEN took effect,
-      * so the next borrower is not handed any for channels it never chose.
-      **/
-    private bool _unlistenAllSafe(size_t idx) nothrow {
-        try {
-            _conns[idx].unlistenAll();
-            _conns[idx].getNotifications();
-            return true;
-        } catch (Exception) { return false; }
-    }
-
     // D forbids catch inside scope(exit), so this nothrow wrapper replaces
     // a broken connection and swallows factory errors so the slot is always
     // released.  If the factory fails, the broken connection (CONNECTION_BAD)
     // stays in the slot; _healthCheck on the next borrow will retry.
     private void _replaceBrokenSafe(size_t idx) nothrow {
-        try { _conns[idx] = _factory(); } catch (Exception) {}
+        try { _conns[idx] = _make(); } catch (Exception) {}
     }
 }
 

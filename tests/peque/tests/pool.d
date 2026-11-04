@@ -337,81 +337,64 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// A leaked LISTEN never rides into the next borrower
+// LISTEN belongs on a dedicated connection
 // ---------------------------------------------------------------------------
 
-private long serverChannels(ref Connection c) {
-    return c.exec(`SELECT count(*) FROM pg_listening_channels()`).getValue!long(0, 0);
-}
-
-/** A borrow that returns still subscribed is unsubscribed and reported, naming
-  * only the channels it left behind. **/
+/** A pooled connection passes to other borrowers and is replaced when a
+  * notification arrives on it while idle, so nothing would deliver reliably:
+  * listen() refuses it before anything reaches the server, and the borrow
+  * goes on. A connection the pool replaced is refused the same way. **/
 unittest {
     auto pool = ThreadConnectionPool(1, makeFactory());
+    auto other = makeFactory()();
+
+    static void refused(ref Connection c) {
+        auto ex = collectException!QueryClientError(c.listen("peque_pool_refused"));
+        assert(ex !is null, "listen() on a pooled connection must be refused");
+        assert(ex.msg.canFind("dedicated"), ex.msg);
+        assert(c.exec(`SELECT count(*) FROM pg_listening_channels()`).getValue!long(0, 0) == 0);
+        assert(c.exec(`SELECT 7`).getValue!int(0, 0) == 7, "the connection is still usable");
+    }
+
+    immutable pid = pool.borrow((ref Connection c) {
+        refused(c);
+        return c.exec("SELECT pg_backend_pid()")[0][0].get!int;
+    });
+    assert(other.execParams("SELECT pg_terminate_backend($1, 5000)", pid)[0][0].get!bool);
+    pool.borrow((ref Connection c) {
+        assert(c.exec("SELECT pg_backend_pid()")[0][0].get!int != pid, "replaced");
+        refused(c);
+    });
+
+    // The factory's own connection, outside the pool, is not.
+    auto dedicated = makeFactory()();
+    dedicated.listen("peque_pool_dedicated");
+    dedicated.unlisten("peque_pool_dedicated");
+    pool.close();
+}
+
+/** A rollback that cannot be sent is still a leak: the borrow returned
+  * normally, its writes are gone, and silence would hide that. The connection
+  * is replaced. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+    auto other = makeFactory()();
 
     auto ex = collectException!QueryClientError(
         pool.borrow((ref Connection c) {
-            c.listen("peque_pool_kept");
-            c.listen("peque_pool_dropped");
-            c.unlisten("peque_pool_dropped");
-        }));
-    assert(ex !is null, "a leaked subscription must be reported, not swallowed");
-    assert( ex.msg.canFind(`"peque_pool_kept"`), ex.msg);
-    assert(!ex.msg.canFind("peque_pool_dropped"), ex.msg);
-
-    // Returns normally: the pool also cleared what listen() recorded.
-    pool.borrow((ref Connection c) {
-        assert(serverChannels(c) == 0, "the next borrower must not inherit a subscription");
-    });
-    pool.close();
-}
-
-/// When the borrow itself threw, unsubscribe quietly.
-unittest {
-    auto pool = ThreadConnectionPool(1, makeFactory());
-
-    auto ex = collectException!Exception(
-        pool.borrow((ref Connection c) {
-            c.listen("peque_pool_throw");
-            throw new Exception("the caller's own failure");
-        }));
-    assert(ex !is null);
-    assert(ex.msg == "the caller's own failure", ex.msg);
-    assert(ex.next is null,
-        "the pool must stay quiet when the borrow itself threw; got chained: " ~
-        (ex.next is null ? "" : ex.next.msg));
-
-    pool.borrow((ref Connection c) { assert(serverChannels(c) == 0); });
-    pool.close();
-}
-
-/// A borrow that unsubscribes before returning is not a leak.
-unittest {
-    auto pool = ThreadConnectionPool(1, makeFactory());
-    pool.borrow((ref Connection c) {
-        c.listen("peque_pool_tidy");
-        c.unlisten("peque_pool_tidy");
-    });
-    pool.close();
-}
-
-/** Both leaks at once: the rollback must come first, since PostgreSQL applies an
-  * UNLISTEN sent inside a transaction block only at commit. **/
-unittest {
-    auto pool = ThreadConnectionPool(1, makeFactory());
-
-    auto ex = collectException!QueryClientError(
-        pool.borrow((ref Connection c) {
-            c.listen("peque_pool_both");
             c.exec(`BEGIN`);
+            immutable pid = c.exec("SELECT pg_backend_pid()")[0][0].get!int;
+            // The backend is gone, but libpq has not read the socket yet, so
+            // the cached state still says an open transaction on a live
+            // connection, and the ROLLBACK the pool sends is what fails.
+            assert(other.execParams("SELECT pg_terminate_backend($1, 5000)", pid)[0][0].get!bool);
         }));
-    assert(ex !is null);
-    assert(ex.msg.canFind("rolled it back"), ex.msg);
-    assert(ex.msg.canFind(`"peque_pool_both"`), ex.msg);
+    assert(ex !is null, "a rollback that could not be sent must be reported, not swallowed");
+    assert(ex.msg.canFind("could not roll it back"), ex.msg);
 
     pool.borrow((ref Connection c) {
         assert(c.transactionStatus == PQTRANS_IDLE);
-        assert(serverChannels(c) == 0, "an UNLISTEN sent inside the open transaction was rolled back");
+        assert(c.exec(`SELECT 7`).getValue!int(0, 0) == 7);
     });
     pool.close();
 }
