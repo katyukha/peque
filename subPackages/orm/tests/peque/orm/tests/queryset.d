@@ -15,10 +15,12 @@
   **/
 module peque.orm.tests.queryset;
 
+private import std.algorithm.searching: canFind;
 private import std.process: environment;
 private import std.typecons: Nullable;
 
 private import peque.connection: Connection;
+private import peque.exception: QueryClientError;
 private import peque.model: model, field, primaryKey, defaultOrder, many2one, related;
 private import peque.orm;
 
@@ -413,16 +415,32 @@ unittest {
     assert(multi[$-1].name == "a");
 }
 
-// Raw string is emitted verbatim — the escape hatch for SQL expressions.
+// orderBy(string) is column names only, so a sort column taken from a
+// request cannot carry SQL; an expression needs orderByRaw, which says it is
+// trusted.
 unittest {
+    import std.exception: collectException;
     auto c = makeConn(); seedOrdered(c);
     auto repo = Repository!(Ordered, Connection)(&c);
 
     auto rows = repo.query().orderBy("sort_key DESC").all();
     assert(rows[0].sortKey == 30);
+    // A sort column arrives as whatever string type the handler holds.
+    const string fromConfig = "sort_key DESC";
+    char[] fromRequest = "sort_key DESC".dup;
+    assert(repo.query().orderBy(fromConfig).all()[0].sortKey == 30);
+    assert(repo.query().orderBy(fromRequest).all()[0].sortKey == 30);
 
-    auto byExpr = repo.query().orderBy("lower(name) ASC").all();
+    auto byExpr = repo.query().orderByRaw("lower(name) ASC").all();
     assert(byExpr[0].name == "a");
+
+    foreach (hostile; ["lower(name) ASC", "sort_key; DROP TABLE qs_ordered", "sort_key -- x",
+                       "(SELECT 1)", "sort_key DESC, random()"]) {
+        auto ex = collectException!QueryClientError(repo.query().orderBy(hostile));
+        assert(ex !is null, hostile ~ " was accepted");
+        assert(ex.msg.canFind("orderByRaw"), ex.msg);
+    }
+    assert(c.exec(`SELECT count(*) FROM qs_ordered`).getValue!long(0, 0) == 3);
 
     // A single "" suppresses ordering (overrides @defaultOrder).
     assert(repo.query().orderBy("").all().length == 3);

@@ -38,6 +38,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   declares `toolchainRequirements dmd=">=2.113.0"`, so DUB refuses those
   compilers instead of building wrong code.
 
+- **`orderBy(string)` admits column names only; raw SQL moved to
+  `orderByRaw`** (breaking, `peque:orm`). The string form used to be raw SQL,
+  so a sort column taken from a request was an injection — and it was the
+  README's everyday example, with no warning. It now accepts one grammar: a
+  comma-separated list of column names, bare or double-quoted, optionally
+  qualified, each with optional `ASC`/`DESC` and `NULLS FIRST`/`LAST`, and
+  throws `QueryClientError` for anything else, naming `orderByRaw`, which
+  embeds its text verbatim like `whereRaw`. A bare name that is one of the
+  model's columns is still qualified as `_m.col`, and a SELECT output name is
+  still left to SQL. `@defaultOrder` strings follow the same grammar at
+  compile time. Migration: `orderBy("lower(name)")` becomes
+  `orderByRaw("lower(name)")`; plain `orderBy("name DESC")` is unchanged.
+
+- **The repository-level `enum string defaultOrder` override is removed**
+  (breaking, `peque:orm`). It applied to `findAll()` only, so one repository
+  had two default orders depending on the method called, and it could not say
+  what `@defaultOrder` can with `F!`. `findAll()` is now `query().all()`. A
+  per-repository default, if one is ever wanted, belongs where every query
+  through the repository sees it.
+
 - **`prefetch!` orders each parent's children by the target's `@defaultOrder`**,
   as the target's own `all()` would; a target without one keeps arriving in
   server order. Previously no ORDER BY was emitted at all.
@@ -92,8 +112,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `asSubquery`. A term that is just one of the model's columns, optionally with
   ASC/DESC and NULLS placement, alone or in a comma list, is now qualified with
   the model's table alias. A name the statement also outputs (an annotation, a
-  `select!DTO` member) keeps meaning that output, as SQL defines; anything else
-  is still emitted as written.
+  `select!DTO` member) keeps meaning that output, as SQL defines; a qualified
+  name, or a joined table's, is emitted as written.
 
 - **`whereIn!"f"([])` and `.contains([])` did not compile.** The literal `[]` is
   a `void[]`; it now matches no rows, as an empty typed slice already did.

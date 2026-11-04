@@ -203,25 +203,11 @@ if (isModel!M && isQueryContext!Ctx) {
     private enum _crudUpsertByPkSQL =
         _upsertSQL!true(_crudPk, _buildExcludedSetClause!M());
 
-    /** Return all rows as M[], with optional ORDER BY.
-      *
-      * Order of precedence (first match wins):
-      *  1. Host repository defines `enum string defaultOrder = "col ASC"`.
-      *  2. Model M carries `@defaultOrder!("col")` UDA.
-      *  3. Neither — no ORDER BY, undefined DB order.
+    /** Return all rows as M[]: `query().all()`, so the model's @defaultOrder
+      * applies, and without one the order is whatever the server returns.
       **/
     M[] findAll() {
-        // Delegate to the QuerySet so ordering goes through one shared resolver
-        // (raw strings, F! field terms, and join paths all behave identically
-        // here and in query()). Precedence:
-        //  1. Per-repo override: host struct has `enum string defaultOrder`.
-        //  2. Model-level @defaultOrder UDA (applied by QuerySet automatically).
-        //  3. Neither — no ORDER BY, undefined DB order.
-        static if (__traits(hasMember, typeof(this), "defaultOrder") &&
-                   is(typeof(typeof(this).defaultOrder) == string))
-            return query().orderBy(typeof(this).defaultOrder).all();
-        else
-            return query().all();
+        return query().all();
     }
 
     /** Return true if a row with the given primary-key value exists.

@@ -834,15 +834,15 @@ struct PathBuilder(string path) {
     @property Ordering desc() const { return Ordering(OrderKind.path, path).desc; }
 }
 
-/** Normalize an order spec to an `Ordering`.
+/** Normalize a typed order spec to an `Ordering`.
   *
-  * Accepts a raw SQL `string` (→ verbatim term), an `F` builder
-  * (`FieldBuilder`/`PathBuilder`, → ascending field term), or an existing
-  * `Ordering` (returned unchanged).  Used by `QuerySet.orderBy` and the
-  * `@defaultOrder` reader.
+  * Accepts an `F` builder (`FieldBuilder`/`PathBuilder`, → ascending field
+  * term) or an existing `Ordering` (returned unchanged). A `string` is not
+  * one: `QuerySet.orderBy` and the `@defaultOrder` reader parse it with
+  * `_parseOrderSpec`, and `orderByRaw` is the only way to a raw term.
   **/
-package(peque.orm) Ordering toOrdering(T)(T spec) {
-    static if (is(T == Ordering))    return spec;
-    else static if (is(T == string)) return Ordering(OrderKind.raw, spec);
-    else                             return spec.asc;   // FieldBuilder / PathBuilder
+package(peque.orm) Ordering toOrdering(T)(T spec)
+if (!is(T : const(char)[])) {
+    static if (is(T == Ordering)) return spec;
+    else                          return spec.asc;   // FieldBuilder / PathBuilder
 }

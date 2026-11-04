@@ -94,9 +94,16 @@ struct ConnectionPool(Sem, Mtx) {
       * connection is left in the slot and the next borrower's pre-use check
       * will retry, so the pool never deadlocks.
       *
-      * A borrow must hand the connection back as it found it. An open
-      * transaction is rolled back and, when fun returned normally, reported as
-      * QueryClientError. LISTEN belongs on a dedicated connection: listen()
+      * A release undoes exactly one thing: a transaction left open is rolled
+      * back and, when fun returned normally, reported as QueryClientError.
+      * Everything else a borrow does to the session stays on the connection
+      * and reaches the next borrower — SET ROLE and any other SET
+      * (search_path, statement_timeout), advisory locks, temp tables,
+      * PREPAREd statements, cursors. Undo those before returning, or scope
+      * them to a transaction with SET LOCAL inside transaction(), which the
+      * commit or rollback undoes. There is no DISCARD ALL on release: it
+      * would cost a round trip per borrow and reset the session TimeZone the
+      * constructor pinned. LISTEN belongs on a dedicated connection: listen()
       * refuses a pooled one, which passes to other borrowers and is replaced
       * when a notification arrives on it while idle.
       *

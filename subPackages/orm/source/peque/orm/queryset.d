@@ -17,7 +17,8 @@
   *  - whereIn!"field"(vals)   — type-safe IN clause
   *  - where(Predicate)        — composable predicate (F expressions, OR/AND/NOT)
   *  - whereRaw(sql, args...)  — raw SQL escape hatch (local $1/$2 renumbered)
-  *  - orderBy(clause)         — set ORDER BY
+  *  - orderBy(terms...)       — set ORDER BY (column names, F! terms)
+  *  - orderByRaw(sql)         — raw SQL ORDER BY (trusted)
   *  - limit(n)                — set LIMIT
   *  - offset(n)               — set OFFSET
   *  - set!(fieldName)(val)    — accumulate a SET assignment (for update())
@@ -62,7 +63,8 @@ private import peque.orm.sql;
 private import peque.orm.predicate;
 private import peque.orm.field: FieldBuilder, PathBuilder, AggBuilder, isAggBuilder, F, toOrdering;
 private import peque.orm.field: SetExpr, _isFieldBuilderType;
-private import peque.orm.ordering: Ordering, OrderKind, OrderDir, OrderNulls;
+private import peque.orm.ordering: Ordering, OrderKind, OrderDir, OrderNulls,
+    ParsedOrder, _parseOrderSpec;
 private import peque.orm.predicate: PathNode, LiteralNode, InSubqueryNode;
 private import peque.orm.subquery: SubQuery;
 private import std.sumtype: match;
@@ -72,17 +74,33 @@ private import std.sumtype: match;
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+// A @defaultOrder string, parsed with the same grammar as orderBy(string) —
+// at compile time, so a typo or an expression is a build error naming it.
+private template _defaultOrderString(M, string spec) {
+    private enum ParsedOrder _p = _parseOrderSpec(spec);
+    static assert(_p.ok,
+        "@defaultOrder!(\"" ~ spec ~ "\") on " ~ M.stringof ~ ": " ~ _p.error ~
+        ". A string here is a comma-separated list of column names, each with " ~
+        "optional ASC/DESC and NULLS FIRST/LAST; for a field reference use F!, " ~
+        "and order a query by an expression with orderByRaw().");
+    enum Ordering[] _defaultOrderString = _p.terms;
+}
+
 // Extract the default ORDER BY terms from the @defaultOrder UDA on M, or [].
-// Each UDA argument is normalized via toOrdering: a string becomes a raw term,
-// an F builder / Ordering becomes a managed field term.
+// A string argument is parsed into name terms, an F builder / Ordering becomes
+// a managed field term.
 private template _modelDefaultOrder(M) {
     static if (hasUDA!(M, defaultOrder)) {
         private static Ordering[] _compute() {
             Ordering[] terms;
             static foreach (uda; __traits(getAttributes, M)) {{
                 static if (is(uda) && is(uda == defaultOrder!fields, fields...)) {
-                    static foreach (f; fields)
-                        terms ~= toOrdering(f);
+                    static foreach (f; fields) {
+                        static if (is(typeof(f) == string))
+                            terms ~= _defaultOrderString!(M, f);
+                        else
+                            terms ~= toOrdering(f);
+                    }
                 }
             }}
             return terms;
@@ -91,6 +109,33 @@ private template _modelDefaultOrder(M) {
     } else {
         enum Ordering[] _modelDefaultOrder = [];
     }
+}
+
+unittest {
+    @model("dfo") @defaultOrder!("name DESC", "id") static struct Fine {
+        @primaryKey int id;
+        @field string name;
+    }
+    static assert(_modelDefaultOrder!Fine == [
+        Ordering(OrderKind.name, "name", OrderDir.desc), Ordering(OrderKind.name, "id")]);
+    @model("dfo") @defaultOrder!("lower(name)") static struct Expr {
+        @primaryKey int id;
+        @field string name;
+    }
+    static assert(!__traits(compiles, _modelDefaultOrder!Expr),
+        "an expression in @defaultOrder is refused at compile time");
+}
+
+// orderBy(string) at run time: the same grammar, refused with
+// QueryClientError — the text may be a request parameter.
+private Ordering[] _orderTermsOf(string spec) {
+    if (spec.length == 0) return [Ordering(OrderKind.raw, "")];   // suppresses ordering
+    auto p = _parseOrderSpec(spec);
+    enforce!QueryClientError(p.ok,
+        "orderBy(\"" ~ spec ~ "\"): " ~ p.error ~ ". orderBy(string) takes a " ~
+        "comma-separated list of column names, each with optional ASC/DESC and " ~
+        "NULLS FIRST/LAST; for an expression use orderByRaw().");
+    return p.terms;
 }
 
 // Extract the inner (non-Nullable) type from a @related field on M named jf.
@@ -579,72 +624,50 @@ private template _dtoOutputNames(DTO) {
     enum string[] _dtoOutputNames = _collect();
 }
 
-/* Qualify a raw ORDER BY term that names one of M's own columns as _m.<name>.
+/* Resolve a parsed ORDER BY name (OrderKind.name) to the column PostgreSQL
+ * is to see.
  *
- * Emitted bare, "name" or "date DESC" becomes "column reference is ambiguous"
- * as soon as a join brings in a table with the same column — unless it
- * happens to match a SELECT output column, which is why all() never showed it
- * while select!DTO and asSubquery failed. Only the simple shape is touched:
- * one identifier, optionally followed by ASC/DESC and NULLS FIRST/LAST, or a
- * comma list of those. Anything else stays verbatim, and so does a bare name M
- * has no column for, which may legitimately belong to a joined table.
+ * Emitted bare, "name" becomes "column reference is ambiguous" as soon as a
+ * join brings in a table with the same column — unless it happens to match a
+ * SELECT output column, so a query whose SELECT list is the model's own
+ * columns never shows it while select!DTO and asSubquery do. A bare name that
+ * is one of M's columns is therefore qualified as _m.<name>. A qualified name
+ * is emitted as written, and so is a bare name M has no column for, which may
+ * legitimately belong to a joined table.
  *
  * `outputs` are the statement's SELECT output names. SQL resolves a bare
  * ORDER BY name to an output column before any input column, so one of those
  * is left alone too: in a grouped query or a select!DTO, "amount" may mean an
  * annotation, or a member projected from a relation, rather than _m.amount.
  */
-private string _qualifyRawOrder(M)(string expr, in string[] outputs = null) {
-    import std.algorithm.searching: canFind, all;
-    import std.algorithm.iteration: map;
-    import std.array: array, join, split;
-    import std.string: strip;
+private string _resolveOrderName(M)(string name, in string[] outputs = null) {
+    import std.algorithm.searching: canFind;
+    import std.ascii: toLower;
 
-    // Split on commas outside double quotes. A parenthesis or string literal
-    // can put a comma inside one term, so either leaves the whole thing alone.
-    string[] terms;
-    bool inQuotes;
-    size_t start;
-    foreach (k, ch; expr) {
-        if (ch == '"') inQuotes = !inQuotes;
-        else if (inQuotes) continue;
-        else if (ch == '(' || ch == '\'') return expr;
-        else if (ch == ',') { terms ~= expr[start .. k]; start = k + 1; }
-    }
-    if (terms.length) {
-        terms ~= expr[start .. $];
-        return terms.map!(t => _qualifyRawOrder!M(t.strip, outputs)).join(", ");
-    }
+    // Byte loops throughout: a quoted name may hold any byte but a quote, so
+    // nothing here may decode it.
 
-    auto words = expr.split;
-    if (!words.length) return expr;
-
-    size_t i = 1;
-    bool word(string w) {
-        import std.uni: icmp;
-        if (i < words.length && icmp(words[i], w) == 0) { ++i; return true; }
-        return false;
+    // Qualified: `t.col` or `"T".col`. The parser guarantees the shape, so a
+    // '.' after the first identifier is the qualifier's.
+    size_t closing = 0;
+    if (name[0] == '"') {
+        closing = 1;
+        while (name[closing] != '"') ++closing;
+        ++closing;
     }
-    if (!word("ASC")) word("DESC");
-    if (word("NULLS") && !word("FIRST") && !word("LAST")) return expr;
-    if (i != words.length) return expr;
+    foreach (ch; name[closing .. $])
+        if (ch == '.') return name;
 
     // The column as PostgreSQL resolves it: a quoted name exactly, an unquoted
     // one folded to lower case.
-    immutable ident = words[0];
     string col;
-    if (ident.length >= 2 && ident[0] == '"' && ident[$ - 1] == '"') {
-        col = ident[1 .. $ - 1];
-        if (col.canFind('"')) return expr;
+    if (name[0] == '"') {
+        col = name[1 .. $ - 1];
     } else {
-        import std.ascii: isAlpha, isAlphaNum, toLower;
-        if (!(isAlpha(ident[0]) || ident[0] == '_') ||
-            !ident.all!(ch => isAlphaNum(ch) || ch == '_' || ch == '$'))
-            return expr;
-        col = ident.map!(ch => cast(immutable char) toLower(ch)).array;
+        foreach (ch; name) col ~= toLower(ch);
     }
-    if (outputs.canFind(col) || !_fieldForColumnName!M(col).length) return expr;
-    return "_m." ~ ident ~ (words.length > 1 ? " " ~ words[1 .. $].join(" ") : "");
+    if (outputs.canFind(col) || !_fieldForColumnName!M(col).length) return name;
+    return "_m." ~ name;
 }
 
 unittest {
@@ -653,26 +676,21 @@ unittest {
         @field string name;
         @field("Mixed") string mixed;
     }
-    alias q = _qualifyRawOrder!Qro;
-    assert(q("name")                 == "_m.name");
-    assert(q("name DESC")            == "_m.name DESC");
-    assert(q("NAME desc nulls last") == "_m.NAME desc nulls last");
-    assert(q(`"Mixed" NULLS FIRST`)  == `_m."Mixed" NULLS FIRST`);
-    assert(q("name, id DESC")        == "_m.name, _m.id DESC");
-    assert(q(`"id" DESC NULLS LAST, name`) == `_m."id" DESC NULLS LAST, _m.name`);
-    assert(q(`"a,b", name`)          == `"a,b", _m.name`, "a comma inside quotes is not a separator");
-    // Left verbatim: not M's column, not the simple shape, or unsafe to split.
-    assert(q("mixed")                == "mixed",  "unquoted folds to lower case");
-    assert(q("partner_name")         == "partner_name");
-    assert(q("lower(name)")          == "lower(name)");
-    assert(q("_m.name")              == "_m.name");
-    assert(q("name DESC garbage")    == "name DESC garbage");
-    assert(q("name NULLS")           == "name NULLS");
-    assert(q("coalesce(name, id)")   == "coalesce(name, id)");
-    assert(q("")                     == "");
+    alias r = _resolveOrderName!Qro;
+    assert(r("name")      == "_m.name");
+    assert(r("NAME")      == "_m.NAME",     "unquoted folds to lower case");
+    assert(r(`"Mixed"`)   == `_m."Mixed"`);
+    assert(r("mixed")     == "mixed",       "unquoted folds, so this is not the Mixed column");
+    assert(r("partner_name") == "partner_name", "not M's column: may belong to a joined table");
+    assert(r("_m.name")   == "_m.name",     "qualified: as written");
+    assert(r("j0.name")   == "j0.name");
+    assert(r(`"T".name`)  == `"T".name`);
+    assert(r(`"a.b"`)     == `"a.b"`,        "a dot inside quotes is not a qualifier");
+    assert(r("\"\xff\"")   == "\"\xff\"",      "a malformed byte inside quotes is passed, not decoded");
+    assert(r(`"x".name`)  == `"x".name`);
     // An output name wins over the input column, as it does in SQL.
-    assert(_qualifyRawOrder!Qro("name DESC", ["name"]) == "name DESC");
-    assert(_qualifyRawOrder!Qro("name, id", ["name"]) == "name, _m.id");
+    assert(r("name", ["name"]) == "name");
+    assert(r("id",   ["name"]) == "_m.id");
 }
 
 // Resolve a single Ordering term to a SQL fragment, registering join(s) for
@@ -681,7 +699,8 @@ private string _resolveOrdering(M, JoinFields...)(
     in Ordering ord, ref _FilterJoin[] fjoins, ref int idx, in string[] outputs = null)
 {
     final switch (ord.kind) {
-        case OrderKind.raw:    return _qualifyRawOrder!M(ord.expr, outputs);
+        case OrderKind.raw:    return ord.expr;
+        case OrderKind.name:   return _resolveOrderName!M(ord.expr, outputs) ~ _orderSuffix(ord);
         case OrderKind.column: return ord.expr ~ _orderSuffix(ord);
         case OrderKind.path:
             return _resolvePathToCol!(M, JoinFields)(ord.expr, fjoins, idx) ~ _orderSuffix(ord);
@@ -689,7 +708,8 @@ private string _resolveOrdering(M, JoinFields...)(
 }
 
 // Resolve a list of Ordering terms into a comma-separated ORDER BY body.
-// Empty/blank fragments are dropped so a single raw "" term suppresses ordering.
+// Empty fragments are dropped, so the raw "" term orderBy("") stores suppresses
+// ordering.
 private string _resolveOrderTerms(M, JoinFields...)(
     in Ordering[] terms, ref _FilterJoin[] fjoins, ref int idx, in string[] outputs = null)
 {
@@ -704,7 +724,8 @@ private string _resolveOrderTerms(M, JoinFields...)(
 }
 
 // Compile-time-validated order spec → Ordering. A leading '-' means descending.
-// Field references (not raw SQL — use orderBy(string) for raw), validated against
+// Field references (not column names or SQL — see orderBy(string) and
+// orderByRaw), validated against
 // the model end to end: plain names against M's columns; join paths validate every
 // relation segment and the final leaf column on the target model.
 private Ordering _ctOrderSpec(M, string spec)() {
@@ -716,7 +737,8 @@ private Ordering _ctOrderSpec(M, string spec)() {
         "orderBy!(\"" ~ spec ~ "\") has no field name after '-'");
     static assert(indexOf(_name, ' ') < 0,
         "orderBy!(\"" ~ spec ~ "\") must be a bare field name or join path (no spaces"
-        ~ " or SQL). Use orderBy(\"...\") for raw SQL.");
+        ~ " or SQL). Use orderBy(\"col DESC\") for a column name with a direction, or"
+        ~ " orderByRaw() for SQL.");
     static if (indexOf(_name, '.') >= 0) {
         static assert(_assertOrderPath!(M, spec, _name));
         return Ordering(OrderKind.path, _name, _dir);
@@ -1048,7 +1070,7 @@ if (isModel!M && isQueryContext!Ctx) {
     // There are two `orderBy` overloads, disambiguated by HOW they are called,
     // not by a template constraint:
     //  - the RUNTIME form below, `orderBy(values…)`, takes ordinary call
-    //    arguments and matches `orderBy(F!"x".desc)`, `orderBy("raw")`, etc.
+    //    arguments and matches `orderBy(F!"x".desc)`, `orderBy("name DESC")`, etc.
     //  - the COMPILE-TIME form, `orderBy!("field"…)`, takes explicit template
     //    value arguments and no runtime arguments.
     // `orderBy!("x")` cannot bind the runtime overload (a string value can't be
@@ -1059,37 +1081,65 @@ if (isModel!M && isQueryContext!Ctx) {
     /** Override the ORDER BY clause with one or more terms.
       *
       * Each argument is one of:
-      *  - a raw SQL `string` — passed through verbatim (escape hatch);
+      *  - a `string` of column names — a comma-separated list, each name bare
+      *    or double-quoted, optionally qualified (`_m.col`), optionally
+      *    followed by ASC/DESC and NULLS FIRST/LAST. That is the whole
+      *    grammar: an expression, a function call, a comment or anything
+      *    else is refused with QueryClientError, so a sort column taken from
+      *    a request cannot carry SQL. An expression goes through orderByRaw.
       *  - an `F` builder — `F!"field"` / `F!"partner.name"` (ascending), or
       *    `.desc`, optionally chained `.nullsFirst`/`.nullsLast`;
       *  - an `Ordering` value.
       *
       * Field references via `F` are resolved against the model (camelCase →
-      * column, implicit LEFT JOINs for join paths). Raw strings are emitted as
-      * written, with one exception: a term that is only a column of this model
-      * — optionally with ASC/DESC and NULLS FIRST/LAST, alone or in a comma
-      * list — is qualified as `_m.col`, so a join cannot make it ambiguous. A
-      * name the statement also outputs (a select!DTO member, an annotation)
-      * is left alone, since SQL already resolves it to that output.
+      * column, implicit LEFT JOINs for join paths). A bare column name that is
+      * one of this model's columns is qualified as `_m.col`, so a join cannot
+      * make it ambiguous; a name the statement also outputs (a select!DTO
+      * member, an annotation) is left alone, since SQL already resolves it to
+      * that output, and so is any other name, which may belong to a joined
+      * table.
       *
       * Pass a single `""` to suppress all ordering (overrides @defaultOrder).
-      *
-      * Security: a raw `string` is embedded verbatim — never pass
-      * user-controlled input. For compile-time-validated field ordering see the
+      * For compile-time-validated field ordering see the
       * `orderBy!("field", "-other")` form below.
       *
       * ---
       * repo.query().orderBy(F!"createdAt".desc, F!"name")
-      * repo.query().orderBy("priority DESC NULLS LAST")        // raw
+      * repo.query().orderBy("priority DESC NULLS LAST, id")
       * repo.query().orderBy(F!"partner.name")                  // join path
+      * repo.query().orderBy(req.query.get("sort", "name"))     // cannot inject
       * ---
       **/
     QuerySet!(M, Ctx, JoinFields) orderBy(Specs...)(Specs specs)
     if (Specs.length >= 1) {
         auto qs = this;
         qs._orderByTerms = [];
-        static foreach (i; 0 .. Specs.length)
-            qs._orderByTerms ~= toOrdering(specs[i]);
+        static foreach (i; 0 .. Specs.length) {
+            static if (is(Specs[i] : const(char)[]))
+                qs._orderByTerms ~= _orderTermsOf(specs[i].to!string);
+            else
+                qs._orderByTerms ~= toOrdering(specs[i]);
+        }
+        return qs;
+    }
+
+    /** Raw SQL ORDER BY — the escape hatch for an expression.
+      *
+      * `sql` replaces the whole clause and is embedded verbatim, nothing
+      * qualified: once the query joins another table (load!, F!"rel.field"),
+      * write the model's own columns as `_m.col`, or a name both tables have
+      * is "ambiguous".
+      *
+      * Security: never pass user-controlled input. A sort column chosen at
+      * run time goes through orderBy(string), which admits column names only.
+      *
+      * ---
+      * repo.query().orderByRaw("lower(name), id DESC")
+      * ---
+      **/
+    QuerySet!(M, Ctx, JoinFields) orderByRaw(string sql) {
+        auto qs = this;
+        qs._orderByTerms = [Ordering(OrderKind.raw, sql)];
         return qs;
     }
 
@@ -1102,7 +1152,8 @@ if (isModel!M && isQueryContext!Ctx) {
       * repo.query().orderBy!("-createdAt", "name")  // createdAt DESC, name ASC
       * repo.query().orderBy!("partner.name")        // join path, fully validated
       * ---
-      * For raw SQL or NULLS placement, use the runtime `orderBy(...)` form.
+      * For NULLS placement use the runtime `orderBy(...)` form; for an
+      * expression, orderByRaw.
       **/
     QuerySet!(M, Ctx, JoinFields) orderBy(specs...)()
     if (specs.length >= 1) {
@@ -2166,8 +2217,9 @@ if (is(QS == QuerySet!Args, Args...)) {
         return g;
     }
 
-    /** ORDER BY — accepts the same terms as QuerySet.orderBy (raw strings,
-      * F builders, Ordering values) plus aggregate builders' .asc/.desc:
+    /** ORDER BY — accepts the same terms as QuerySet.orderBy (column-name
+      * strings, F builders, Ordering values) plus aggregate builders'
+      * .asc/.desc:
       * ---
       * .orderBy(F!(Invoice, "amount").sum.desc)
       * ---
@@ -2178,6 +2230,13 @@ if (is(QS == QuerySet!Args, Args...)) {
     if (OSpecs.length >= 1) {
         auto g = this;
         g._base = _base.orderBy(specs);
+        return g;
+    }
+
+    /// Raw SQL ORDER BY, as QuerySet.orderByRaw — trusted text only.
+    typeof(this) orderByRaw(string sql) {
+        auto g = this;
+        g._base = _base.orderByRaw(sql);
         return g;
     }
 

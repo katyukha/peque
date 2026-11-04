@@ -786,7 +786,8 @@ the database; a terminal method sends the query.
 // All active partners
 auto active = repo.query().where!"active"(true).all();
 
-// Filtered, ordered, paginated
+// Filtered, ordered, paginated. orderBy(string) admits column names only
+// (with ASC/DESC, NULLS FIRST/LAST), so a sort column from a request is safe.
 auto page = repo.query()
     .where!"active"(true)
     .orderBy("name ASC")
@@ -1220,16 +1221,24 @@ repo.query().where(F!"id".gte(10)).all();
 numbering and are renumbered automatically relative to prior filters. Its
 columns are not qualified for you: once the query joins another table (`load!`,
 `F!"rel.field"`), write the model's own columns as `_m.col`, or a name both
-tables have is ambiguous. A raw `orderBy("name DESC")` or `@defaultOrder` term
-that is just one of the model's columns *is* qualified automatically.
+tables have is ambiguous. `orderByRaw` is the same hatch for ORDER BY.
 
 ```d
 repo.query().whereRaw("tsv @@ to_tsquery($1)", "acme & corp").all();
+repo.query().orderByRaw("lower(name), id DESC").all();
 ```
 
-**Security:** `sqlFrag` is embedded in the query verbatim — never pass
-user-controlled input as the first argument. All runtime values must go through
-the variadic args.
+**Security:** both fragments are embedded in the query verbatim — never pass
+user-controlled input to them. All runtime values must go through `whereRaw`'s
+variadic args, and a sort column chosen at run time goes through
+`orderBy(string)`, which admits only column names: a comma-separated list, each
+name bare or double-quoted, optionally qualified, with optional `ASC`/`DESC`
+and `NULLS FIRST`/`LAST`. Anything else — an expression, a function call, a
+comment — is refused with `QueryClientError` rather than guessed at. A bare
+name that is one of the model's columns is qualified as `_m.col`, so a join
+cannot make it ambiguous; a name the statement outputs (an annotation, a
+`select!DTO` member) is left to SQL, which resolves it first. `@defaultOrder`
+strings follow the same grammar, checked at compile time.
 
 ### EXISTS subqueries
 
@@ -1500,6 +1509,15 @@ auto result = pool.borrow((ref Connection conn) {
     return conn.execParams("SELECT name FROM users WHERE id = $1", userId);
 });
 ```
+
+A release undoes one thing: a transaction left open is rolled back and
+reported as `QueryClientError`. Any other session state a borrow sets —
+`SET ROLE`, `search_path`, advisory locks, temp tables, prepared statements —
+stays on the connection and reaches the next borrower, so undo it before
+returning, or scope it to a transaction with `SET LOCAL`. peque does not
+`DISCARD ALL` on release: that is a round trip per borrow, and it would reset
+the session time zone the connection pinned. The same holds for
+`ThreadConnectionPool`.
 
 ---
 

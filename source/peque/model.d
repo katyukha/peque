@@ -310,14 +310,17 @@ struct pgType {
   *    the model (camelCase → column, implicit LEFT JOIN for join paths), with
   *    optional `.desc` / `.nullsLast`.
   *
-  * Raw SQL string (ascending implied):
+  * Column name (ascending implied):
   * ---
   * @defaultOrder!"name"
   * @model("res_partner")
   * struct Partner { ... }
   * ---
   *
-  * Multiple raw fields with explicit direction:
+  * Several columns with directions. A string is column names only — bare or
+  * double-quoted, optionally qualified, with optional ASC/DESC and NULLS
+  * FIRST/LAST, comma-separated — checked at compile time; an expression is
+  * refused, since the same grammar guards a runtime orderBy(string):
   * ---
   * @defaultOrder!("date DESC", "id DESC")
   * @model("sale_order")
@@ -331,10 +334,6 @@ struct pgType {
   * @model("sale_order")
   * struct Order { ... }
   * ---
-  *
-  * Per-repository override: define `enum defaultOrder = "col ASC"` as a
-  * manifest constant in your repository struct — it takes priority over
-  * the model UDA.
   **/
 struct defaultOrder(fields...) if (fields.length >= 1) {}
 
