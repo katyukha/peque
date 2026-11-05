@@ -1736,7 +1736,8 @@ if (isModel!M && isQueryContext!Ctx) {
       * T is the D type of that field, inferred at compile time.
       *
       * Pass the result to F!(M, "f").inSubquery(sub) or F!"f".inSubquery(sub)
-      * to embed it as col IN (SELECT ...) in another QuerySet's WHERE clause.
+      * for membership in another QuerySet's WHERE clause, serialised as
+      * EXISTS so a NULL on either side is simply "not in the set".
       *
       * Example:
       * ---

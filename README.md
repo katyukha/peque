@@ -1282,8 +1282,11 @@ split the table exactly, which SQL's `IN` / `NOT IN` do not: a single NULL in
 the subquery makes `NOT IN` match nothing, and a row whose own column is NULL
 falls out of both. peque emits `EXISTS` / `NOT EXISTS` instead, so a NULL is
 simply not in the set — "owners with no items" stays correct when some item has
-no owner, and that orphan item counts as outside every set. The subquery keeps the
-QuerySet's ORDER BY (explicit or `@defaultOrder`), so
+no owner, and that orphan item counts as outside every set. Note the asymmetry
+with literal values: `~F!"col".contains([1, 2])` and `~F!"col"(x)` keep SQL's
+three-valued logic and drop rows whose column is NULL, so swapping a literal id
+list for an equivalent subquery changes what a negated filter returns. The
+subquery keeps the QuerySet's ORDER BY (explicit or `@defaultOrder`), so
 `orderBy(F!"amount".desc).limit(5).asSubquery!"id"()` really is "ids of the
 top 5 by amount", not 5 arbitrary rows.
 

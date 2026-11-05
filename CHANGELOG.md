@@ -80,6 +80,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   A reader declared with mutable `char[]` is now a compile error naming the two
   accepted signatures instead of "not callable". Existing readers keep working.
 
+- **`SubQuery`'s `sql` and `params` are no longer public** (breaking for code
+  that read them). Only `asSubquery!"field"()` builds one, so a hand-written
+  multi-column SELECT cannot reach the EXISTS membership test, which names a
+  single column.
+
 - **`listen()` refuses a pooled connection** (breaking: `QueryClientError`
   before anything reaches the server). A pooled connection passes to other
   borrowers and is replaced when a notification arrives while it sits idle, so

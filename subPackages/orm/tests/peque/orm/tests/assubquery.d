@@ -114,7 +114,7 @@ unittest {
 
 
 // ---------------------------------------------------------------------------
-// NOT IN — products in the inactive category only
+// The complement — products in the inactive category only
 // ---------------------------------------------------------------------------
 
 unittest {
