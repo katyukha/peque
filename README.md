@@ -225,21 +225,21 @@ all, such as a business date, which belongs in `Date`.
 `dub.json`:
 ```json
 "dependencies": {
-    "peque": "~>0.3.0"
+    "peque": "~>0.4.0"
 }
 ```
 
 `dub.sdl`:
 ```
-dependency "peque" version="~>0.3.0"
+dependency "peque" version="~>0.4.0"
 ```
 
 Sub-packages are opt-in:
 
 ```
-dependency "peque:orm"     version="~>0.3.0"   // ORM layer
-dependency "peque:migrate" version="~>0.3.0"   // migration runner
-dependency "peque:vibe"    version="~>0.3.0"   // vibe.d integration
+dependency "peque:orm"     version="~>0.4.0"   // ORM layer
+dependency "peque:migrate" version="~>0.4.0"   // migration runner
+dependency "peque:vibe"    version="~>0.4.0"   // vibe.d integration
 ```
 
 Choose a configuration depending on how you want to link `libpq`:
@@ -1489,7 +1489,7 @@ vibe.d applications. Instead of blocking the OS thread while waiting for
 PostgreSQL, control yields to the vibe.d event loop.
 
 ```d
-dependency "peque:vibe" version="~>0.3.0"
+dependency "peque:vibe" version="~>0.4.0"
 ```
 
 ```d

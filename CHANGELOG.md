@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.4.0] - 2026-11-06
+
 ### Added
 
 - **`links!"field"(parentId)` writes a `@many2many` relation** (`peque:orm`):
@@ -138,6 +142,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`Migrator.migrate` is now a template** (breaking only for code taking its
   address: `&m.migrate` no longer compiles). Calls are unaffected.
 
+---
+
 ## [0.3.1] - 2026-10-17
 
 ### Added
@@ -166,6 +172,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`getPgTypeInfo` crashed on an OID it did not know** — `SwitchError`, or
   SIGILL under `-release`, for any user-defined, extension or newer type in a
   result. Its array type is now reported as `GUESS`.
+
+---
 
 ## [0.3.0] - 2026-09-04
 
