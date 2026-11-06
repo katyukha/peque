@@ -234,7 +234,6 @@ private string _prefetchOrderSQL(TargetM)(out string joins) {
 
 private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
     import std.conv: to;
-    import std.array: join;
     import peque.orm.sql: ormTableName, ormPkColName,
         ormPkFieldName, _findM2OFKColFor, _prefixedSelectList, _M2M, _hasM2MUDA;
     import peque.hydration: _hydrateAnnotated;

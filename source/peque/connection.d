@@ -373,8 +373,7 @@ struct Connection {
       **/
     void listen(in string channel) {
         enforce!QueryClientError(!_connection.borrow!((auto ref conn) => conn._pooled),
-            "listen() on a pooled connection: it passes to other borrowers and " ~
-            "is replaced when a notification arrives on it while idle, so " ~
+            "listen() on a pooled connection: it passes to other borrowers, so " ~
             "nothing would deliver reliably. LISTEN on a dedicated Connection " ~
             "outside the pool.");
         exec("LISTEN " ~ escapeIdentifier(channel));

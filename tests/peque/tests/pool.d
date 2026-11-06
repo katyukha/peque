@@ -17,7 +17,7 @@ private import core.sys.posix.sys.socket: shutdown, SHUT_RDWR;
 private import peque.connection: Connection, Transaction;
 private import peque.lib.libpq: PQTRANS_IDLE;
 private import peque.pool: ThreadConnectionPool;
-private import peque.exception: QueryError, QueryClientError;
+private import peque.exception: QueryError, QueryClientError, ConnectionError;
 
 
 private Connection delegate() makeFactory() {
@@ -370,6 +370,23 @@ unittest {
     // The factory's own connection, outside the pool, is not.
     other.listen("peque_pool_dedicated");
     other.unlisten("peque_pool_dedicated");
+    pool.close();
+}
+
+/// A borrow that lost its backend, caught the error and returned normally
+/// opened no transaction: the dead connection is replaced without blaming it.
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+    auto other = makeFactory()();
+
+    auto n = pool.borrow((ref Connection c) {
+        immutable pid = c.exec("SELECT pg_backend_pid()")[0][0].get!int;
+        assert(other.execParams("SELECT pg_terminate_backend($1, 5000)", pid)[0][0].get!bool);
+        try { c.exec("SELECT 1"); } catch (ConnectionError) {}
+        return 7;
+    });
+    assert(n == 7, "no QueryClientError: there was no transaction to roll back");
+    pool.borrow((ref Connection c) { assert(c.exec(`SELECT 1`).getValue!int(0, 0) == 1); });
     pool.close();
 }
 

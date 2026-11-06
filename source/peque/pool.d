@@ -4,7 +4,7 @@ private import core.sync.semaphore: CoreSemaphore = Semaphore;
 private import core.sync.mutex: Mutex;
 
 private import peque.connection: Connection;
-private import peque.lib.libpq: CONNECTION_OK, PQTRANS_IDLE;
+private import peque.lib.libpq: CONNECTION_OK, PQTRANS_INTRANS, PQTRANS_INERROR;
 private import peque.exception: QueryClientError;
 
 
@@ -233,9 +233,14 @@ struct ConnectionPool(Sem, Mtx) {
                 "conn.transaction(), which does both for you.");
     }
 
+    // Only a transaction libpq knows is open. A dead connection reports
+    // PQTRANS_UNKNOWN, which is not "idle" either, and blaming a borrow that
+    // only caught a ConnectionError for a BEGIN it never ran would be wrong.
     private bool _hasOpenTransaction(size_t idx) nothrow {
-        try { return _conns[idx].transactionStatus != PQTRANS_IDLE; }
-        catch (Exception) { return false; }
+        try {
+            immutable st = _conns[idx].transactionStatus;
+            return st == PQTRANS_INTRANS || st == PQTRANS_INERROR;
+        } catch (Exception) { return false; }
     }
 
     /// False when the rollback could not be sent at all.

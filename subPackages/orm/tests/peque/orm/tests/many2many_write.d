@@ -533,6 +533,20 @@ struct MwAmbNode {
     @many2many!(MwAmbNode, MwAmbEdge) MwAmbNode[] next;
 }
 
+// A partial unique index covers only its rows, so it is no arbiter.
+@model("mw_partial_edge")
+@uniqueIndexTogether!("fromId", "toId")("from_id > 0")
+struct MwPartialEdge {
+    @primaryKey          int id;
+    @many2one!(MwNode)   int fromId;
+    @many2one!(MwNode)   int toId;
+}
+@model("mw_node")
+struct MwPartialNode {
+    @primaryKey int id;
+    @many2many!(MwNode, MwPartialEdge, "fromId", "toId") MwNode[] next;
+}
+
 // Both keys named, but the same field.
 @model("mw_node")
 struct MwSameKeyNode {
@@ -562,4 +576,6 @@ unittest {
         "prefetch resolves the keys the same way");
     static assert(!__traits(compiles, Links!(MwSameKeyNode, "next", Connection)),
         "one junction field cannot hold both keys");
+    static assert(!__traits(compiles, Links!(MwPartialNode, "next", Connection)),
+        "a partial unique index is no arbiter");
 }

@@ -233,7 +233,7 @@ struct many2many(T, string junctionTable, string selfKey = "", string targetKey 
         ", \"junction\", \"self_id\", \"target_id\").");
     // One column cannot hold both ends: the DDL would declare it twice and a
     // writer against an existing table would link every row to itself.
-    static assert(selfKey != targetKey,
+    static assert(selfKey.length == 0 || targetKey.length == 0 || selfKey != targetKey,
         "@many2many!(" ~ T.stringof ~ ", \"" ~ junctionTable ~ "\", \"" ~ selfKey ~
         "\", \"" ~ targetKey ~ "\") names one column for both keys.");
 }

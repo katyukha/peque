@@ -298,8 +298,8 @@ unittest {
     assert(byId.query().load!"partner".select!TjNameDTO()[0].name == "INV-NULL");
 }
 
-// An output name wins over the input column in SQL, so a raw term matching one
-// is left alone: here `amount` is the annotation and `name` is the partner's.
+// An output name wins over the input column in SQL, so a bare term matching
+// one is left alone: here `amount` is the annotation and `name` is the partner's.
 
 @autoHydrate
 struct TjPartnerTotal {

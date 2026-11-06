@@ -49,6 +49,25 @@ struct Місто {
 @autoHydrate
 struct МістоDTO { string назва; int населення; }
 
+// A load! alias is the relation field plus the column, bare, and the server
+// truncates identifiers at 63 bytes: a long Cyrillic pair is a build error,
+// not a hydration miss.
+@model("ui_довідник")
+struct ДовгийДовідник {
+    @primaryKey int    id;
+    @field      string найменування_організації_повне;
+}
+@model("ui_запис")
+struct ДовгийЗапис {
+    @primaryKey int id;
+    @many2one!(ДовгийДовідник) int довідникId;
+    @related("довідникId") Nullable!ДовгийДовідник цільова;
+}
+unittest {
+    static assert(!__traits(compiles, (ref Repository!(ДовгийЗапис, Connection) r) => r.query().load!"цільова".all()),
+        "an alias over 63 bytes is refused at compile time");
+}
+
 alias UiReg = Registry!(Bind!(Країна, ModelRepo!Країна), Bind!(Місто, ModelRepo!Місто));
 
 unittest {

@@ -230,6 +230,10 @@ unittest {
     assertThrown!QueryClientError(repo.query().set!"active"(false).update());
     assert(repo.query().where!"active"(false).count() == 2,
         "a refused statement must not have reached the server");
+    // none() is a filter: it passes the guard and touches nothing.
+    assert(repo.query().none().delete_() == 0);
+    assert(repo.query().none().set!"active"(false).update() == 0);
+    assert(repo.query().count() == 4);
 }
 
 
@@ -275,6 +279,9 @@ unittest {
     assert(repo.query().where(F!(Item, "name").contains([])).count() == 0);
     assert(repo.query().where(F!"name".contains([])).count() == 0);
     assert(repo.query().where(~F!(Item, "name").contains([])).count() == 4);
+    // A non-empty void[] carries no values to compare: refused, not "matches nothing".
+    import std.exception: assertThrown;
+    assertThrown!QueryClientError(repo.query().where(F!(Item, "name").contains(cast(void[]) new ubyte[4])));
 }
 
 

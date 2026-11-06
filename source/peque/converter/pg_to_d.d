@@ -594,18 +594,14 @@ if (hasPGTextReader!T) {
     scope raw = () @trusted {
         return data is null ? null : data[0 .. length];
     }();
-    // `raw` points into libpq's result buffer, freed with the Result. Lend it
-    // only to a reader that promised not to keep it; any other gets a copy,
-    // since without -preview=dip1000 nothing stops it keeping the slice.
+    // raw is libpq's buffer, freed with the Result: lend it only to a scope
+    // reader.
     static if (_readerBorrowsText!T)
         return T.fromPGText(raw, pg_type);
     else
         return T.fromPGText(raw.idup, pg_type);
 }
 
-// Ownership follows the parameter: a `scope` reader is lent the source buffer
-// itself, and any other gets a copy that outlives it — libpq reuses that memory
-// once the Result is gone.
 unittest {
     static struct Lent {
         size_t at;

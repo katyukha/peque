@@ -509,12 +509,18 @@ package(peque.orm) string _joinSelectExtras(RelM, string tableAlias, string colP
     static foreach (memberName; FieldNameTuple!RelM) {{
         alias F = __traits(getMember, RelM, memberName);
         static if (_isColField!F) {
+            // The alias must stay bare: hydration looks it up by that exact
+            // name. The server would truncate a long one to 63 bytes and the
+            // lookup would then miss — silently, for the primary key.
+            enum _alias = colPrefix ~ _identSlug(_colName!(F, memberName));
+            static assert(_alias.length <= 63,
+                "load!: the alias \"" ~ _alias ~ "\" for " ~ RelM.stringof ~ "." ~
+                memberName ~ " is " ~ _alias.length.stringof ~ " bytes, over " ~
+                "PostgreSQL's 63-byte identifier limit; shorten the relation field " ~
+                "or the column name.");
             if (result.length) result ~= ", ";
-            // Left side is a column reference (quote it); right side builds a
-            // new alias that must stay bare — hydration looks it up by that
-            // exact name via ResultRow._fieldIndex.
             result ~= tableAlias ~ "." ~ _sqlIdent(_colName!(F, memberName)) ~
-                      " AS " ~ colPrefix ~ _identSlug(_colName!(F, memberName));
+                      " AS " ~ _alias;
         }
     }}
     return result;
@@ -619,7 +625,6 @@ package(peque.orm) template _hasM2MUDA(alias F) {
   **/
 package(peque.orm) template _M2M(M, string memberName) {
     import std.meta: Filter;
-    import peque.hydration: camelToSnake;
 
     static assert(__traits(hasMember, M, memberName),
         "'" ~ memberName ~ "' is not a field on " ~ M.stringof ~ ".");

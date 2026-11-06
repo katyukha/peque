@@ -120,6 +120,19 @@ package(peque.orm) ParsedOrder _parseOrderSpec(string spec) pure @safe {
         i = j;
         return true;
     }
+    // Bare, these are values, not columns: ORDER BY user sorts by a constant.
+    // Compared over the bytes: std.string.toLower would decode and throw on
+    // a malformed byte.
+    static bool valueKeyword(string s) pure @safe {
+        import std.algorithm: any, equal, map;
+        import std.ascii: toLower;
+        import std.string: representation;
+        return ["user", "current_user", "session_user", "system_user",
+                "current_role", "current_catalog", "current_schema",
+                "current_date", "current_time", "current_timestamp",
+                "localtime", "localtimestamp"]
+            .any!(k => equal(s.representation.map!toLower, k.representation));
+    }
     // A keyword, case-insensitively, not glued to a following identifier char.
     bool word(string w) {
         if (i + w.length > spec.length) return false;
@@ -135,6 +148,8 @@ package(peque.orm) ParsedOrder _parseOrderSpec(string spec) pure @safe {
         skipSpace();
         string name;
         if (!ident(name)) return fail("expected a column name, found " ~ here());
+        if (name[0] != '"' && valueKeyword(name))
+            return fail(name ~ " is a value keyword, not a column; quote it to name a column");
         if (i < spec.length && spec[i] == '.') {
             ++i;
             string col;
@@ -195,6 +210,10 @@ unittest {
     assert(refused("$$a$$")                == "expected a column name, found '$' at position 0");
     assert(refused("name DESC garbage")    == "expected ',' or the end, found 'g' at position 10");
     assert(refused("name NULLS")           == "expected FIRST or LAST after NULLS, found the end");
+    assert(refused("user")                 == "user is a value keyword, not a column; quote it to name a column");
+    assert(refused("name, Current_Date DESC") == "Current_Date is a value keyword, not a column; quote it to name a column");
+    assert(terms(`"user"`) == [Ordering(OrderKind.name, `"user"`)]);
+    assert(terms("_m.user") == [Ordering(OrderKind.name, "_m.user")], "qualified, it is a column");
     assert(refused("name DESC назва")      == "expected ',' or the end, found byte 0xD0 at position 10");
     assert(refused("name,")                == "expected a column name, found the end");
     assert(refused("")                     == "expected a column name, found the end");

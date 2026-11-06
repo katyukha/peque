@@ -74,7 +74,13 @@ private template _junctionIsUnique(JM, string a, string b) {
                 static if (is(uda)) {
                     if (_pair(uda.fields)) found = true;
                 } else {
-                    if (_pair(typeof(uda).fields)) found = true;
+                    // A partial index covers only its rows, so it cannot be the
+                    // ON CONFLICT arbiter for every pair.
+                    static if (__traits(hasMember, typeof(uda), "where"))
+                        enum partial = uda.where.length > 0;
+                    else
+                        enum partial = false;
+                    if (!partial && _pair(typeof(uda).fields)) found = true;
                 }
             }
         }}
@@ -111,9 +117,9 @@ if (isQueryContext!Ctx) {
         static assert(_junctionIsUnique!(Rel.JunctionModel, Rel.selfField, Rel.targetField),
             "links!\"" ~ relField ~ "\" on " ~ M.stringof ~ ": junction model " ~
             Rel.JunctionModel.stringof ~ " needs @uniqueTogether!(\"" ~
-            Rel.selfField ~ "\", \"" ~ Rel.targetField ~ "\") (or " ~
-            "@uniqueIndexTogether) — without it a concurrent save can duplicate " ~
-            "a link.");
+            Rel.selfField ~ "\", \"" ~ Rel.targetField ~ "\") (or a " ~
+            "@uniqueIndexTogether without a where) — without it a concurrent " ~
+            "save can duplicate a link.");
 
     private enum _jt  = _sqlIdent(Rel.table);
     private enum _sk  = _sqlIdent(Rel.selfCol);

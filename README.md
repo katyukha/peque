@@ -249,9 +249,9 @@ Choose a configuration depending on how you want to link `libpq`:
 | `libraryStatic` | Static library — links `libpq` directly |
 | `libraryDynamic` | Dynamic library — loads `libpq` at runtime via `bindbc-loader` |
 
-Compilers: DMD 2.113 or newer, or LDC 1.41 or newer. DMD 2.111 and 2.112
-miscompile struct returns such as `repo.insert(r)`, so `.id` on the result can
-read freed memory; DUB refuses to build peque with them.
+Compilers: DMD 2.113 or newer, or LDC 1.41 or newer. DMD before 2.113
+miscompiles struct returns such as `repo.insert(r)`, so `.id` on the result can
+read freed memory; DUB refuses to build peque with it.
 
 ## Quick start
 
