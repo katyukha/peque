@@ -8,8 +8,8 @@ jobs:
       matrix:
         os:
           - macOS-latest
-          - macOs-14
           - macOs-15
+          - macOs-26
         dc:
           - ldc-latest
           - ldc-1.41.0
