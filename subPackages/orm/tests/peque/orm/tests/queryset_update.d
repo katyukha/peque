@@ -227,7 +227,7 @@ unittest {
     auto c    = makeConn();
     auto repo = seedJobs(c);
 
-    immutable n = repo.query()
+    immutable n = repo.query().where(Predicate.all)
         .setRaw!"attempts"("attempts + 1")
         .setRaw!"lockedAt"("now()")
         .update();
@@ -283,14 +283,14 @@ unittest {
     auto c    = makeConn();
     auto repo = seedJobs(c);
 
-    immutable n = repo.query()
+    immutable n = repo.query().where(Predicate.all)
         .setRaw!"attempts"("attempts + 100")
         .set!"attempts"(7)                  // supersedes the expression
         .update();
     assert(n == 3);
     foreach (ref j; repo.query().all()) assert(j.attempts == 7);
 
-    immutable n2 = repo.query()
+    immutable n2 = repo.query().where(Predicate.all)
         .set!"attempts"(1)
         .setRaw!"attempts"("attempts + 5")  // supersedes the value
         .update();
@@ -305,7 +305,7 @@ unittest {
     auto c    = makeConn();
     auto repo = seedJobs(c);
 
-    assert(repo.query().setRaw!"attempts"("_m.attempts + 1").update() == 3);
+    assert(repo.query().where(Predicate.all).setRaw!"attempts"("_m.attempts + 1").update() == 3);
     foreach (ref j; repo.query().orderBy!("attempts")().all())
         assert(j.attempts >= 1);
 
@@ -333,25 +333,25 @@ unittest {
     auto c    = makeConn();
     auto repo = seedJobs(c);   // attempts 0,1,2  backoff 100
 
-    assert(repo.query().set!"attempts"(F!"attempts" + 1).update() == 3);
+    assert(repo.query().where(Predicate.all).set!"attempts"(F!"attempts" + 1).update() == 3);
     auto a = repo.query().orderBy!("attempts")().all();
     assert(a[0].attempts == 1 && a[1].attempts == 2 && a[2].attempts == 3);
 
     // Composition, and the parameters of each operand renumbered on the way.
-    assert(repo.query().set!"backoff"((F!"backoff" + 10) * 2).update() == 3);
+    assert(repo.query().where(Predicate.all).set!"backoff"((F!"backoff" + 10) * 2).update() == 3);
     assert(repo.query().all()[0].backoff == 220);
 
     // Value on the left goes through opBinaryRight.
-    assert(repo.query().set!"backoff"(1000 - F!"backoff").update() == 3);
+    assert(repo.query().where(Predicate.all).set!"backoff"(1000 - F!"backoff").update() == 3);
     assert(repo.query().all()[0].backoff == 780);
 
     // Column to column — neither side binds a parameter.
-    assert(repo.query().set!"backoff"(F!"backoff" - F!"attempts").update() == 3);
+    assert(repo.query().where(Predicate.all).set!"backoff"(F!"backoff" - F!"attempts").update() == 3);
     auto b = repo.query().orderBy!("attempts")().all();
     assert(b[0].backoff == 780 - 1);
 
     // A bare field builder copies one column into another.
-    assert(repo.query().set!"backoff"(F!"attempts").update() == 3);
+    assert(repo.query().where(Predicate.all).set!"backoff"(F!"attempts").update() == 3);
     foreach (ref j; repo.query().all()) assert(j.backoff == j.attempts);
 }
 
@@ -361,14 +361,14 @@ unittest {
     auto c    = makeConn();
     auto repo = seedJobs(c);
 
-    assert(repo.query().set!"attempts"(F!(QsrJob, "attempts") * 3).update() == 3);
+    assert(repo.query().where(Predicate.all).set!"attempts"(F!(QsrJob, "attempts") * 3).update() == 3);
     auto a = repo.query().orderBy!("attempts")().all();
     assert(a[2].attempts == 6);
 
     // Arithmetic on a non-numeric column is rejected when the type is known.
     static assert(!__traits(compiles, F!(QsrJob, "state") + 1));
     // …and the plain value form still works for that column.
-    assert(repo.query().set!"state"("done").update() == 3);
+    assert(repo.query().where(Predicate.all).set!"state"("done").update() == 3);
 }
 
 // The joined shape aliases its UPDATE target too, so an expression referring to
@@ -387,7 +387,7 @@ unittest {
     auto c    = makeConn();
     auto repo = seedJobs(c);
 
-    assert(repo.query()
+    assert(repo.query().where(Predicate.all)
         .set!"attempts"(F!"attempts" + 1000)   // expression
         .setRaw!"attempts"("attempts + 500")   // raw expression
         .set!"attempts"(9)                     // plain value — wins

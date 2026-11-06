@@ -85,6 +85,10 @@ struct Connection {
     private struct ConnectionInternalData {
         PGconn* _pg_conn;
 
+        // Set by a pool; listen() refuses a pooled connection (see listen).
+        // In the shared payload, so every copy of the handle sees it.
+        bool _pooled;
+
         this(in string conn_info) @trusted {
             _pg_conn = PQconnectdb(conn_info.toStringz);
         }
@@ -360,14 +364,29 @@ struct Connection {
       * keep the listening connection autocommit and out of any pool, owned by
       * a single consumer.  Subscriptions do NOT survive reconnect: after
       * constructing a fresh Connection, re-issue listen() for every channel.
+      *
+      * A pooled connection is refused with QueryClientError: it passes to
+      * other borrowers and is replaced when a notification arrives on it while
+      * idle, so nothing would deliver reliably. A raw exec("LISTEN …") on one
+      * is not caught; the pool's pre-use check replaces such a connection at
+      * the next notification.
       **/
     void listen(in string channel) {
+        enforce!QueryClientError(!_connection.borrow!((auto ref conn) => conn._pooled),
+            "listen() on a pooled connection: it passes to other borrowers, so " ~
+            "nothing would deliver reliably. LISTEN on a dedicated Connection " ~
+            "outside the pool.");
         exec("LISTEN " ~ escapeIdentifier(channel));
     }
 
     /// Unsubscribe this connection from a notification channel.
     void unlisten(in string channel) {
         exec("UNLISTEN " ~ escapeIdentifier(channel));
+    }
+
+    /// Mark this connection as held by a pool, so listen() refuses it.
+    package(peque) void markPooled() {
+        _connection.borrow!((auto ref conn) { conn._pooled = true; });
     }
 
     /** Return all notifications buffered for this connection — non-blocking.

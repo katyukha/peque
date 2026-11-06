@@ -54,6 +54,25 @@ private import peque.orm.ordering: Ordering, OrderKind;
 private import peque.hydration: camelToSnake;
 private import peque.orm.sql: _sqlIdent;
 
+// The bound values of an IN list, or false when the list is empty — an empty
+// set matches nothing. The literal `[]` is a void[], so V deduces to void and
+// its elements cannot be converted; a non-empty void[] can only come from a
+// cast and carries no values.
+private bool _inValues(V)(V[] vals, out PGValue[] pgVals) {
+    static if (is(V == void)) {
+        import std.exception: enforce;
+        import peque.exception: QueryClientError;
+        enforce!QueryClientError(vals.length == 0,
+            "contains()/whereIn() was given a non-empty void[], which has no values to compare");
+        return false;
+    } else {
+        import peque.converter: convertToPG;
+        if (vals.length == 0) return false;
+        foreach (v; vals) pgVals ~= convertToPG(v);
+        return true;
+    }
+}
+
 
 /// true if T is a FieldBuilder instantiation — used to keep the generic
 /// value overloads (opCall/ne) from competing with the column-to-column ones.
@@ -126,10 +145,8 @@ struct JsonFieldBuilder {
 
     /// IN (set membership): .get("key").contains(["a", "b"])
     Predicate contains(V)(V[] vals) const {
-        if (vals.length == 0) return Predicate.none;
         PGValue[] pgVals;
-        foreach (v; vals) pgVals ~= convertToPG(v);
-        return Predicate(InNode(_expr, pgVals));
+        return _inValues(vals, pgVals) ? Predicate(InNode(_expr, pgVals)) : Predicate.none;
     }
 
     /// IS NULL
@@ -314,12 +331,8 @@ struct FieldBuilder(string colExpr, FieldT = void) {
       * .contains() is used instead of .in() because 'in' is a D keyword.
       **/
     Predicate contains(V)(V[] vals) const {
-        import peque.converter: convertToPG;
-        if (vals.length == 0)
-            return Predicate.none;
         PGValue[] pgVals;
-        foreach (v; vals) pgVals ~= convertToPG(v);
-        return Predicate(InNode(colExpr, pgVals));
+        return _inValues(vals, pgVals) ? Predicate(InNode(colExpr, pgVals)) : Predicate.none;
     }
 
     /// IS NULL: F!(M, "field").isNull
@@ -380,10 +393,13 @@ struct FieldBuilder(string colExpr, FieldT = void) {
     /// ditto
     Predicate ne(V : SetExpr)(V rhs)     const { return rhs._cmp("!=", this); }
 
-    /** IN (SELECT ...): F!(M,"field").inSubquery(qs.asSubquery!"field"())
+    /** Membership in a subquery: F!(M,"field").inSubquery(qs.asSubquery!"field"())
       *
       * sub is produced by QuerySet.asSubquery!"field"() — a SQL subquery atom
-      * with no DB call.  NOT IN: ~F!(M, "field").inSubquery(sub).
+      * with no DB call.  The complement is ~F!(M, "field").inSubquery(sub).
+      * Unlike SQL's IN / NOT IN, the two split the rows exactly: a NULL on
+      * either side is simply "not in the set", so it never empties the
+      * complement or drops a row from both.
       **/
     Predicate inSubquery(T)(SubQuery!T sub) const {
         return Predicate(InSubqueryNode(colExpr, sub.sql, sub.params));
@@ -774,11 +790,8 @@ struct PathBuilder(string path) {
 
     /// IN (set membership)
     Predicate contains(V)(V[] vals) const {
-        if (vals.length == 0)
-            return Predicate.none;
         PGValue[] pgVals;
-        foreach (v; vals) pgVals ~= convertToPG(v);
-        return Predicate(PathNode(path, "IN", pgVals, ""));
+        return _inValues(vals, pgVals) ? Predicate(PathNode(path, "IN", pgVals, "")) : Predicate.none;
     }
 
     /// IS NULL
@@ -786,10 +799,11 @@ struct PathBuilder(string path) {
         return Predicate(PathNode(path, "IS NULL", [], ""));
     }
 
-    /** IN (SELECT ...): F!"rel.field".inSubquery(qs.asSubquery!"field"())
+    /** Membership in a subquery: F!"rel.field".inSubquery(qs.asSubquery!"field"())
       *
-      * The join path is resolved by the QuerySet at SQL-build time.
-      * NOT IN: ~F!"rel.field".inSubquery(sub).
+      * The join path is resolved by the QuerySet at SQL-build time.  The
+      * complement is ~F!"rel.field".inSubquery(sub); NULLs behave as in the
+      * typed builder's inSubquery.
       **/
     Predicate inSubquery(T)(SubQuery!T sub) const {
         // op="IN_SUB", params=subquery params, otherPath=subquery SQL.
@@ -810,15 +824,15 @@ struct PathBuilder(string path) {
     @property Ordering desc() const { return Ordering(OrderKind.path, path).desc; }
 }
 
-/** Normalize an order spec to an `Ordering`.
+/** Normalize a typed order spec to an `Ordering`.
   *
-  * Accepts a raw SQL `string` (→ verbatim term), an `F` builder
-  * (`FieldBuilder`/`PathBuilder`, → ascending field term), or an existing
-  * `Ordering` (returned unchanged).  Used by `QuerySet.orderBy` and the
-  * `@defaultOrder` reader.
+  * Accepts an `F` builder (`FieldBuilder`/`PathBuilder`, → ascending field
+  * term) or an existing `Ordering` (returned unchanged). A `string` is not
+  * one: `QuerySet.orderBy` and the `@defaultOrder` reader parse it with
+  * `_parseOrderSpec`, and `orderByRaw` is the only way to a raw term.
   **/
-package(peque.orm) Ordering toOrdering(T)(T spec) {
-    static if (is(T == Ordering))    return spec;
-    else static if (is(T == string)) return Ordering(OrderKind.raw, spec);
-    else                             return spec.asc;   // FieldBuilder / PathBuilder
+package(peque.orm) Ordering toOrdering(T)(T spec)
+if (!is(T : const(char)[])) {
+    static if (is(T == Ordering)) return spec;
+    else                          return spec.asc;   // FieldBuilder / PathBuilder
 }

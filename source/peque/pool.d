@@ -4,7 +4,7 @@ private import core.sync.semaphore: CoreSemaphore = Semaphore;
 private import core.sync.mutex: Mutex;
 
 private import peque.connection: Connection;
-private import peque.lib.libpq: CONNECTION_OK, PQTRANS_IDLE;
+private import peque.lib.libpq: CONNECTION_OK, PQTRANS_INTRANS, PQTRANS_INERROR;
 private import peque.exception: QueryClientError;
 
 
@@ -72,7 +72,7 @@ struct ConnectionPool(Sem, Mtx) {
         _conns.length = capacity;
         _free.length  = capacity;
         foreach (i; 0 .. capacity) {
-            _conns[i] = factory();
+            _conns[i] = _make();
             _free[i]  = true;
         }
     }
@@ -92,6 +92,17 @@ struct ConnectionPool(Sem, Mtx) {
       * The post-use check is best-effort: if the factory throws, the broken
       * connection is left in the slot and the next borrower's pre-use check
       * will retry, so the pool never deadlocks.
+      *
+      * A release undoes exactly one thing: a transaction left open is rolled
+      * back and, when fun returned normally, reported as QueryClientError.
+      * Everything else a borrow does to the session stays on the connection
+      * and reaches the next borrower — SET ROLE and other session settings,
+      * advisory locks, temp tables, PREPAREd statements. Undo those before
+      * returning, or scope them to a transaction with SET LOCAL inside
+      * transaction(), which the commit or rollback undoes. There is no
+      * DISCARD ALL on release: it would cost a round trip per borrow and
+      * reset the session TimeZone the constructor pinned. listen() refuses a
+      * pooled connection; LISTEN on a dedicated one.
       *
       * Params:
       *     fun = callable accepting (ref Connection); may return any type
@@ -157,14 +168,21 @@ struct ConnectionPool(Sem, Mtx) {
 
     private void _healthCheck(size_t idx) {
         if (_conns[idx].status != CONNECTION_OK || _hasUnreadInput(idx)) {
-            _conns[idx] = _factory();
+            _conns[idx] = _make();
             return;
         }
         // A slot should never arrive dirty — _reclaimSlot cleans it before
         // release — but reset quietly rather than hand on someone else's
         // transaction. No caller to blame at this point.
         if (_hasOpenTransaction(idx) && !_rollbackSafe(idx))
-            _conns[idx] = _factory();
+            _conns[idx] = _make();
+    }
+
+    /// A fresh connection from the factory, marked as the pool's own.
+    private Connection _make() {
+        auto c = _factory();
+        c.markPooled();
+        return c;
     }
 
     /** Whether the server sent anything while the connection sat idle.
@@ -173,7 +191,8 @@ struct ConnectionPool(Sem, Mtx) {
       * server terminated still reports CONNECTION_OK while its FATAL sits
       * unread. An idle connection has nothing to read unless the server spoke
       * unprompted, which is nearly always its last word; the benign case, a
-      * NOTIFY on a channel an earlier borrow LISTENed on, costs a reconnect.
+      * NOTIFY for a raw exec("LISTEN …") that listen()'s refusal cannot see,
+      * costs a reconnect.
       * Zero-timeout poll: never waits.
       **/
     private bool _hasUnreadInput(size_t idx) nothrow {
@@ -187,30 +206,41 @@ struct ConnectionPool(Sem, Mtx) {
         }
     }
 
-    /** Roll back a transaction the borrow left open, and do not hide the leak.
+    /** Roll back a transaction the borrow left open, and do not hide it.
       *
-      * The rollback DISCARDS the borrow's writes, so reporting it matters: a
-      * silent one would lose data with no signal. When fun threw, the
-      * transaction was being abandoned anyway — stay quiet so the caller's
-      * exception propagates unchained. Clearing connOk on a failed rollback
-      * lets the outer guard replace a connection that cannot be cleaned.
+      * The rollback DISCARDS the borrow's writes, so silence would lose data
+      * with no signal — and a rollback that could not even be sent is the same
+      * loss, so it is reported too, with connOk cleared so the outer guard
+      * replaces the connection. When fun threw, the transaction was being
+      * abandoned anyway — stay quiet so the caller's exception propagates
+      * unchained.
       **/
     private void _reclaimSlot(size_t idx, ref bool connOk) {
-        if (!_hasOpenTransaction(idx)) return;
         immutable borrowSucceeded = connOk;
-        if (!_rollbackSafe(idx)) { connOk = false; return; }
+        if (!_hasOpenTransaction(idx)) return;
+
+        immutable rolledBack = _rollbackSafe(idx);
+        if (!rolledBack) connOk = false;
         if (borrowSucceeded)
             throw new QueryClientError(
                 "A pooled connection was returned with a transaction still " ~
-                "open, so the pool rolled it back — every write it made is " ~
-                "gone. Something in the borrow ran BEGIN without a matching " ~
-                "COMMIT or ROLLBACK; use conn.transaction(), which does both " ~
-                "for you.");
+                (rolledBack
+                    ? "open, so the pool rolled it back"
+                    : "open, and the pool could not roll it back, so the " ~
+                      "connection is being replaced") ~
+                " — every write it made is gone. Something in the borrow ran " ~
+                "BEGIN without a matching COMMIT or ROLLBACK; use " ~
+                "conn.transaction(), which does both for you.");
     }
 
+    // Only a transaction libpq knows is open. A dead connection reports
+    // PQTRANS_UNKNOWN, which is not "idle" either, and blaming a borrow that
+    // only caught a ConnectionError for a BEGIN it never ran would be wrong.
     private bool _hasOpenTransaction(size_t idx) nothrow {
-        try { return _conns[idx].transactionStatus != PQTRANS_IDLE; }
-        catch (Exception) { return false; }
+        try {
+            immutable st = _conns[idx].transactionStatus;
+            return st == PQTRANS_INTRANS || st == PQTRANS_INERROR;
+        } catch (Exception) { return false; }
     }
 
     /// False when the rollback could not be sent at all.
@@ -224,7 +254,7 @@ struct ConnectionPool(Sem, Mtx) {
     // released.  If the factory fails, the broken connection (CONNECTION_BAD)
     // stays in the slot; _healthCheck on the next borrow will retry.
     private void _replaceBrokenSafe(size_t idx) nothrow {
-        try { _conns[idx] = _factory(); } catch (Exception) {}
+        try { _conns[idx] = _make(); } catch (Exception) {}
     }
 }
 

@@ -106,6 +106,7 @@ private import peque.model:
     indexTogether, uniqueIndexTogether;
 private import peque.hydration: camelToSnake;
 private import peque.orm.sql: _colInfos, ormTableName, ormTableNameRaw, ormPkColName,
+    _M2M, _hasM2MUDA, ormPkColNameRaw, ormPkFieldName,
     _isColField, _colName, _sqlIdent, _identSlug;
 private import peque.orm.registry: Bind;
 
@@ -713,5 +714,137 @@ string schemaSQL(Reg)() {
             result ~= modelDDL!M();
         }
     }}
+    // Junctions last: their foreign keys need both model tables to exist.
+    enum junctions = _junctionDDL!Reg();
+    static if (junctions.length) {
+        if (result.length) result ~= "\n\n";
+        result ~= junctions;
+    }
+    return result;
+}
+
+
+// ---------------------------------------------------------------------------
+// Managed junction tables (string-form @many2many)
+// ---------------------------------------------------------------------------
+
+// One junction table a managed string-form @many2many asks for. The two
+// column specs are complete column definitions, so two declarations of the
+// same table agree exactly when they ask for the same pair of columns.
+private struct _JunctionSpec {
+    string table;
+    string selfCol,   selfDef;
+    string targetCol, targetDef;
+    string owner;      // "Model.field", for messages
+}
+
+private string _junctionColDef(string col, string type, string refTable, string refPk) pure {
+    return _sqlIdent(col) ~ " " ~ type ~ " NOT NULL REFERENCES " ~
+           _sqlIdent(refTable) ~ "(" ~ _sqlIdent(refPk) ~ ") ON DELETE CASCADE";
+}
+
+private template _junctionSpecs(Reg) {
+    private static _JunctionSpec[] _collect() {
+        _JunctionSpec[] specs;
+        static foreach (B; Reg._bindings) {{
+            static if (is(B == Bind!(M, RepoTpl), M, alias RepoTpl)) {
+                static foreach (memberName; FieldNameTuple!M) {{
+                    static if (_hasM2MUDA!(__traits(getMember, M, memberName))) {{
+                        alias Rel = _M2M!(M, memberName);
+                        static if (Rel.managed) {
+                            alias T    = Rel.Target;
+                            alias SelfPk   = typeof(__traits(getMember, M.init, ormPkFieldName!M()));
+                            alias TargetPk = typeof(__traits(getMember, T.init, ormPkFieldName!T()));
+                            specs ~= _JunctionSpec(
+                                Rel.table,
+                                Rel.selfCol,
+                                _junctionColDef(Rel.selfCol, _pgBaseType!SelfPk(),
+                                                ormTableNameRaw!M, ormPkColNameRaw!M()),
+                                Rel.targetCol,
+                                _junctionColDef(Rel.targetCol, _pgBaseType!TargetPk(),
+                                                ormTableNameRaw!T, ormPkColNameRaw!T()),
+                                M.stringof ~ "." ~ memberName);
+                        }
+                    }}
+                }}
+            }
+        }}
+        return specs;
+    }
+    enum _JunctionSpec[] _junctionSpecs = _collect();
+}
+
+private template _registeredTables(Reg) {
+    private static string[] _collect() {
+        string[] r;
+        static foreach (B; Reg._bindings) {{
+            static if (is(B == Bind!(M, RepoTpl), M, alias RepoTpl))
+                r ~= ormTableNameRaw!M;
+        }}
+        return r;
+    }
+    enum string[] _registeredTables = _collect();
+}
+
+private bool _sameJunction(in _JunctionSpec a, in _JunctionSpec b) pure {
+    // The other side of the relation names the same two columns with the
+    // roles swapped.
+    return (a.selfDef == b.selfDef && a.targetDef == b.targetDef) ||
+           (a.selfDef == b.targetDef && a.targetDef == b.selfDef);
+}
+
+// Junctions to emit: one per table, in first-declaration order, skipping a
+// table some model already owns — or the message of the first disagreement,
+// so the caller can static assert on it.
+private struct _Junctions {
+    _JunctionSpec[] unique;
+    string problem;
+}
+
+private _Junctions _dedupeJunctions(in _JunctionSpec[] specs, in string[] owned) pure {
+    import std.algorithm.searching: canFind;
+    _Junctions r;
+    foreach (spec; specs) {
+        if (owned.canFind(spec.table)) continue;
+        bool seen = false;
+        foreach (u; r.unique) {
+            if (u.table != spec.table) continue;
+            seen = true;
+            if (!_sameJunction(u, spec)) {
+                r.problem = "@many2many on " ~ spec.owner ~ " and on " ~ u.owner ~
+                    " both ask schemaSQL to create junction \"" ~ spec.table ~
+                    "\" but disagree on its columns: (" ~ spec.selfCol ~ ", " ~
+                    spec.targetCol ~ ") vs (" ~ u.selfCol ~ ", " ~ u.targetCol ~
+                    "). Spell both sides the same way, or mark one " ~
+                    "Junction.external.";
+                return r;
+            }
+        }
+        if (!seen) r.unique ~= spec;
+    }
+    return r;
+}
+
+private string _junctionDDL(Reg)() {
+    enum deduped = _dedupeJunctions(_junctionSpecs!Reg, _registeredTables!Reg);
+    static assert(deduped.problem.length == 0, deduped.problem);
+    enum unique = deduped.unique;
+
+    string result;
+    foreach (j; unique) {
+        if (result.length) result ~= "\n\n";
+        // The composite primary key is the unique constraint the links writer
+        // relies on and the index a prefetch from this side uses; the reverse
+        // index serves a prefetch from the other side.
+        result ~= "CREATE TABLE IF NOT EXISTS " ~ _sqlIdent(j.table) ~ " (\n" ~
+                  "    " ~ j.selfDef ~ ",\n" ~
+                  "    " ~ j.targetDef ~ ",\n" ~
+                  "    PRIMARY KEY (" ~ _sqlIdent(j.selfCol) ~ ", " ~ _sqlIdent(j.targetCol) ~ ")\n" ~
+                  ");\n";
+        result ~= _buildOneIndex(false, "btree", _sqlIdent(j.table),
+                                 _joinQuoted([j.targetCol, j.selfCol]), "",
+                                 "idx_" ~ _identSlug(j.table) ~ "_" ~
+                                 _joinUnderscore([j.targetCol, j.selfCol]));
+    }
     return result;
 }

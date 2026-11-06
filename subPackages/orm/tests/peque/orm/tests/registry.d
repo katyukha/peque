@@ -7,7 +7,6 @@
   *  - MergeRegistries combining two registries
   *  - RegistryRepoFor used directly (application-defined context pattern)
   *  - @defaultOrder UDA on model — findAll ORDER BY
-  *  - Per-repo enum defaultOrder override
   **/
 module peque.orm.tests.registry;
 
@@ -57,15 +56,6 @@ struct TagRepo(Ctx) {
             " WHERE priority >= $1 ORDER BY priority",
             min).as!(Tag[]);
     }
-}
-
-// Per-repo defaultOrder override test
-struct NoteRepoDesc(Ctx) {
-    private Ctx* _ctx;
-    this(Ctx* ctx) { _ctx = ctx; }
-    // Override model's @defaultOrder — this repo returns notes by id ASC
-    enum string defaultOrder = "id ASC";
-    mixin CRUDMixin!(Note, Ctx);
 }
 
 
@@ -253,24 +243,6 @@ unittest {
     assert(notes[0].priority == 3);  // High
     assert(notes[1].priority == 2);  // Mid
     assert(notes[2].priority == 1);  // Low
-}
-
-
-// ---------------------------------------------------------------------------
-// Per-repo enum defaultOrder overrides the model UDA
-// ---------------------------------------------------------------------------
-
-unittest {
-    auto c    = makeConn();
-    setupTables(c);
-    // NoteRepoDesc has `enum string defaultOrder = "id ASC"` which overrides
-    // Note's @defaultOrder!("priority DESC", "id")
-    auto repo = NoteRepoDesc!Connection(&c);
-    auto notes = repo.findAll();
-    // id ASC: first inserted row has lowest id
-    assert(notes[0].title == "Low");
-    assert(notes[1].title == "High");
-    assert(notes[2].title == "Mid");
 }
 
 

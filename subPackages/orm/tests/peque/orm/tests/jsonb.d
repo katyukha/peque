@@ -206,6 +206,8 @@ unittest {
         .where(F!(JbEvent, "payload").get("type").contains(["click", "view"]))
         .all();
     assert(multi.length == 3);
+    // The empty literal `[]` is a void[]: it must compile and match nothing.
+    assert(repo.query().where(F!(JbEvent, "payload").get("type").contains([])).count() == 0);
 
     // gte on extracted text (lexicographic — good enough for numeric strings here)
     auto highScore = repo.query()

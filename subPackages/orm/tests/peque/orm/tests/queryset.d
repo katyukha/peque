@@ -10,15 +10,17 @@
   *  - first() — found and not found
   *  - count()
   *  - exists()
-  *  - delete_() — with and without filter
+  *  - delete_() / update() — with a filter; refused without one
   *  - Branching from a base QuerySet
   **/
 module peque.orm.tests.queryset;
 
+private import std.algorithm.searching: canFind;
 private import std.process: environment;
 private import std.typecons: Nullable;
 
 private import peque.connection: Connection;
+private import peque.exception: QueryClientError;
 private import peque.model: model, field, primaryKey, defaultOrder, many2one, related;
 private import peque.orm;
 
@@ -209,9 +211,29 @@ unittest {
     auto rows = seed(c);
     auto repo = Repository!(Item, Connection)(&c);
 
-    auto deleted = repo.query().delete_();
+    auto deleted = repo.query().where(Predicate.all).delete_();
     assert(deleted == 4);
     assert(repo.query().count() == 0);
+}
+
+// A missing where() is refused rather than read as "every row", so a filter
+// applied conditionally that ends up absent cannot empty the table.
+unittest {
+    import std.exception: assertThrown;
+    import peque.exception: QueryClientError;
+
+    auto c    = makeConn();
+    auto rows = seed(c);
+    auto repo = Repository!(Item, Connection)(&c);
+
+    assertThrown!QueryClientError(repo.query().delete_());
+    assertThrown!QueryClientError(repo.query().set!"active"(false).update());
+    assert(repo.query().where!"active"(false).count() == 2,
+        "a refused statement must not have reached the server");
+    // none() is a filter: it passes the guard and touches nothing.
+    assert(repo.query().none().delete_() == 0);
+    assert(repo.query().none().set!"active"(false).update() == 0);
+    assert(repo.query().count() == 4);
 }
 
 
@@ -250,6 +272,16 @@ unittest {
     // return zero rows without hitting the DB with invalid "IN ()" SQL.
     string[] empty;
     assert(repo.query().whereIn!"name"(empty).all().length == 0);
+
+    // The literal `[]` is a void[], so the element type deduces to void; each
+    // builder must still accept it and match nothing.
+    assert(repo.query().whereIn!"name"([]).count() == 0);
+    assert(repo.query().where(F!(Item, "name").contains([])).count() == 0);
+    assert(repo.query().where(F!"name".contains([])).count() == 0);
+    assert(repo.query().where(~F!(Item, "name").contains([])).count() == 4);
+    // A non-empty void[] carries no values to compare: refused, not "matches nothing".
+    import std.exception: assertThrown;
+    assertThrown!QueryClientError(repo.query().where(F!(Item, "name").contains(cast(void[]) new ubyte[4])));
 }
 
 
@@ -390,16 +422,26 @@ unittest {
     assert(multi[$-1].name == "a");
 }
 
-// Raw string is emitted verbatim — the escape hatch for SQL expressions.
+// orderBy(string) is column names only; an expression needs orderByRaw, which
+// says it is trusted. The hostile inputs are in security.d.
 unittest {
+    import std.exception: collectException;
     auto c = makeConn(); seedOrdered(c);
     auto repo = Repository!(Ordered, Connection)(&c);
 
     auto rows = repo.query().orderBy("sort_key DESC").all();
     assert(rows[0].sortKey == 30);
+    // A sort column arrives as whatever string type the handler holds.
+    const string fromConfig = "sort_key DESC";
+    char[] fromRequest = "sort_key DESC".dup;
+    assert(repo.query().orderBy(fromConfig).all()[0].sortKey == 30);
+    assert(repo.query().orderBy(fromRequest).all()[0].sortKey == 30);
 
-    auto byExpr = repo.query().orderBy("lower(name) ASC").all();
+    auto byExpr = repo.query().orderByRaw("lower(name) ASC").all();
     assert(byExpr[0].name == "a");
+
+    auto ex = collectException!QueryClientError(repo.query().orderBy("lower(name) ASC"));
+    assert(ex !is null && ex.msg.canFind("orderByRaw"), ex is null ? "accepted" : ex.msg);
 
     // A single "" suppresses ordering (overrides @defaultOrder).
     assert(repo.query().orderBy("").all().length == 3);

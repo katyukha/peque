@@ -70,6 +70,7 @@ template isModel(M) {
   *  - deleteById(id)       → void
   *  - deleteByRec(M)       → void        (record-based; extracts PK internally)
   *  - deleteByRec(M[])     → long        (single IN-clause round-trip)
+  *  - links!"rel"(id)      → Links       (write a @many2many: add/remove/set/clear)
   **/
 mixin template CRUDMixin(M, Ctx)
 if (isModel!M && isQueryContext!Ctx) {
@@ -202,25 +203,11 @@ if (isModel!M && isQueryContext!Ctx) {
     private enum _crudUpsertByPkSQL =
         _upsertSQL!true(_crudPk, _buildExcludedSetClause!M());
 
-    /** Return all rows as M[], with optional ORDER BY.
-      *
-      * Order of precedence (first match wins):
-      *  1. Host repository defines `enum string defaultOrder = "col ASC"`.
-      *  2. Model M carries `@defaultOrder!("col")` UDA.
-      *  3. Neither — no ORDER BY, undefined DB order.
+    /** Return all rows as M[]: `query().all()`, so the model's @defaultOrder
+      * applies, and without one the order is whatever the server returns.
       **/
     M[] findAll() {
-        // Delegate to the QuerySet so ordering goes through one shared resolver
-        // (raw strings, F! field terms, and join paths all behave identically
-        // here and in query()). Precedence:
-        //  1. Per-repo override: host struct has `enum string defaultOrder`.
-        //  2. Model-level @defaultOrder UDA (applied by QuerySet automatically).
-        //  3. Neither — no ORDER BY, undefined DB order.
-        static if (__traits(hasMember, typeof(this), "defaultOrder") &&
-                   is(typeof(typeof(this).defaultOrder) == string))
-            return query().orderBy(typeof(this).defaultOrder).all();
-        else
-            return query().all();
+        return query().all();
     }
 
     /** Return true if a row with the given primary-key value exists.
@@ -520,6 +507,23 @@ if (isModel!M && isQueryContext!Ctx) {
     auto query() {
         import peque.orm.queryset: QuerySet;
         return QuerySet!(M, Ctx)(_ctx);
+    }
+
+    /** The links of one parent row on a @many2many relation, for writing.
+      *
+      * Returns a `Links` handle bound to this context: `add`, `remove`,
+      * `clear`, `set`, and `within` to bound all four to a subquery.
+      *
+      * Example:
+      * ---
+      * auto l = groups.links!"permissions"(group.id);
+      * l.add([3, 5]);
+      * auto change = l.set([3, 8]);    // change.added, change.removed
+      * ---
+      **/
+    auto links(string relField)(typeof(__traits(getMember, M.init, ormPkFieldName!M())) id) {
+        import peque.orm.relation: Links;
+        return Links!(M, relField, Ctx)(_ctx, id);
     }
 }
 

@@ -2,7 +2,9 @@
   *
   * Covers: basic borrow, return value propagation, sequential borrows,
   * exception safety (connection returned even when fun throws), capacity
-  * reporting, and health check (dead connection is replaced).
+  * reporting, health check (dead connection is replaced), contention under OS
+  * threads, the release contract for a transaction left open, and listen()
+  * refusing a pooled connection.
   **/
 module peque.tests.pool;
 
@@ -15,7 +17,7 @@ private import core.sys.posix.sys.socket: shutdown, SHUT_RDWR;
 private import peque.connection: Connection, Transaction;
 private import peque.lib.libpq: PQTRANS_IDLE;
 private import peque.pool: ThreadConnectionPool;
-private import peque.exception: QueryError, QueryClientError;
+private import peque.exception: QueryError, QueryClientError, ConnectionError;
 
 
 private Connection delegate() makeFactory() {
@@ -332,5 +334,83 @@ unittest {
         c.transaction((ref Transaction tx) => tx.exec(`SELECT 5`).getValue!int(0, 0)));
     assert(n == 5);
     pool.borrow((ref Connection c) { assert(c.transactionStatus == PQTRANS_IDLE); });
+    pool.close();
+}
+
+
+// ---------------------------------------------------------------------------
+// LISTEN belongs on a dedicated connection
+// ---------------------------------------------------------------------------
+
+/** listen() refuses a pooled connection before anything reaches the server,
+  * and the borrow goes on; a connection the pool replaced is refused the same
+  * way. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+    auto other = makeFactory()();
+
+    static void refused(ref Connection c) {
+        auto ex = collectException!QueryClientError(c.listen("peque_pool_refused"));
+        assert(ex !is null, "listen() on a pooled connection must be refused");
+        assert(ex.msg.canFind("dedicated"), ex.msg);
+        assert(c.exec(`SELECT count(*) FROM pg_listening_channels()`).getValue!long(0, 0) == 0);
+        assert(c.exec(`SELECT 7`).getValue!int(0, 0) == 7, "the connection is still usable");
+    }
+
+    immutable pid = pool.borrow((ref Connection c) {
+        refused(c);
+        return c.exec("SELECT pg_backend_pid()")[0][0].get!int;
+    });
+    assert(other.execParams("SELECT pg_terminate_backend($1, 5000)", pid)[0][0].get!bool);
+    pool.borrow((ref Connection c) {
+        assert(c.exec("SELECT pg_backend_pid()")[0][0].get!int != pid, "replaced");
+        refused(c);
+    });
+
+    // The factory's own connection, outside the pool, is not.
+    other.listen("peque_pool_dedicated");
+    other.unlisten("peque_pool_dedicated");
+    pool.close();
+}
+
+/// A borrow that lost its backend, caught the error and returned normally
+/// opened no transaction: the dead connection is replaced without blaming it.
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+    auto other = makeFactory()();
+
+    auto n = pool.borrow((ref Connection c) {
+        immutable pid = c.exec("SELECT pg_backend_pid()")[0][0].get!int;
+        assert(other.execParams("SELECT pg_terminate_backend($1, 5000)", pid)[0][0].get!bool);
+        try { c.exec("SELECT 1"); } catch (ConnectionError) {}
+        return 7;
+    });
+    assert(n == 7, "no QueryClientError: there was no transaction to roll back");
+    pool.borrow((ref Connection c) { assert(c.exec(`SELECT 1`).getValue!int(0, 0) == 1); });
+    pool.close();
+}
+
+/** A rollback that cannot be sent is still a leak: the borrow returned
+  * normally, its writes are gone, and silence would hide that. **/
+unittest {
+    auto pool = ThreadConnectionPool(1, makeFactory());
+    auto other = makeFactory()();
+
+    auto ex = collectException!QueryClientError(
+        pool.borrow((ref Connection c) {
+            c.exec(`BEGIN`);
+            immutable pid = c.exec("SELECT pg_backend_pid()")[0][0].get!int;
+            // The backend is gone, but libpq has not read the socket yet, so
+            // the cached state still says an open transaction on a live
+            // connection, and the ROLLBACK the pool sends is what fails.
+            assert(other.execParams("SELECT pg_terminate_backend($1, 5000)", pid)[0][0].get!bool);
+        }));
+    assert(ex !is null, "a rollback that could not be sent must be reported, not swallowed");
+    assert(ex.msg.canFind("could not roll it back"), ex.msg);
+
+    pool.borrow((ref Connection c) {
+        assert(c.transactionStatus == PQTRANS_IDLE);
+        assert(c.exec(`SELECT 7`).getValue!int(0, 0) == 7);
+    });
     pool.close();
 }

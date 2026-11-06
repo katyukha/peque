@@ -33,9 +33,18 @@ private import peque.converter: PGValue;
   * documentation and potential future compile-time type checking; PostgreSQL
   * enforces type compatibility at execution time.
   *
-  * Do not construct directly — use QuerySet.asSubquery!"field"().
+  * Only QuerySet.asSubquery!"field"() constructs one: the fields are package
+  * so that a hand-built SELECT with several columns cannot reach the EXISTS
+  * serialiser, which names a single column.
   **/
 struct SubQuery(T) {
-    string    sql;
-    PGValue[] params;
+    package(peque.orm) string    sql;
+    package(peque.orm) PGValue[] params;
+
+    // A struct literal would initialise package fields from anywhere; a
+    // constructor of its own closes that.
+    package(peque.orm) this(string sql, PGValue[] params) {
+        this.sql    = sql;
+        this.params = params;
+    }
 }

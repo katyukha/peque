@@ -12,7 +12,8 @@
 module peque.orm.sql;
 
 private import peque.hydration: camelToSnake, _resolveColName;
-private import peque.model: model, field, primaryKey, hasMany2OneUDA;
+private import peque.model: model, field, primaryKey, hasMany2OneUDA,
+    many2many, Junction;
 private import std.traits: FieldNameTuple, hasUDA, getUDAs;
 private import std.conv: to;
 private import peque.converter: PGValue, convertToPG;
@@ -63,14 +64,16 @@ string _sqlIdent(string name) pure @safe {
   * Used where a name is concatenated into a larger identifier that must itself
   * stay bare — generated index names and joined-column aliases. Quoting is
   * wrong there (`idx_t_"order"` is not a valid identifier), so quotes and any
-  * other stray characters are dropped. Case is preserved so that generated
-  * aliases keep matching what the hydration layer looks up.
+  * other stray characters are dropped. Kept: ASCII letters, digits, '_', and
+  * every byte above 0x7F, an identifier character to PostgreSQL's lexer in
+  * any encoding, so a Cyrillic column does not collapse to nothing. Case is
+  * preserved so aliases keep matching what hydration looks up.
   **/
 package(peque.orm) string _identSlug(string name) pure @safe {
     string result;
     foreach (char c; name) {
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9') || c == '_')
+            (c >= '0' && c <= '9') || c == '_' || c >= 0x80)
             result ~= c;
     }
     return result;
@@ -97,6 +100,7 @@ unittest {
     assert(_identSlug("order")     == "order");
     assert(_identSlug(`"order"`)   == "order");
     assert(_identSlug("MyCol")     == "MyCol");
+    assert(_identSlug(`"назва"`)   == "назва", "a high byte is an identifier byte to PostgreSQL");
     assert(_identSlug("weird col") == "weirdcol");
 }
 
@@ -505,12 +509,18 @@ package(peque.orm) string _joinSelectExtras(RelM, string tableAlias, string colP
     static foreach (memberName; FieldNameTuple!RelM) {{
         alias F = __traits(getMember, RelM, memberName);
         static if (_isColField!F) {
+            // The alias must stay bare: hydration looks it up by that exact
+            // name. The server would truncate a long one to 63 bytes and the
+            // lookup would then miss — silently, for the primary key.
+            enum _alias = colPrefix ~ _identSlug(_colName!(F, memberName));
+            static assert(_alias.length <= 63,
+                "load!: the alias \"" ~ _alias ~ "\" for " ~ RelM.stringof ~ "." ~
+                memberName ~ " is " ~ _alias.length.stringof ~ " bytes, over " ~
+                "PostgreSQL's 63-byte identifier limit; shorten the relation field " ~
+                "or the column name.");
             if (result.length) result ~= ", ";
-            // Left side is a column reference (quote it); right side builds a
-            // new alias that must stay bare — hydration looks it up by that
-            // exact name via ResultRow._fieldIndex.
             result ~= tableAlias ~ "." ~ _sqlIdent(_colName!(F, memberName)) ~
-                      " AS " ~ colPrefix ~ _identSlug(_colName!(F, memberName));
+                      " AS " ~ _alias;
         }
     }}
     return result;
@@ -585,4 +595,95 @@ package(peque.orm) string _fkColForRelatedField(M, string relFieldName, RelType)
 /** Return the D field name (not column name) of the @primaryKey field on M. **/
 string ormPkFieldName(M)() {
     return _pkInfo!M.member;
+}
+
+
+// ---------------------------------------------------------------------------
+// many2many — one resolver for both UDA forms
+// ---------------------------------------------------------------------------
+
+private template _isM2MUDA(alias uda) {
+    enum bool _isM2MUDA = is(uda) && (
+        is(uda == many2many!(T, jt, sk, tk, j), T, string jt, string sk, string tk, Junction j) ||
+        is(uda == many2many!(T, JM, sf, tf), T, JM, string sf, string tf));
+}
+
+/// True when F carries a @many2many UDA in either form.
+package(peque.orm) template _hasM2MUDA(alias F) {
+    import std.meta: anySatisfy;
+    enum bool _hasM2MUDA = anySatisfy!(_isM2MUDA, __traits(getAttributes, F));
+}
+
+/** Everything the ORM needs to know about a @many2many field, whichever form
+  * declared it: the target model, the junction's raw table name and raw key
+  * columns, the junction model (void for the string form), and whether
+  * schemaSQL is to create the table.
+  *
+  * The one place both spellings are read, so prefetch, the links writer and
+  * the DDL generator cannot disagree about which column is which. A junction
+  * model's keys resolve through _colName, like every other column.
+  **/
+package(peque.orm) template _M2M(M, string memberName) {
+    import std.meta: Filter;
+
+    static assert(__traits(hasMember, M, memberName),
+        "'" ~ memberName ~ "' is not a field on " ~ M.stringof ~ ".");
+    alias F = __traits(getMember, M, memberName);
+    alias _udas = Filter!(_isM2MUDA, __traits(getAttributes, F));
+    static assert(_udas.length > 0,
+        "'" ~ memberName ~ "' on " ~ M.stringof ~ " does not have a @many2many UDA.");
+    alias _uda = _udas[0];
+
+    static if (is(_uda == many2many!(T, jt, sk, tk, j),
+                  T, string jt, string sk, string tk, Junction j)) {
+        alias Target        = T;
+        alias JunctionModel = void;
+        enum string table     = jt;
+        enum string selfCol   = sk;
+        enum string targetCol = tk;
+        enum bool   managed   = j == Junction.managed;
+    } else static if (is(_uda == many2many!(T, JM, sf, tf), T, JM, string sf, string tf)) {
+        static assert(hasUDA!(JM, model),
+            "@many2many!(" ~ T.stringof ~ ", " ~ JM.stringof ~ ") on " ~ M.stringof ~
+            "." ~ memberName ~ ": " ~ JM.stringof ~ " is not a @model struct.");
+        alias Target        = T;
+        alias JunctionModel = JM;
+        enum string table   = ormTableNameRaw!JM;
+        // schemaSQL already emits the junction as a model of its own.
+        enum bool   managed = false;
+
+        // Both FKs inferred from the junction's @many2one fields; a
+        // self-referential relation has two to the same model, so it names them.
+        private template _keyField(string given, Side, string role) {
+            static if (given.length > 0) {
+                static assert(_fieldColNameRaw!(JM, given)().length > 0,
+                    "@many2many on " ~ M.stringof ~ "." ~ memberName ~ ": '" ~ given ~
+                    "' is not a column field on " ~ JM.stringof ~ "." ~
+                    (_fieldForColumnName!JM(given).length
+                        ? " Did you mean '" ~ _fieldForColumnName!JM(given) ~
+                          "'? The keys are D field names, not SQL column names."
+                        : "") ~
+                    " Fields: " ~ _modelFieldNames!JM() ~ ".");
+                enum string _keyField = given;
+            } else {
+                enum _fks = _m2oFksFor!(JM, Side);
+                static assert(_fks.length == 1,
+                    "@many2many!(" ~ T.stringof ~ ", " ~ JM.stringof ~ ") on " ~
+                    M.stringof ~ "." ~ memberName ~ ": " ~ JM.stringof ~ " has " ~
+                    _fks.length.to!string ~ " @many2one fields targeting " ~
+                    Side.stringof ~ (_fks.length ? " (" ~ _joinMemberNames(_fks) ~ ")" : "") ~
+                    ", so the " ~ role ~ " key cannot be inferred. Name both: " ~
+                    "@many2many!(" ~ T.stringof ~ ", " ~ JM.stringof ~
+                    ", \"selfField\", \"targetField\").");
+                enum string _keyField = _fks[0].member;
+            }
+        }
+        enum string selfField   = _keyField!(sf, M, "self");
+        enum string targetField = _keyField!(tf, T, "target");
+        static assert(selfField != targetField,
+            "@many2many on " ~ M.stringof ~ "." ~ memberName ~ ": both keys resolve " ~
+            "to " ~ JM.stringof ~ "." ~ selfField ~ ".");
+        enum string selfCol   = _fieldColNameRaw!(JM, selfField)();
+        enum string targetCol = _fieldColNameRaw!(JM, targetField)();
+    }
 }

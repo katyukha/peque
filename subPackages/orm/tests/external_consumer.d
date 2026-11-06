@@ -34,6 +34,7 @@ private struct ExtSession {
     @field                 int    userId;
     @field @uniqueIndex(where: "NOT revoked") string slug;
     @field                 bool   revoked;
+    @many2many!(ExtTag, "ext_session_tag", "session_id", "tag_id") ExtTag[] tags;
 }
 
 @model("ext_tag")
@@ -91,6 +92,7 @@ private alias _RegistryProbe = _ExtRepoTpl!Connection;
 
 unittest {
     auto c = makeConn();
+    c.exec(`DROP TABLE IF EXISTS ext_session_tag`);
     c.exec(`DROP TABLE IF EXISTS ext_session`);
     c.exec(`DROP TABLE IF EXISTS ext_tag`);
     c.exec(schemaSQL!ExtReg());
@@ -132,11 +134,30 @@ unittest {
     assert(repo.query().where((F!(ExtSession, "userId") + 1).gt(0)).count() >= 1);
     assert(repo.query().select!ExtDTO().length >= 1);
     assert(!repo.query().first().isNull);
+    assert(repo.query().whereIn!"slug"([]).count() == 0);
+    // A SubQuery is opaque to a consumer, but flows through inSubquery.
+    auto live = repo.query().where!"revoked"(false).asSubquery!"id"();
+    assert(repo.query().where(F!(ExtSession, "id").inSubquery(live)).count() ==
+           repo.query().where!"revoked"(false).count());
+    static assert(!__traits(compiles, SubQuery!int("SELECT 1, 2", null)),
+        "a hand-built subquery cannot reach the EXISTS serialiser");
+
+    // The many2many writer: a Links handle built through the consumer's mixin,
+    // with its subquery-bounded form.
+    auto tagRepo = Repository!(ExtTag, Connection)(&c);
+    ExtTag t1; t1.name = "a";
+    auto tag = tagRepo.insert(t1);
+    auto links = repo.links!"tags"(saved.id);
+    assert(links.add([tag.id]) == 1);
+    auto change = links.within(tagRepo.query().where!"name"("a").asSubquery!"id"()).set([]);
+    assert(change.removed == [tag.id] && change.changed);
+    assert(links.clear() == 0);
 
     // DDL generation from outside the package.
     static assert(modelDDL!ExtSession().length > 0);
     static assert(schemaSQL!ExtReg().length > 0);
 
+    c.exec(`DROP TABLE IF EXISTS ext_session_tag`);
     c.exec(`DROP TABLE IF EXISTS ext_session`);
     c.exec(`DROP TABLE IF EXISTS ext_tag`);
 }

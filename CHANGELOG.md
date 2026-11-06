@@ -4,6 +4,124 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`links!"field"(parentId)` writes a `@many2many` relation** (`peque:orm`):
+  `add`, `remove`, `clear` (one statement each) and `set` (two: unlink then
+  link, so atomic only inside a transaction; returns a `RelationChange` naming
+  what was really linked and unlinked). Inputs are target ids
+  (`const(TargetKey)[]`) or a `SubQuery`; `within(subquery)` bounds all four,
+  so a link outside it is neither added nor removed. Unknown ids and parents
+  are ignored. See the README's *links!* section.
+
+- **`@many2many!(T, JunctionModel)`** names a junction model instead of a
+  table and two columns. Its keys are D field names, inferred from the model's
+  two `@many2one` fields unless both point at one model, and its DDL comes from
+  the model. `links!` refuses at compile time a junction model with no
+  `@uniqueTogether` (or a `@uniqueIndexTogether` without a `where`) on the pair.
+
+- **`Nullable!(T[])` as the type of a `@one2many` or `@many2many` field.** Null
+  until `prefetch!` fills it, empty afterwards when there are no rows.
+
+### Changed
+
+- **DMD 2.113 or newer is required** (breaking for older DMD; LDC unaffected).
+  DMD before 2.113 miscompiles a function returning a struct through the hidden
+  return slot when its return expression leaves a temporary with a destructor;
+  `repo.insert(r).id` could read freed stack memory. `dub.sdl` declares
+  `toolchainRequirements dmd=">=2.113.0"`, so DUB refuses those compilers.
+
+- **`orderBy(string)` takes column names only; raw SQL moves to
+  `orderByRaw`** (breaking, `peque:orm`). A comma-separated list of names, bare
+  or double-quoted, optionally qualified, each with optional `ASC`/`DESC` and
+  `NULLS FIRST`/`LAST`; anything else throws `QueryClientError`, so a sort
+  column taken from a request cannot inject SQL. A bare name that is one of the
+  model's columns is emitted as `_m.col`; a qualified name, or one the statement
+  outputs (an annotation, a `select!DTO` member), is emitted as written. A bare
+  value keyword such as `user` or `current_date` is refused, since PostgreSQL
+  would sort by the constant; quote it to name such a column.
+  `@defaultOrder` strings follow the same grammar at compile time. Migration:
+  `orderBy("lower(name)")` becomes `orderByRaw("lower(name)")`.
+
+- **The repository-level `enum string defaultOrder` override is removed**
+  (breaking, `peque:orm`). It applied to `findAll()` only, so one repository had
+  two default orders depending on the method called, and it could not express
+  `F!` terms. `findAll()` is `query().all()`.
+
+- **`prefetch!` orders each parent's children by the target's `@defaultOrder`**,
+  as the target's own `all()` would; a target without one arrives in server
+  order.
+
+- **`schemaSQL` creates the junction table of every string-form `@many2many`**
+  (breaking for a registry whose junction exists under a different shape: pass
+  `Junction.external` as the fifth UDA argument to keep it yours). The table is
+  emitted after all model tables with both foreign keys `ON DELETE CASCADE`, a
+  primary key on the pair and a reverse-order index; a relation declared from
+  both sides is emitted once, and two declarations disagreeing on the columns
+  are a compile error.
+
+- **`@many2many`'s key columns are required** (breaking). The empty defaults
+  emitted `j.""` and failed at the first `prefetch!`; leaving one out is now a
+  compile error naming both.
+
+- **`delete_()` and `update()` without a `where()` are refused** (breaking:
+  they now throw `QueryClientError`). A filter applied conditionally that ended
+  up absent deleted or rewrote every row. Affecting the whole table is spelled
+  `repo.query().where(Predicate.all).delete_()`.
+
+- **`fromPGText`'s parameter decides who owns the text.** A reader taking
+  `scope const(char)[]` is lent libpq's result buffer for the call, with no
+  allocation. Any other reader — `string`, `const(char)[]` without `scope`, or
+  `return scope` — is handed an immutable copy it may keep; a `string` reader
+  stores it without copying again. A non-`scope` or `return scope` slice used
+  to be lent memory freed with the `Result`, so a reader that kept it dangled.
+  A reader declared with mutable `char[]` is now a compile error naming the two
+  accepted signatures instead of "not callable". Existing readers keep working;
+  an unscoped `const(char)[]` reader now pays one allocation per value.
+
+- **`SubQuery`'s `sql` and `params` are no longer public** (breaking for code
+  that read them). Only `asSubquery!"field"()` builds one, so a hand-written
+  multi-column SELECT cannot reach the EXISTS membership test, which names a
+  single column.
+
+- **`listen()` refuses a pooled connection** (breaking: `QueryClientError`,
+  nothing reaches the server). It passes to other borrowers and is replaced
+  when a notification arrives while idle, so a subscription on it never
+  delivered; LISTEN on a dedicated `Connection`. A raw `exec("LISTEN …")` is
+  not caught.
+
+### Fixed
+
+- **Non-ASCII column names collided in generated index names and `load!`
+  aliases.** Only ASCII bytes were kept, so two Cyrillic columns produced one
+  index name and one join alias. Bytes above 0x7F are now identifier
+  characters, as PostgreSQL's lexer treats them; `orderBy(string)` and
+  `@defaultOrder` accept a bare non-ASCII name and fold only ASCII letters, as
+  the server does.
+
+- **A `load!` alias over 63 bytes was truncated by the server**, so hydration
+  missed the joined column, or left the relation empty when it was the primary
+  key. The alias is the relation field plus the column; one that long is now a
+  compile error naming both.
+
+- **A failed rollback at pool release was silent.** If the ROLLBACK of a
+  transaction a borrow left open could not be sent, the release returned
+  quietly and the borrow never learned its writes were gone. The connection is
+  now replaced and the failure reported as `QueryClientError`, like the open
+  transaction itself.
+
+- **`~F!(M, "f").inSubquery(sub)` returned no rows once the subquery yielded a
+  NULL** (breaking: NULL rows now land in the complement). It emitted SQL
+  `NOT IN`, which is never true when the set contains a NULL. Membership is now
+  `EXISTS` / `NOT EXISTS`, so `p` and `~p` split the rows exactly: a NULL is
+  simply not in the set, and a row whose own column is NULL is in the
+  complement, as Django's `exclude()` and EF Core return it.
+
+- **`whereIn!"f"([])` and `.contains([])` did not compile.** The literal `[]` is
+  a `void[]`; it now matches no rows, as an empty typed slice already did.
+
 ## [0.3.2] - 2026-10-29
 
 ### Added

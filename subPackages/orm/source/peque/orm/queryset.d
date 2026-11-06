@@ -17,7 +17,8 @@
   *  - whereIn!"field"(vals)   — type-safe IN clause
   *  - where(Predicate)        — composable predicate (F expressions, OR/AND/NOT)
   *  - whereRaw(sql, args...)  — raw SQL escape hatch (local $1/$2 renumbered)
-  *  - orderBy(clause)         — set ORDER BY
+  *  - orderBy(terms...)       — set ORDER BY (column names, F! terms)
+  *  - orderByRaw(sql)         — raw SQL ORDER BY (trusted)
   *  - limit(n)                — set LIMIT
   *  - offset(n)               — set OFFSET
   *  - set!(fieldName)(val)    — accumulate a SET assignment (for update())
@@ -62,7 +63,8 @@ private import peque.orm.sql;
 private import peque.orm.predicate;
 private import peque.orm.field: FieldBuilder, PathBuilder, AggBuilder, isAggBuilder, F, toOrdering;
 private import peque.orm.field: SetExpr, _isFieldBuilderType;
-private import peque.orm.ordering: Ordering, OrderKind, OrderDir, OrderNulls;
+private import peque.orm.ordering: Ordering, OrderKind, OrderDir, OrderNulls,
+    ParsedOrder, _parseOrderSpec;
 private import peque.orm.predicate: PathNode, LiteralNode, InSubqueryNode;
 private import peque.orm.subquery: SubQuery;
 private import std.sumtype: match;
@@ -72,17 +74,33 @@ private import std.sumtype: match;
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+// A @defaultOrder string, parsed with the same grammar as orderBy(string) —
+// at compile time, so a typo or an expression is a build error naming it.
+private template _defaultOrderString(M, string spec) {
+    private enum ParsedOrder _p = _parseOrderSpec(spec);
+    static assert(_p.ok,
+        "@defaultOrder!(\"" ~ spec ~ "\") on " ~ M.stringof ~ ": " ~ _p.error ~
+        ". A string here is a comma-separated list of column names, each with " ~
+        "optional ASC/DESC and NULLS FIRST/LAST; for a field reference use F!, " ~
+        "and order a query by an expression with orderByRaw().");
+    enum Ordering[] _defaultOrderString = _p.terms;
+}
+
 // Extract the default ORDER BY terms from the @defaultOrder UDA on M, or [].
-// Each UDA argument is normalized via toOrdering: a string becomes a raw term,
-// an F builder / Ordering becomes a managed field term.
+// A string argument is parsed into name terms, an F builder / Ordering becomes
+// a managed field term.
 private template _modelDefaultOrder(M) {
     static if (hasUDA!(M, defaultOrder)) {
         private static Ordering[] _compute() {
             Ordering[] terms;
             static foreach (uda; __traits(getAttributes, M)) {{
                 static if (is(uda) && is(uda == defaultOrder!fields, fields...)) {
-                    static foreach (f; fields)
-                        terms ~= toOrdering(f);
+                    static foreach (f; fields) {
+                        static if (is(typeof(f) == string))
+                            terms ~= _defaultOrderString!(M, f);
+                        else
+                            terms ~= toOrdering(f);
+                    }
                 }
             }}
             return terms;
@@ -91,6 +109,33 @@ private template _modelDefaultOrder(M) {
     } else {
         enum Ordering[] _modelDefaultOrder = [];
     }
+}
+
+unittest {
+    @model("dfo") @defaultOrder!("name DESC", "id") static struct Fine {
+        @primaryKey int id;
+        @field string name;
+    }
+    static assert(_modelDefaultOrder!Fine == [
+        Ordering(OrderKind.name, "name", OrderDir.desc), Ordering(OrderKind.name, "id")]);
+    @model("dfo") @defaultOrder!("lower(name)") static struct Expr {
+        @primaryKey int id;
+        @field string name;
+    }
+    static assert(!__traits(compiles, _modelDefaultOrder!Expr),
+        "an expression in @defaultOrder is refused at compile time");
+}
+
+// orderBy(string) at run time: the same grammar, refused with
+// QueryClientError — the text may be a request parameter.
+private Ordering[] _orderTermsOf(string spec) {
+    if (spec.length == 0) return [Ordering(OrderKind.raw, "")];   // suppresses ordering
+    auto p = _parseOrderSpec(spec);
+    enforce!QueryClientError(p.ok,
+        "orderBy(\"" ~ spec ~ "\"): " ~ p.error ~ ". orderBy(string) takes a " ~
+        "comma-separated list of column names, each with optional ASC/DESC and " ~
+        "NULLS FIRST/LAST; for an expression use orderByRaw().");
+    return p.terms;
 }
 
 // Extract the inner (non-Nullable) type from a @related field on M named jf.
@@ -161,11 +206,36 @@ private template _pathFkCol(M, string relName) {
 // in _prefetches.  Separate from QuerySet to avoid circular template issues.
 // ---------------------------------------------------------------------------
 
+// A to-many relation field is `T[]` or `Nullable!(T[])`; the latter tells
+// "never prefetched" (null) from "prefetched, no rows" (empty).
+private template _relElemType(FieldType) {
+    static if (is(FieldType == Nullable!U, U))
+        alias _relElemType = typeof(U.init[0]);
+    else
+        alias _relElemType = typeof(FieldType.init[0]);
+}
+
+private void _assignRel(FieldType, E)(ref FieldType field, E[] rows) {
+    static if (is(FieldType == Nullable!U, U))
+        field = nullable(rows);
+    else
+        field = rows;
+}
+
+// The target model's @defaultOrder as all() would emit it — the target table
+// is aliased `_m` for that — plus the LEFT JOINs a relation-path term needs.
+private string _prefetchOrderSQL(TargetM)(out string joins) {
+    _FilterJoin[] fjoins;
+    int idx = 0;
+    auto terms = _resolveOrderTerms!TargetM(_modelDefaultOrder!TargetM, fjoins, idx);
+    joins = _filterJoinSQL(fjoins);
+    return terms.length ? " ORDER BY " ~ terms : "";
+}
+
 private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
     import std.conv: to;
-    import std.array: join;
-    import peque.orm.sql: buildSelectList, ormTableName, ormPkColName,
-        ormPkFieldName, _findM2OFKColFor, _prefixedSelectList;
+    import peque.orm.sql: ormTableName, ormPkColName,
+        ormPkFieldName, _findM2OFKColFor, _prefixedSelectList, _M2M, _hasM2MUDA;
     import peque.hydration: _hydrateAnnotated;
 
     static foreach (memberName; FieldNameTuple!M) {{
@@ -193,9 +263,12 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                     alias InvFieldDecl = __traits(getMember, TargetM, invField);
                     enum fkCol = _sqlIdent(_colName!(InvFieldDecl, invField));
 
-                    string sql = "SELECT " ~ buildSelectList!TargetM() ~
-                                 " FROM "  ~ ormTableName!TargetM ~
-                                 " WHERE " ~ fkCol ~ " IN (" ~ placeholders ~ ")";
+                    string joins;
+                    auto orderBy = _prefetchOrderSQL!TargetM(joins);
+                    string sql = "SELECT " ~ _prefixedSelectList!(TargetM, "_m")() ~
+                                 " FROM "  ~ ormTableName!TargetM ~ " _m" ~ joins ~
+                                 " WHERE _m." ~ fkCol ~ " IN (" ~ placeholders ~ ")" ~
+                                 orderBy;
 
                     // Build PGValue[] array
                     PGValue[] pgParams;
@@ -204,9 +277,10 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
                     auto result = ctx.execParams(sql, pgParams);
 
                     // Bucket by FK, then assign: O(parents + children).
-                    // Children keep the child query's result order.
+                    // Children keep the child query's order: @defaultOrder,
+                    // else whatever PostgreSQL returned.
                     enum invFkField = invField;             // D field name on TargetM
-                    alias ElemType = typeof(FieldType.init[0]);
+                    alias ElemType = _relElemType!FieldType;
                     alias FkT      = typeof(__traits(getMember, TargetM, invFkField));
 
                     ElemType[][PkType] byFk;
@@ -226,71 +300,74 @@ private void _execPrefetch(M, Ctx, string relField)(ref M[] rows, Ctx* ctx) {
 
                     foreach (ref m; rows) {
                         auto p = __traits(getMember, m, ormPkFieldName!M()) in byFk;
-                        __traits(getMember, m, memberName) = p ? *p : ElemType[].init;
+                        _assignRel(__traits(getMember, m, memberName), p ? *p : ElemType[].init);
                     }
                 }
             }}
 
             // ---- @many2many ---------------------------------------------
-            static foreach (uda; __traits(getAttributes, __traits(getMember, M, memberName))) {{
-                static if (is(uda) && is(uda == many2many!(TargetM, jt, sk, tk), TargetM, string jt, string sk, string tk)) {
-                    alias PkType = typeof(__traits(getMember, M, ormPkFieldName!M()));
-                    PkType[] pks;
-                    bool[PkType] pkSeen;
-                    foreach (ref r; rows) {
-                        auto pk = __traits(getMember, r, ormPkFieldName!M());
-                        if (pk !in pkSeen) { pkSeen[pk] = true; pks ~= pk; }
-                    }
-                    if (pks.length == 0) return;
+            static if (_hasM2MUDA!(__traits(getMember, M, memberName))) {{
+                alias Rel     = _M2M!(M, memberName);
+                alias TargetM = Rel.Target;
+                alias PkType = typeof(__traits(getMember, M, ormPkFieldName!M()));
+                PkType[] pks;
+                bool[PkType] pkSeen;
+                foreach (ref r; rows) {
+                    auto pk = __traits(getMember, r, ormPkFieldName!M());
+                    if (pk !in pkSeen) { pkSeen[pk] = true; pks ~= pk; }
+                }
+                if (pks.length == 0) return;
 
-                    immutable placeholders = buildPlaceholderList(pks.length);
+                immutable placeholders = buildPlaceholderList(pks.length);
 
-                    enum targetPkCol = ormPkColName!TargetM();
-                    // Qualify target columns with alias `t`: the junction table
-                    // `j` commonly shares column names (e.g. `id`) with the
-                    // target, so an unqualified SELECT list would be ambiguous.
-                    // Alias the self-key to a fixed name distinct from any target
-                    // column so a self-referential m2m (junction key column name
-                    // colliding with a target column) still reads correctly.
-                    enum selfKeyAlias = "__peque_self_key";
-                    // Junction table and key columns come from the UDA verbatim,
-                    // so they need the same reserved-word quoting as model columns.
-                    enum jtSql = _sqlIdent(jt);
-                    enum skSql = _sqlIdent(sk);
-                    enum tkSql = _sqlIdent(tk);
-                    string sql =
-                        "SELECT " ~ _prefixedSelectList!(TargetM, "t")() ~
-                        ", j." ~ skSql ~ " AS " ~ selfKeyAlias ~
-                        " FROM " ~ ormTableName!TargetM ~ " t" ~
-                        " JOIN " ~ jtSql ~ " j ON j." ~ tkSql ~ " = t." ~ targetPkCol ~
-                        " WHERE j." ~ skSql ~ " IN (" ~ placeholders ~ ")";
+                enum targetPkCol = ormPkColName!TargetM();
+                // The target is `_m`: the junction `j` commonly shares column
+                // names with it (`id`), and `_m` is what the @defaultOrder
+                // resolver qualifies a bare column with. The self key gets a
+                // fixed alias no target column can collide with, which a
+                // self-referential junction otherwise would.
+                enum selfKeyAlias = "__peque_self_key";
+                // Junction table and key columns are raw names, so they need
+                // the same reserved-word quoting as model columns.
+                enum jtSql = _sqlIdent(Rel.table);
+                enum skSql = _sqlIdent(Rel.selfCol);
+                enum tkSql = _sqlIdent(Rel.targetCol);
+                string joins;
+                auto orderBy = _prefetchOrderSQL!TargetM(joins);
+                string sql =
+                    "SELECT " ~ _prefixedSelectList!(TargetM, "_m")() ~
+                    ", j." ~ skSql ~ " AS " ~ selfKeyAlias ~
+                    " FROM " ~ ormTableName!TargetM ~ " _m" ~
+                    " JOIN " ~ jtSql ~ " j ON j." ~ tkSql ~ " = _m." ~ targetPkCol ~
+                    joins ~
+                    " WHERE j." ~ skSql ~ " IN (" ~ placeholders ~ ")" ~
+                    orderBy;
 
-                    PGValue[] pgParams;
-                    foreach (pk; pks) pgParams ~= convertToPG(pk);
+                PGValue[] pgParams;
+                foreach (pk; pks) pgParams ~= convertToPG(pk);
 
-                    auto result = ctx.execParams(sql, pgParams);
+                auto result = ctx.execParams(sql, pgParams);
 
-                    // Bucket by the junction's self key, then assign. Each row is
-                    // hydrated once, even when several parents share a target.
-                    alias ElemType = typeof(FieldType.init[0]);
-                    // Resolve the self-key column once — a name lookup scans the
-                    // field list.
-                    auto selfKeyNum = result.fieldNumber(selfKeyAlias);
-                    enforce!QueryClientError(!selfKeyNum.isNull,
-                        "prefetch: junction self-key column '" ~ selfKeyAlias ~
-                        "' missing from the result");
-                    immutable selfKeyIdx = selfKeyNum.get;
+                // Bucket by the junction's self key, then assign. Each row is
+                // hydrated once, even when several parents share a target.
+                alias ElemType = _relElemType!FieldType;
+                // Resolve the self-key column once — a name lookup scans the
+                // field list.
+                auto selfKeyNum = result.fieldNumber(selfKeyAlias);
+                enforce!QueryClientError(!selfKeyNum.isNull,
+                    "prefetch: junction self-key column '" ~ selfKeyAlias ~
+                    "' missing from the result");
+                immutable selfKeyIdx = selfKeyNum.get;
 
-                    ElemType[][PkType] bySelfKey;
-                    foreach (i; 0 .. result.ntuples) {
-                        auto row = result.getRow(i);
-                        bySelfKey[row[selfKeyIdx].as!PkType] ~= row.as!TargetM;
-                    }
+                ElemType[][PkType] bySelfKey;
+                foreach (i; 0 .. result.ntuples) {
+                    auto row = result.getRow(i);
+                    bySelfKey[row[selfKeyIdx].as!PkType] ~= row.as!TargetM;
+                }
 
-                    foreach (ref m; rows) {
-                        auto p = __traits(getMember, m, ormPkFieldName!M()) in bySelfKey;
-                        __traits(getMember, m, memberName) = p ? *p : ElemType[].init;
-                    }
+                foreach (ref m; rows) {
+                    auto p = __traits(getMember, m, ormPkFieldName!M()) in bySelfKey;
+                    _assignRel(__traits(getMember, m, memberName), p ? *p : ElemType[].init);
                 }
             }}
         }
@@ -531,13 +608,87 @@ private string _orderSuffix(in Ordering ord) {
     return s;
 }
 
+// The output names a select!DTO emits — one `AS` alias per member, from the
+// same resolver both select!DTO paths use for the SELECT list. A static
+// immutable, not an enum: an enum array is re-allocated at every use.
+private template _dtoOutputNames(DTO) {
+    private static string[] _collect() {
+        string[] names;
+        static foreach (m; FieldNameTuple!DTO)
+            names ~= _resolveColName!(__traits(getMember, DTO, m), m);
+        return names;
+    }
+    static immutable string[] _dtoOutputNames = _collect();
+}
+
+/* Resolve a parsed ORDER BY name (OrderKind.name) to what PostgreSQL sees.
+ *
+ * A bare name that is one of M's columns becomes _m.<name>: emitted bare it is
+ * "ambiguous" as soon as a join brings in a table with the same column. Left
+ * as written: a qualified name, a name M has no column for (it may belong to
+ * a joined table), and one of `outputs`, the statement's SELECT output names,
+ * which SQL resolves before any input column — in a grouped query or a
+ * select!DTO, "amount" may mean an annotation rather than _m.amount.
+ *
+ * Byte loops only: a quoted name may hold any byte but a quote.
+ */
+private string _resolveOrderName(M)(string name, in string[] outputs = null) {
+    import std.algorithm.searching: canFind;
+    import std.ascii: toLower;
+
+    // Qualified: a '.' after the first identifier, which the parser shaped.
+    size_t closing = 0;
+    if (name[0] == '"') {
+        closing = 1;
+        while (name[closing] != '"') ++closing;
+        ++closing;
+    }
+    foreach (ch; name[closing .. $])
+        if (ch == '.') return name;
+
+    // The column as PostgreSQL resolves it: a quoted name exactly, an unquoted
+    // one folded to lower case.
+    string col;
+    if (name[0] == '"') {
+        col = name[1 .. $ - 1];
+    } else {
+        foreach (ch; name) col ~= toLower(ch);
+    }
+    if (outputs.canFind(col) || !_fieldForColumnName!M(col).length) return name;
+    return "_m." ~ name;
+}
+
+unittest {
+    @model("qro") static struct Qro {
+        @primaryKey int id;
+        @field string name;
+        @field("Mixed") string mixed;
+    }
+    alias r = _resolveOrderName!Qro;
+    assert(r("name")      == "_m.name");
+    assert(r("NAME")      == "_m.NAME",     "unquoted folds to lower case");
+    assert(r(`"Mixed"`)   == `_m."Mixed"`);
+    assert(r("mixed")     == "mixed",       "unquoted folds, so this is not the Mixed column");
+    assert(r("partner_name") == "partner_name", "not M's column: may belong to a joined table");
+    assert(r("_m.name")   == "_m.name",     "qualified: as written");
+    assert(r("j0.name")   == "j0.name");
+    assert(r(`"T".name`)  == `"T".name`);
+    assert(r(`"a.b"`)     == `"a.b"`,        "a dot inside quotes is not a qualifier");
+    assert(r("\"\xff\"")   == "\"\xff\"",      "a malformed byte inside quotes is passed, not decoded");
+    assert(r(`"x".name`)  == `"x".name`);
+    // An output name wins over the input column, as it does in SQL.
+    assert(r("name", ["name"]) == "name");
+    assert(r("id",   ["name"]) == "_m.id");
+}
+
 // Resolve a single Ordering term to a SQL fragment, registering join(s) for
 // `path` terms via the same fjoins/idx used by where-predicate resolution.
 private string _resolveOrdering(M, JoinFields...)(
-    in Ordering ord, ref _FilterJoin[] fjoins, ref int idx)
+    in Ordering ord, ref _FilterJoin[] fjoins, ref int idx, in string[] outputs = null)
 {
     final switch (ord.kind) {
         case OrderKind.raw:    return ord.expr;
+        case OrderKind.name:   return _resolveOrderName!M(ord.expr, outputs) ~ _orderSuffix(ord);
         case OrderKind.column: return ord.expr ~ _orderSuffix(ord);
         case OrderKind.path:
             return _resolvePathToCol!(M, JoinFields)(ord.expr, fjoins, idx) ~ _orderSuffix(ord);
@@ -545,13 +696,13 @@ private string _resolveOrdering(M, JoinFields...)(
 }
 
 // Resolve a list of Ordering terms into a comma-separated ORDER BY body.
-// Empty/blank fragments are dropped so a single raw "" term suppresses ordering.
+// Empty fragments are dropped: the raw "" term from orderBy("") orders nothing.
 private string _resolveOrderTerms(M, JoinFields...)(
-    in Ordering[] terms, ref _FilterJoin[] fjoins, ref int idx)
+    in Ordering[] terms, ref _FilterJoin[] fjoins, ref int idx, in string[] outputs = null)
 {
     string result;
     foreach (ref ord; terms) {
-        auto frag = _resolveOrdering!(M, JoinFields)(ord, fjoins, idx);
+        auto frag = _resolveOrdering!(M, JoinFields)(ord, fjoins, idx, outputs);
         if (!frag.length) continue;
         if (result.length) result ~= ", ";
         result ~= frag;
@@ -560,7 +711,8 @@ private string _resolveOrderTerms(M, JoinFields...)(
 }
 
 // Compile-time-validated order spec → Ordering. A leading '-' means descending.
-// Field references (not raw SQL — use orderBy(string) for raw), validated against
+// Field references (not column names or SQL — see orderBy(string) and
+// orderByRaw), validated against
 // the model end to end: plain names against M's columns; join paths validate every
 // relation segment and the final leaf column on the target model.
 private Ordering _ctOrderSpec(M, string spec)() {
@@ -572,7 +724,8 @@ private Ordering _ctOrderSpec(M, string spec)() {
         "orderBy!(\"" ~ spec ~ "\") has no field name after '-'");
     static assert(indexOf(_name, ' ') < 0,
         "orderBy!(\"" ~ spec ~ "\") must be a bare field name or join path (no spaces"
-        ~ " or SQL). Use orderBy(\"...\") for raw SQL.");
+        ~ " or SQL). Use orderBy(\"col DESC\") for a column name with a direction, or"
+        ~ " orderByRaw() for SQL.");
     static if (indexOf(_name, '.') >= 0) {
         static assert(_assertOrderPath!(M, spec, _name));
         return Ordering(OrderKind.path, _name, _dir);
@@ -880,6 +1033,10 @@ if (isModel!M && isQueryContext!Ctx) {
       * sqlFrag uses local $1/$2/… numbering — placeholders are renumbered
       * relative to prior filters at SQL build time.
       *
+      * Columns in sqlFrag are not qualified for you. Once the query joins
+      * another table (load!, F!"rel.field"), write the model's own columns as
+      * `_m.col`, or a name both tables have is "ambiguous".
+      *
       * Security: sqlFrag is embedded in the query verbatim — never pass
       * user-controlled input as sqlFrag.  All runtime values must go through
       * the variadic args, which are bound as PostgreSQL parameters ($N).
@@ -900,7 +1057,7 @@ if (isModel!M && isQueryContext!Ctx) {
     // There are two `orderBy` overloads, disambiguated by HOW they are called,
     // not by a template constraint:
     //  - the RUNTIME form below, `orderBy(values…)`, takes ordinary call
-    //    arguments and matches `orderBy(F!"x".desc)`, `orderBy("raw")`, etc.
+    //    arguments and matches `orderBy(F!"x".desc)`, `orderBy("name DESC")`, etc.
     //  - the COMPILE-TIME form, `orderBy!("field"…)`, takes explicit template
     //    value arguments and no runtime arguments.
     // `orderBy!("x")` cannot bind the runtime overload (a string value can't be
@@ -911,33 +1068,62 @@ if (isModel!M && isQueryContext!Ctx) {
     /** Override the ORDER BY clause with one or more terms.
       *
       * Each argument is one of:
-      *  - a raw SQL `string` — passed through verbatim (escape hatch);
+      *  - a `string` of column names: a comma-separated list, each bare or
+      *    double-quoted, optionally qualified, with optional ASC/DESC and
+      *    NULLS FIRST/LAST. Anything else — an expression, a comment — is
+      *    refused with QueryClientError, so a sort column taken from a request
+      *    cannot carry SQL; an expression goes through orderByRaw.
       *  - an `F` builder — `F!"field"` / `F!"partner.name"` (ascending), or
       *    `.desc`, optionally chained `.nullsFirst`/`.nullsLast`;
       *  - an `Ordering` value.
       *
-      * Field references via `F` are resolved against the model (camelCase →
-      * column, implicit LEFT JOINs for join paths). Raw strings are NOT parsed
-      * or resolved — they are emitted as-is.
+      * `F` terms resolve against the model (camelCase → column, LEFT JOINs for
+      * join paths). A bare column name of this model is qualified as `_m.col`
+      * so a join cannot make it ambiguous; a name the statement outputs (a
+      * select!DTO member, an annotation) is left to SQL, and so is any other,
+      * which may belong to a joined table.
       *
       * Pass a single `""` to suppress all ordering (overrides @defaultOrder).
-      *
-      * Security: a raw `string` is embedded verbatim — never pass
-      * user-controlled input. For compile-time-validated field ordering see the
-      * `orderBy!("field", "-other")` form below.
+      * For compile-time-validated field ordering see
+      * `orderBy!("field", "-other")` below.
       *
       * ---
       * repo.query().orderBy(F!"createdAt".desc, F!"name")
-      * repo.query().orderBy("priority DESC NULLS LAST")        // raw
+      * repo.query().orderBy("priority DESC NULLS LAST, id")
       * repo.query().orderBy(F!"partner.name")                  // join path
+      * repo.query().orderBy(req.query.get("sort", "name"))     // cannot inject
       * ---
       **/
     QuerySet!(M, Ctx, JoinFields) orderBy(Specs...)(Specs specs)
     if (Specs.length >= 1) {
         auto qs = this;
         qs._orderByTerms = [];
-        static foreach (i; 0 .. Specs.length)
-            qs._orderByTerms ~= toOrdering(specs[i]);
+        static foreach (i; 0 .. Specs.length) {
+            static if (is(Specs[i] : const(char)[]))
+                qs._orderByTerms ~= _orderTermsOf(specs[i].to!string);
+            else
+                qs._orderByTerms ~= toOrdering(specs[i]);
+        }
+        return qs;
+    }
+
+    /** Raw SQL ORDER BY — the escape hatch for an expression.
+      *
+      * `sql` replaces the whole clause and is embedded verbatim, nothing
+      * qualified: once the query joins another table (load!, F!"rel.field"),
+      * write the model's own columns as `_m.col`, or a name both tables have
+      * is "ambiguous".
+      *
+      * Security: never pass user-controlled input. A sort column chosen at
+      * run time goes through orderBy(string), which admits column names only.
+      *
+      * ---
+      * repo.query().orderByRaw("lower(name), id DESC")
+      * ---
+      **/
+    QuerySet!(M, Ctx, JoinFields) orderByRaw(string sql) {
+        auto qs = this;
+        qs._orderByTerms = [Ordering(OrderKind.raw, sql)];
         return qs;
     }
 
@@ -950,7 +1136,8 @@ if (isModel!M && isQueryContext!Ctx) {
       * repo.query().orderBy!("-createdAt", "name")  // createdAt DESC, name ASC
       * repo.query().orderBy!("partner.name")        // join path, fully validated
       * ---
-      * For raw SQL or NULLS placement, use the runtime `orderBy(...)` form.
+      * For NULLS placement use the runtime `orderBy(...)` form; for an
+      * expression, orderByRaw.
       **/
     QuerySet!(M, Ctx, JoinFields) orderBy(specs...)()
     if (specs.length >= 1) {
@@ -1136,10 +1323,10 @@ if (isModel!M && isQueryContext!Ctx) {
       *
       * Returns the same QuerySet type (JoinFields unchanged).
       *
-      * ORDER: the fetched children arrive in whatever order PostgreSQL returns
-      * them. No ORDER BY is emitted and the target model's @defaultOrder is NOT
-      * applied, so the order is undefined and may change between runs. Sort the
-      * array yourself if it matters.
+      * ORDER: the children of each parent follow the target model's
+      * @defaultOrder, as its own all() would. A target without one arrives in
+      * whatever order PostgreSQL returns, which may change between runs; sort
+      * the array yourself if it matters.
       *
       * Example:
       * ---
@@ -1159,14 +1346,7 @@ if (isModel!M && isQueryContext!Ctx) {
             }}
             return found;
         }();
-        enum bool _hasM2M = () {
-            bool found = false;
-            static foreach (uda; __traits(getAttributes, RelFieldDecl)) {{
-                static if (is(uda) && is(uda == many2many!(T, jt, sk, tk), T, string jt, string sk, string tk))
-                    found = true;
-            }}
-            return found;
-        }();
+        enum bool _hasM2M = _hasM2MUDA!RelFieldDecl;
         static assert(_hasO2M || _hasM2M,
             "'" ~ relField ~ "' on " ~ M.stringof ~
             " does not have @one2many or @many2many UDA");
@@ -1260,10 +1440,11 @@ if (isModel!M && isQueryContext!Ctx) {
     // model's @defaultOrder — registering any LEFT JOIN a join-path term needs
     // into fjoins/idx. Returns "" when there is nothing to order by. Shared by
     // all() and select!DTO so the two paths cannot diverge.
-    private string _resolveOrderBySql(ref _FilterJoin[] fjoins, ref int idx) {
+    private string _resolveOrderBySql(
+            ref _FilterJoin[] fjoins, ref int idx, in string[] outputs = null) {
         enum Ordering[] _defTerms = _modelDefaultOrder!M;
         Ordering[] terms = _orderByTerms.length ? _orderByTerms : _defTerms;
-        return _resolveOrderTerms!(M, JoinFields)(terms, fjoins, idx);
+        return _resolveOrderTerms!(M, JoinFields)(terms, fjoins, idx, outputs);
     }
 
     /** One LEFT JOIN onto the table behind a @related field.
@@ -1554,7 +1735,8 @@ if (isModel!M && isQueryContext!Ctx) {
       * T is the D type of that field, inferred at compile time.
       *
       * Pass the result to F!(M, "f").inSubquery(sub) or F!"f".inSubquery(sub)
-      * to embed it as col IN (SELECT ...) in another QuerySet's WHERE clause.
+      * for membership in another QuerySet's WHERE clause, serialised as
+      * EXISTS so a NULL on either side is simply "not in the set".
       *
       * Example:
       * ---
@@ -1601,11 +1783,22 @@ if (isModel!M && isQueryContext!Ctx) {
             "the limit) and filter on that instead.");
     }
 
+    // A where() applied conditionally that ends up absent would otherwise reach
+    // every row, on a destructive statement. Every where-family builder appends
+    // to _wheres, so the whole-table form is still one call away, spelled out.
+    private void _requireFilter(string what) {
+        enforce!QueryClientError(_wheres.length > 0,
+            what ~ " without a where() would affect every row of " ~
+            ormTableName!M ~ ". If that is what you mean, say so: " ~
+            ".where(Predicate.all)." ~ what);
+    }
+
     /** Delete all matching rows and return the number of rows deleted.
       *
-      * WITHOUT a where() this deletes EVERY row in the table — there is no
-      * accidental-truncation guard. `repo.query().delete_()` is a valid way to
-      * empty a table; make sure that is what you meant.
+      * Refused without a filter: a missing where() is a QueryClientError, so a
+      * conditionally applied where() that ends up absent cannot empty the
+      * table. Emptying it on purpose is spelled
+      * `repo.query().where(Predicate.all).delete_()`.
       *
       * When the WHERE clause needs joins (F!"rel.field" predicates or a
       * load!/joinOne! alias), matching rows are selected by primary key in a
@@ -1615,6 +1808,7 @@ if (isModel!M && isQueryContext!Ctx) {
       **/
     long delete_() {
         _rejectLimitOffset("delete_()");
+        _requireFilter("delete_()");
         Predicate[] resolved;
         string joinsSQL, orderBySql;
         _resolveQuery(resolved, joinsSQL, orderBySql);
@@ -1637,11 +1831,10 @@ if (isModel!M && isQueryContext!Ctx) {
 
     /** Execute a partial / bulk UPDATE using accumulated set!() assignments.
       *
-      * WITHOUT a where() this rewrites EVERY row in the table — there is no
-      * guard, exactly as in delete_(). `repo.query().set!"active"(false).update()`
-      * is a valid way to reset a column across the table; make sure that is what
-      * you meant. A missing set!() is a QueryClientError rather than a silent
-      * no-op, but a missing where() cannot be told apart from an intended one.
+      * Refused without a filter, exactly as delete_() is: resetting a column
+      * across the table is spelled
+      * `repo.query().where(Predicate.all).set!"active"(false).update()`. A
+      * missing set!() is a QueryClientError too, rather than a silent no-op.
       *
       * Builds: UPDATE table SET col1=$1, col2=$2 WHERE (renumbered_where)
       * Set values are bound as $1..$N; WHERE params follow as $(N+1)..$(N+M).
@@ -1661,6 +1854,7 @@ if (isModel!M && isQueryContext!Ctx) {
     long update() {
         enforce!QueryClientError(_sets.length > 0, "update() called with no set!() assignments");
         _rejectLimitOffset("update()");
+        _requireFilter("update()");
 
         Predicate[] resolved;
         string joinsSQL, orderBySql;
@@ -1754,7 +1948,7 @@ if (isModel!M && isQueryContext!Ctx) {
 
         // Resolve orderBy terms now — before filter joins are emitted below —
         // so any join a `path` term needs is included in the FROM clause.
-        string orderBySql = _resolveOrderBySql(fjoins, fjIdx);
+        string orderBySql = _resolveOrderBySql(fjoins, fjIdx, _dtoOutputNames!DTO);
 
         // Build SELECT list. Both the column and the AS alias are quoted:
         // hydration looks the DTO member up case-exactly, and a bare alias
@@ -2008,8 +2202,9 @@ if (is(QS == QuerySet!Args, Args...)) {
         return g;
     }
 
-    /** ORDER BY — accepts the same terms as QuerySet.orderBy (raw strings,
-      * F builders, Ordering values) plus aggregate builders' .asc/.desc:
+    /** ORDER BY — accepts the same terms as QuerySet.orderBy (column-name
+      * strings, F builders, Ordering values) plus aggregate builders'
+      * .asc/.desc:
       * ---
       * .orderBy(F!(Invoice, "amount").sum.desc)
       * ---
@@ -2020,6 +2215,13 @@ if (is(QS == QuerySet!Args, Args...)) {
     if (OSpecs.length >= 1) {
         auto g = this;
         g._base = _base.orderBy(specs);
+        return g;
+    }
+
+    /// Raw SQL ORDER BY, as QuerySet.orderByRaw — trusted text only.
+    typeof(this) orderByRaw(string sql) {
+        auto g = this;
+        g._base = _base.orderByRaw(sql);
         return g;
     }
 
@@ -2093,7 +2295,8 @@ if (is(QS == QuerySet!Args, Args...)) {
 
         // Only explicit orderBy terms — no @defaultOrder fallback here.
         string orderBySql =
-            _resolveOrderTerms!(M, JoinFields)(_base._orderByTerms, fjoins, fjIdx);
+            _resolveOrderTerms!(M, JoinFields)(_base._orderByTerms, fjoins, fjIdx,
+                                               _dtoOutputNames!DTO);
 
         Predicate[] resolvedHavings;
         foreach (ref p; _havings)

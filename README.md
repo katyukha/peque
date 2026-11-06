@@ -89,9 +89,12 @@ assigned at `CREATE EXTENSION` time, so it is not a compile-time constant;
 where inference is not enough, such as `ST_Distance($1, $2)`, return an oid
 resolved at runtime or cast in the SQL (`$1::geometry`).
 
-- **Copy the text.** It points into libpq's result buffer, which is freed with
-  the `Result`; `scope` cannot enforce this, so a reader that keeps the slice
-  compiles and then dangles.
+- **The parameter says who owns the text.** With `scope const(char)[]`, as
+  above, the reader borrows libpq's result buffer for the call: it parses the
+  text, and nothing is allocated. A reader that keeps the text declares
+  `fromPGText(string text, PGType oid)` instead and is handed an immutable copy
+  it can store as is. A `const(char)[]` without `scope` makes no promise, so it
+  gets the copy too.
 - **`oid` is `PGType.GUESS` for array elements**, so a reader cannot tell types
   apart by oid inside an array.
 - **Attributes are inferred.** `@safe` hooks give a `@safe` conversion, also
@@ -222,23 +225,21 @@ all, such as a business date, which belongs in `Date`.
 `dub.json`:
 ```json
 "dependencies": {
-    "peque": "~>0.2.0"
+    "peque": "~>0.3.0"
 }
 ```
 
 `dub.sdl`:
 ```
-dependency "peque" version="~>0.2.0"
+dependency "peque" version="~>0.3.0"
 ```
 
-Sub-packages are opt-in. Note that `peque:orm` and `peque:migrate` are not part
-of any tagged release yet — they land in the next one; until then depend on the
-repository directly if you want them:
+Sub-packages are opt-in:
 
 ```
-dependency "peque:orm"     version="~>0.2.0"   // ORM layer
-dependency "peque:migrate" version="~>0.2.0"   // migration runner
-dependency "peque:vibe"    version="~>0.2.0"   // vibe.d integration
+dependency "peque:orm"     version="~>0.3.0"   // ORM layer
+dependency "peque:migrate" version="~>0.3.0"   // migration runner
+dependency "peque:vibe"    version="~>0.3.0"   // vibe.d integration
 ```
 
 Choose a configuration depending on how you want to link `libpq`:
@@ -247,6 +248,10 @@ Choose a configuration depending on how you want to link `libpq`:
 |---|---|
 | `libraryStatic` | Static library — links `libpq` directly |
 | `libraryDynamic` | Dynamic library — loads `libpq` at runtime via `bindbc-loader` |
+
+Compilers: DMD 2.113 or newer, or LDC 1.41 or newer. DMD before 2.113
+miscompiles struct returns such as `repo.insert(r)`, so `.id` on the result can
+read freed memory; DUB refuses to build peque with it.
 
 ## Quick start
 
@@ -403,8 +408,11 @@ struct Partner {
 
 A bare `@field` maps the member to its `snake_case` column: `createdAt` is the
 column `created_at`. Runs of capitals stay whole, so `myURL` is `my_url`, not
-`my_u_r_l`. Name the column explicitly whenever the conversion is not what you
-want — that is also how you address a legacy or mixed-case schema:
+`my_u_r_l`. Only ASCII letters take part: a non-ASCII member such as `назва`
+maps to the column `назва` as written, which is also how PostgreSQL treats an
+unquoted non-ASCII name — an identifier character, case kept. Name the column
+explicitly whenever the conversion is not what you want — that is also how you
+address a legacy or mixed-case schema:
 
 ```d
 @model("res_partner")
@@ -599,7 +607,9 @@ database-side default are different features.)
 ### Registry and schema
 
 A `Registry` maps models to repository templates. `schemaSQL` generates
-`CREATE TABLE` statements for every model in the registry.
+`CREATE TABLE` statements for every model in the registry, followed by the
+junction tables its string-form `@many2many` fields name (see
+[The junction table](#the-junction-table)).
 
 ```d
 alias AppReg = Registry!(Bind!(Partner, ModelRepo!Partner));
@@ -778,7 +788,8 @@ the database; a terminal method sends the query.
 // All active partners
 auto active = repo.query().where!"active"(true).all();
 
-// Filtered, ordered, paginated
+// Filtered, ordered, paginated. orderBy(string) admits column names only
+// (with ASC/DESC, NULLS FIRST/LAST), so a sort column from a request is safe.
 auto page = repo.query()
     .where!"active"(true)
     .orderBy("name ASC")
@@ -801,8 +812,9 @@ auto first = repo.query().where!"name"("Acme Ltd").first();
 // relation-path predicates like F!"partner.name".isNull (LEFT JOIN semantics).
 long deleted = repo.query().where!"active"(false).delete_();
 
-// Without a where() these affect EVERY row — there is no truncation guard.
-// repo.query().delete_() empties the table; make sure that is what you meant.
+// Without a where() both are refused with QueryClientError, so a filter applied
+// conditionally that ends up absent cannot empty the table. Affecting every row
+// is spelled out: repo.query().where(Predicate.all).delete_().
 // Neither accepts limit()/offset(): PostgreSQL has no row bound on DELETE or
 // UPDATE, so peque rejects the combination rather than silently ignoring it.
 
@@ -901,7 +913,7 @@ struct Partner {
     // prefetch!, empty otherwise.
     @one2many!(Invoice, "partnerId") Invoice[] invoices;
 
-    // Many-to-many through a junction table.
+    // Many-to-many through a junction table, which schemaSQL creates.
     @many2many!(Tag, "partner_tag_rel", "partner_id", "tag_id") Tag[] tags;
 }
 
@@ -923,7 +935,17 @@ struct Invoice {
 | `@many2one!(T)` | many | yes — the FK | always (it is a column) |
 | `@related` | many | no | `load!` / `joinOne!` |
 | `@one2many!(T, "fk")` | one | no | `prefetch!` |
-| `@many2many!(T, junction, selfKey, targetKey)` | — | no | `prefetch!` |
+| `@many2many!(T, "junction", "self_key", "target_key")` | — | no | `prefetch!`; written by `links!` |
+| `@many2many!(T, JunctionModel)` | — | no | same, through a junction model |
+
+A to-many field declared `Nullable!(T[])` instead of `T[]` is null until a
+`prefetch!` fills it, and empty afterwards when there are no rows — so code
+can refuse to act on a record nobody loaded instead of mistaking "not loaded"
+for "none":
+
+```d
+@many2many!(Tag, "partner_tag_rel", "partner_id", "tag_id") Nullable!(Tag[]) tags;
+```
 
 #### `load!` — one query, LEFT JOIN
 
@@ -976,9 +998,108 @@ auto partners = partnerRepo.query()
 // partners[0].invoices and .tags are filled
 ```
 
-The order of prefetched children is **undefined** — no `ORDER BY` is emitted and
-the child model's `@defaultOrder` is not applied. Sort the array yourself if it
-matters.
+Each parent's children follow the child model's `@defaultOrder`, as the child's
+own `all()` would. A child model without one arrives in whatever order
+PostgreSQL returns, which may change between runs; sort the array yourself if
+it matters.
+
+#### `links!` — writing a many-to-many
+
+A repository hands out a handle for one parent's links on one `@many2many`
+field. It takes target ids rather than records, which is what a form holds:
+
+```d
+auto l = partnerRepo.links!"tags"(partner.id);
+
+l.add([vip.id, gold.id]);          // rows really inserted: 2, then 0 on a repeat
+l.remove([gold.id]);               // rows really deleted
+auto change = l.set([vip.id, new_.id]);
+change.added;                      // [new_.id] — only what was really linked
+change.removed;                    // []        — vip was already there
+change.changed;                    // true
+l.clear();
+
+// Server-side inputs: the ids never leave the database.
+auto active = tagRepo.query().where!"active"(true).asSubquery!"id"();
+l.add(active);
+l.remove(active);
+
+// Bounded: only rows the universe contains can be linked or unlinked — not
+// even set or clear touch a link outside it.
+l.within(active).set(ids);
+```
+
+The rules:
+
+- An id that names no target row, or a row outside `within`, is ignored, not an
+  error: an option deleted between rendering a form and submitting it must not
+  fail the save. An unknown parent id is a no-op with an empty change.
+- A link outside `within` is never removed, not even by `set([])` or `clear()`.
+  A form cannot show a link its user may not see, so an id missing from its
+  submission is one that could never be ticked, not one that was unticked.
+- Duplicates in `ids` count once. `set([])` unlinks everything in the universe.
+- Another parent's links are never touched.
+
+`add`, `remove` and `clear` are one statement each, idempotent, and safe under
+concurrency: two callers racing on one parent end with every link both asked
+for, none twice. `set` is two statements — unlink what `ids` lacks, then link what it
+adds — so it is atomic only inside a transaction, and two concurrent `set`s on
+one parent can leave a mix of both lists (never a duplicate or a dangling
+link). A caller who needs more runs it under `IsolationLevel.serializable` and
+retries on `isRetriable()`.
+
+#### The junction table
+
+A string-form `@many2many` names a table no model describes, so `schemaSQL`
+creates it — after every model table, since its foreign keys point at two of
+them:
+
+```sql
+CREATE TABLE IF NOT EXISTS "partner_tag_rel" (
+    "partner_id" INTEGER NOT NULL REFERENCES "res_partner"("id") ON DELETE CASCADE,
+    "tag_id"     INTEGER NOT NULL REFERENCES "tag"("id")         ON DELETE CASCADE,
+    PRIMARY KEY ("partner_id", "tag_id")
+);
+CREATE INDEX IF NOT EXISTS idx_partner_tag_rel_tag_id_partner_id
+    ON "partner_tag_rel" ("tag_id", "partner_id");
+```
+
+The composite primary key is the unique constraint `links!` relies on and the
+index a `prefetch!` from this side uses; the reverse index serves a `prefetch!`
+from the other side. A relation declared from both sides over one junction is
+emitted once; two declarations that disagree on its columns are a compile
+error. Pass `Junction.external` as a fifth argument when the table exists
+already — created elsewhere, or an updatable view — and keeping it unique on
+the pair is then your job:
+
+```d
+@many2many!(Tag, "partner_tag_view", "partner_id", "tag_id", Junction.external) Tag[] tags;
+```
+
+When the junction carries columns of its own, make it a model and name that
+model instead. Its DDL, indexes and constraints then come from the model like
+any other, the keys are D field names resolved like every other column, and
+`links!` refuses at compile time a junction model with no
+`@uniqueTogether` (or `@uniqueIndexTogether`) on the pair. `links!` inserts
+only the two keys, so every other column needs a default — a membership
+table with a required `role` is not a many-to-many case:
+
+```d
+@model("partner_group_rel")
+@uniqueTogether!("partnerId", "groupId")
+@indexTogether!("groupId", "partnerId")
+struct PartnerGroup {
+    @primaryKey                            int id;
+    @many2one!(Partner, OnDelete.cascade)  int partnerId;
+    @many2one!(Group,   OnDelete.cascade)  int groupId;
+}
+
+// Keys inferred from the two @many2one fields …
+@many2many!(Group, PartnerGroup) Group[] groups;
+
+// … unless both point at the same model, as in a self-referential relation.
+@many2many!(Person, Friendship, "personId", "friendId") Person[] friends;
+```
 
 ### Aggregation
 
@@ -1099,15 +1220,25 @@ repo.query().where(F!"id".gte(10)).all();
 ### Raw SQL escape hatch
 
 `whereRaw` embeds a SQL fragment verbatim — placeholders use local `$1`/`$2`
-numbering and are renumbered automatically relative to prior filters.
+numbering and are renumbered automatically relative to prior filters. Its
+columns are not qualified for you: once the query joins another table (`load!`,
+`F!"rel.field"`), write the model's own columns as `_m.col`, or a name both
+tables have is ambiguous. `orderByRaw` is the same hatch for ORDER BY.
 
 ```d
 repo.query().whereRaw("tsv @@ to_tsquery($1)", "acme & corp").all();
+repo.query().orderByRaw("lower(name), id DESC").all();
 ```
 
-**Security:** `sqlFrag` is embedded in the query verbatim — never pass
-user-controlled input as the first argument. All runtime values must go through
-the variadic args.
+**Security:** both fragments are embedded verbatim — never pass user-controlled
+input to them. Runtime values go through `whereRaw`'s variadic args; a sort
+column chosen at run time goes through `orderBy(string)`, which admits column
+names only (bare or double-quoted, optionally qualified, with `ASC`/`DESC` and
+`NULLS FIRST`/`LAST`) and refuses anything else with `QueryClientError`. A bare
+name that is one of the model's columns is qualified as `_m.col`, so a join
+cannot make it ambiguous; a name the statement outputs (an annotation, a
+`select!DTO` member) is left to SQL. `@defaultOrder` strings follow the same
+grammar at compile time.
 
 ### EXISTS subqueries
 
@@ -1145,9 +1276,17 @@ Note: single-level `exists!()` only. Nested `exists!()` calls conflict on the
 ### IN subqueries
 
 `asSubquery!"field"()` captures a QuerySet as a single-column subquery atom
-without hitting the database. Pass it to `F!(M,"field").inSubquery()` for
-`IN (SELECT …)`, or negate with `~` for `NOT IN`. The subquery keeps the
-QuerySet's ORDER BY (explicit or `@defaultOrder`), so
+without hitting the database. Pass it to `F!(M,"field").inSubquery()` to
+match rows in that set, or negate with `~` for the rows outside it. The two
+split the table exactly, which SQL's `IN` / `NOT IN` do not: a single NULL in
+the subquery makes `NOT IN` match nothing, and a row whose own column is NULL
+falls out of both. peque emits `EXISTS` / `NOT EXISTS` instead, so a NULL is
+simply not in the set — "owners with no items" stays correct when some item has
+no owner, and that orphan item counts as outside every set. Note the asymmetry
+with literal values: `~F!"col".contains([1, 2])` and `~F!"col"(x)` keep SQL's
+three-valued logic and drop rows whose column is NULL, so swapping a literal id
+list for an equivalent subquery changes what a negated filter returns. The
+subquery keeps the QuerySet's ORDER BY (explicit or `@defaultOrder`), so
 `orderBy(F!"amount".desc).limit(5).asSubquery!"id"()` really is "ids of the
 top 5 by amount", not 5 arbitrary rows.
 
@@ -1350,7 +1489,7 @@ vibe.d applications. Instead of blocking the OS thread while waiting for
 PostgreSQL, control yields to the vibe.d event loop.
 
 ```d
-dependency "peque:vibe" version="~>0.2.0"
+dependency "peque:vibe" version="~>0.3.0"
 ```
 
 ```d
@@ -1373,6 +1512,15 @@ auto result = pool.borrow((ref Connection conn) {
     return conn.execParams("SELECT name FROM users WHERE id = $1", userId);
 });
 ```
+
+A release undoes one thing: a transaction left open is rolled back and
+reported as `QueryClientError`. Any other session state a borrow sets —
+`SET ROLE`, `search_path`, advisory locks, temp tables, prepared statements —
+stays on the connection and reaches the next borrower, so undo it before
+returning, or scope it to a transaction with `SET LOCAL`. peque does not
+`DISCARD ALL` on release: that is a round trip per borrow, and it would reset
+the session time zone the connection pinned. The same holds for
+`ThreadConnectionPool`.
 
 ---
 
@@ -1418,7 +1566,10 @@ makes it a pure non-blocking check.
 Caveats worth knowing:
 
 - **Delivery happens only between transactions** — keep the listening
-  connection out of transactions and out of pools.
+  connection out of transactions and out of pools. `listen()` on a pooled
+  connection throws `QueryClientError`: the connection would pass to other
+  borrowers, and the pool replaces it when a notification arrives on it while
+  idle, so nothing would deliver reliably.
 - **Subscriptions do not survive reconnect.** On a dead connection
   (`conn.status() != CONNECTION_OK`), build a fresh `Connection` and re-issue
   `listen()` for every channel (peque deliberately has no `PQreset` wrapper).

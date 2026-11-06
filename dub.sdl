@@ -9,6 +9,14 @@ copyright "Copyright © 2023, Dmytro Katyukha"
 license "MPL-2"
 target "library"
 
+// DMD before 2.113 miscompiles a function that returns a struct through the
+// hidden return slot when its return expression leaves a temporary with a
+// destructor: the caller's slot is filled, but the pointer handed back
+// addresses a dead local. `repo.insert(r).id`, or passing a returned `Result`
+// straight to a function, then reads a freed stack frame. peque returns such
+// structs throughout. LDC is not affected.
+toolchainRequirements dmd=">=2.113.0"
+
 /* dflags "-preview=dip1000" */
 
 dependency "versioned" version=">=0.1.1"
